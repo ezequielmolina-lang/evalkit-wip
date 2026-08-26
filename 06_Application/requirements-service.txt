@@ -1,0 +1,26 @@
+# Job service (lxp_eval.service) — the HTTP layer the Next.js app drives.
+#
+# The engine itself needs `requirements.txt`; this file adds ONLY what the
+# service process needs on top of it. Install both:
+#
+#     python -m pip install -r requirements.txt -r requirements-service.txt
+#
+# Deployment target is a container (Fly.io / Railway), NOT serverless: a
+# framework build + a five-judge council + a browser run takes minutes, and
+# Playwright needs a real Chromium on disk.
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Credentials are encrypted at rest with Fernet (AES-128-CBC + HMAC) and the
+# key comes from EVALKIT_SECRET_KEY. Never in the repo, never in a response.
+cryptography>=42.0.0
+
+# FastAPI's TestClient is httpx-backed; the engine already pulls httpx via the
+# anthropic SDK, but the service tests depend on it directly.
+httpx>=0.27.0
+
+# Multipart parsing for POST /extract (an uploaded norm / pliego / rúbrica).
+# FastAPI raises at ROUTE-DEFINITION time without it, so a missing dependency
+# here takes the whole service down at boot rather than one endpoint at runtime.
+python-multipart>=0.0.9

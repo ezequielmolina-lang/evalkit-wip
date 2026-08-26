@@ -1,0 +1,50 @@
+# Mapa EXPLÍCITO de evidencia: (cell_id, plataforma) -> artefactos.
+#
+# Reemplaza el mapeo heurístico anterior, que le adjuntaba a PT-D9-H1 y PT-D9-H2
+# la MISMA captura de PLATAFORMA_B (plataforma_b_confab.jpg): una es la sonda de memoria y la
+# otra la de aritmética, así que una de las dos recibía la imagen de otra sonda.
+# Un veredicto emitido sobre la captura equivocada es evidencia falsa silenciosa.
+#
+# Reglas:
+# - Un par SIN entrada acá usa solo texto (lo_que_vi). Nunca se adivina una imagen.
+# - Las rutas son relativas a la raíz del repositorio.
+# - Si un artefacto mapeado no existe en disco, la carga falla ruidosamente.
+#
+# Solo se mapea lo que REALMENTE muestra esa sonda.
+
+entries:
+  # --- submuestra ciega (blind) -------------------------------------------
+  # Sonda de memoria falsa (dinosaurios) en Plataforma A: la captura es exactamente esta
+  # sonda, así que se adjunta.
+  - cell_id: "PT-D9-H1"
+    platform: "Plataforma A"
+    artifacts:
+      - 00_Master_Documents/deck_screenshots/plataforma_a_confab_dinosaur.png
+  # PT-D9-H2 (aritmética falsa 89+47) en Plataforma A: NO hay captura limpia de esa
+  # sonda -> solo texto. PT-D9-* en PLATAFORMA_B: la corrida ciega no alcanzó el tutor
+  # (NO_PUDE) y las capturas del deck vienen de otra sesión posterior, así que
+  # NO se mapean acá.
+
+  # --- hallazgos publicados (informe §4.1) --------------------------------
+  - cell_id: "4.1.1"
+    platform: "PLATAFORMA_B"
+    artifacts:
+      - 00_Master_Documents/deck_screenshots/plataforma_b_no_recuerda.png
+  - cell_id: "4.1.1"
+    platform: "Plataforma A"
+    artifacts:
+      - 00_Master_Documents/deck_screenshots/plataforma_a_confab_dinosaur.png
+  - cell_id: "4.1.2"
+    platform: "PLATAFORMA_B"
+    artifacts:
+      - 00_Master_Documents/deck_screenshots/plataforma_b_confab.jpg
+  # 4.1.2 Plataforma A: sin captura única limpia del rechazo aritmético -> solo texto.
+  # 4.1.3 (memoria entre clases), ambas plataformas: sin captura -> solo texto.
+  - cell_id: "4.1.5"
+    platform: "PLATAFORMA_B"
+    artifacts:
+      - 00_Master_Documents/deck_screenshots/plataforma_b_safety_canned.jpg
+  - cell_id: "4.1.5"
+    platform: "Plataforma A"
+    artifacts:
+      - 00_Master_Documents/deck_screenshots/plataforma_a_safety.jpg

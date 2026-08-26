@@ -1,0 +1,167 @@
+# Banco de criterios de evalkit -- NO editar a mano.
+# Generado por lxp_eval/evalkit/banks/build_emc_bank.py
+#
+# Instrumento: AI Tutor Diagnostic Assessment Framework (la organización Education
+# Team, enero 2025), Peru 5th Year Secondary Mathematics. Externo al autor de
+# la rúbrica LXP y específico de tutores de IA.
+#
+# Las anclas pass/fail se COPIAN de las celdas del .docx en tiempo de build; no
+# se reescriben acá. Cada ancla lleva entre paréntesis la sección de la que sale.
+#
+# Los ids van entre comillas a propósito: sin comillas YAML lee 1.10 como 1.1.
+
+bank_id: "emc_peru_ai_tutor"
+version: "1.0"
+
+frameworks:
+  - id: "emc_peru_ai_tutor_v1"
+    name: "EMC Peru -- AI Tutor Diagnostic Assessment Framework"
+    location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx"
+    note: >-
+      la organización Education Team, enero 2025. Unidad de evaluación: las seis
+      dimensiones puntuadas de la Part 8 (100 puntos), con los protocolos de
+      las Parts 4-7 plegados como verificación y anclas adicionales. Parts 2-3
+      (batería de preguntas) son estímulo, no instrumento; Part 11 es un
+      resumen de las Parts 4-8. Ver la cabecera del builder.
+
+areas:
+  - id: "D1"
+    name: "Gradual Release (I Do / We Do / You Do)"
+    evidence_base: "Rosenshine 2012; EMC Peru Part 8.2"
+  - id: "D3"
+    name: "Retrieval practice + spaced + interleaving"
+    evidence_base: "Roediger, Karpicke; EMC Peru Part 8.4-8.5"
+  - id: "D5"
+    name: "Misconception tracking + refutational teaching"
+    evidence_base: "GEEAP + BEA; EMC Peru Part 8.1"
+  - id: "D14"
+    name: "Adaptive Software / Personalization"
+    evidence_base: "VanLehn 2011; EMC Peru Part 8.3"
+  - id: "CAL"
+    name: "Calibración de confianza y metacognición"
+    evidence_base: "EMC Peru Part 5 (hypercorrection effect, Barton) - área nueva: ninguno de los 14 dominios del banco LXP puntúa calibración de confianza"
+  - id: "ENG"
+    name: "Resistencia a la ilusión de engagement"
+    evidence_base: "EMC Peru Part 6 - área nueva: ningún dominio del banco LXP puntúa si el sistema sostiene la práctica intercalada cuando el estudiante pide la bloqueada"
+
+entries:
+  - id: "EMC-8.1"
+    area: "D5"
+    name: "Diagnostic Accuracy"
+    points: 25
+    severity: "ALTA"
+    verification: "[4.4 Misconception-Targeted Response] Test Protocol Ask: \"Para y = x² − 4x + 3, calcula el vértice.\" Provide wrong answer: \"El vértice es (−2, 15)\" This reveals: using +b/2a instead of −b/2a, getting x = −4/2 = −2, then substituting correctly: (−2)² − 4(−2) + 3 = 15"
+    pass_criteria: "(Part 8.1, banda superior) 17-25 puntos - Accurate misconception identification with targeted remediation. Evidencia: Correctly identifies specific misconception and addresses only that gap | (Part 4.4 Misconception-Targeted Response) Identifies specific error (sign in vertex formula); Addresses that specific misconception directly; Does NOT re-explain entire process from scratch; Acknowledges what student did correctly (substitution)"
+    fail_criteria: "(Part 8.1, banda inferior) 0-8 puntos - No misconception identification; treats all errors the same. Evidencia: Generic feedback like 'That's not quite right' | (Part 4.4 Misconception-Targeted Response) Generic: 'That's not quite right, let me show you'; Re-teaches entire calculation from beginning; Doesn't acknowledge correct substitution step; Asks 'How did you get that?' without diagnosing"
+    evidence_base: "EMC Peru Part 1.5 (LearnLM/Eedi RCT 2024): el factor crítico de éxito fue que las preguntas diagnósticas identificaran las concepciones erróneas ANTES de tutorizar."
+    overlaps:
+      - "PT-D5-01"
+      - "PT-D5-03"
+      - "PT-D5-06"
+      - "PT-D14-02"
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "8.1"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 8.1 Diagnostic Accuracy (25 points), tabla de bandas"
+  - id: "EMC-8.2"
+    area: "D1"
+    name: "Instructional Sequencing"
+    points: 20
+    severity: "ALTA"
+    verification: "[4.1 Instruction Before Testing] Test Protocol Student prompt: \"Quiero aprender sobre funciones cuadráticas. Nunca he visto este tema antes.\" Why: Retrieval practice cannot create memories that don't exist. Testing before teaching wastes time and creates frustration. [4.2 Worked Example Quality (Barton-Informed)] Quality Checklist"
+    pass_criteria: "(Part 8.2, banda superior) 14-20 puntos - Clear instruction → worked example → practice sequence. Evidencia: Shows complete solution with labeled steps, dual-coding, decision narration | (Part 4.1 Instruction Before Testing) Begins with instruction (worked example, explanation); Shows complete worked example before asking student to solve; Uses subgoal labeling to break down steps; Includes visualizations where helpful (dual-coding); Narrates decision points (explains WHY)"
+    fail_criteria: "(Part 8.2, banda inferior) 0-6 puntos - Tests before teaching; no worked examples. Evidencia: First interaction is a quiz on new material | (Part 4.1 Instruction Before Testing) Immediately asks a diagnostic/quiz question; Asks 'What do you already know?'; Lists topics without teaching any; Provides abbreviated explanation with jumps; No visual support"
+    evidence_base: "EMC Peru Part 4.1: «Retrieval practice cannot create memories that don't exist. Testing before teaching wastes time and creates frustration.»"
+    overlaps:
+      - "PT-D1-02"
+      - "PT-D1-05"
+      - "PT-D1-06"
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "8.2"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 8.2 Instructional Sequencing (20 points), tabla de bandas"
+  - id: "EMC-8.3"
+    area: "D14"
+    name: "Adaptive Scaffolding"
+    points: 20
+    severity: "ALTA"
+    verification: "[4.3 Exit Ramps from Socratic Questioning] Test Protocol Engage with a problem and get it wrong When tutor asks follow-up, respond: \"No sé\" When asked again: \"De verdad no entiendo\" Third time: \"No entiendo nada, no sé qué hacer\" [4.5 Disengagement Detection] Test Protocol Provide a series of minimal, disengaged responses: \"ok\", \"mmm\", \"no se\", \"a\", \"ya\""
+    pass_criteria: "(Part 8.3, banda superior) 14-20 puntos - Clear exit ramps; detects struggle and adapts. Evidencia: After 2-3 confusion signals, switches to direct instruction | (Part 4.3 Exit Ramps from Socratic Questioning) After 2-3 'I don't know' responses, switches to direct instruction; Provides a worked example with clear steps; Acknowledges confusion and adapts; Says something like 'Déjame explicarte directamente...' | (Part 4.5 Disengagement Detection) Detects pattern of minimal engagement; Adapts: simplifies questions, offers encouragement; Checks in: '¿Te gustaría intentar algo diferente?'; May suggest a break or change of approach"
+    fail_criteria: "(Part 8.3, banda inferior) 0-6 puntos - No adaptation; same response regardless of signals. Evidencia: Continues Socratic questioning after 5+ 'I don't know' | (Part 4.3 Exit Ramps from Socratic Questioning) Continues asking Socratic questions indefinitely; Rephrases same question without changing approach; Says 'just try' repeatedly; Never provides direct instruction | (Part 4.5 Disengagement Detection) Continues as if receiving thoughtful responses; Treats 'a' as legitimate answer choice; No acknowledgment of struggle/disinterest; Plows ahead with curriculum regardless"
+    evidence_base: "EMC Peru Part 1.3: «Exit ramp intelligence: Does it know when to stop Socratic questioning?»"
+    overlaps:
+      - "PT-D14-05"
+      - "PT-D14-07"
+      - "PT-D4-06"
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "8.3"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 8.3 Adaptive Scaffolding (20 points), tabla de bandas"
+  - id: "EMC-8.4"
+    area: "D3"
+    name: "System Architecture"
+    points: 15
+    severity: "MEDIA"
+    verification: "[7.1 Knowledge Tracking] Questions to Investigate: Does the system track mastery at the subtopic level? Does it track prerequisite relationships? Does incorrect answer trigger review of prerequisites? Is mastery based on multiple attempts, not just one correct answer? [7.2 Spaced Retrieval] Questions to Investigate: Does the system ever bring completed topics back for review? Are review intervals system-controlled or student-controlled? Do intervals expand based on retention (Day 1 → 3 → 7 → 14)? Is there any review mechanism, or single-pass curriculum? [7.3 Problem Interleaving] Questions to Investigate: In review mode, are problems from different topics mixed? Are students asked to identify WHICH technique to use? Does system use SSDD-style problems? [7.4 Non-Interference Sequencing (Barton-Informed)] Research Foundation: Craig Barton discusses how teaching highly similar concepts back-to-back causes encoding interference, where the two similar items compete for the same mental \"space\" and become confused. Test Protocol: Setup: System has just finished teaching: Finding roots of quadratics by factoring. Observe: What topic does the system teach next?"
+    pass_criteria: "(Part 8.4, banda superior) 11-15 puntos - System-controlled spaced retrieval with interleaving. Evidencia: Automatically resurfaces content; mixes problem types; non-interference sequencing | (Part 7.4 Non-Interference Sequencing (Barton-Informed)) Graphing basics (different skill type); Linear functions review (different function family); Word problem interpretation (different modality); Geometry interlude (different domain)"
+    fail_criteria: "(Part 8.4, banda inferior) 0-5 puntos - Single-pass curriculum; no spaced retrieval. Evidencia: Students complete module and never see content again | (Part 7.4 Non-Interference Sequencing (Barton-Informed)) Finding roots by quadratic formula (same skill, different method); Completing the square (same skill, different method); Finding vertex (too similar, easily confused)"
+    evidence_base: "EMC Peru Part 7.4: enseñar conceptos muy parecidos de forma consecutiva causa interferencia de codificación."
+    overlaps:
+      - "PT-D3-02"
+      - "PT-D3-03"
+      - "PT-D14-03"
+      - "PT-D14-04"
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "8.4"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 8.4 System Architecture (15 points), tabla de bandas"
+  - id: "EMC-8.5"
+    area: "D3"
+    name: "Desirable Difficulty"
+    points: 10
+    severity: "MEDIA"
+    verification: "[7.5 Desirable Difficulty: Progressive Scaffolding Removal] Research Foundation: The expertise reversal effect means that what helps beginners (heavy scaffolding) actually hurts experts. A good system fades support as mastery develops. Test Protocol: Scaffolding Fade Complete 3 problems correctly with hints available Observe: Does the system reduce hint availability? Complete 3 more problems correctly Observe: Are later problems presented without scaffolding? Request a hint on a later problem: Does the system note this regression?"
+    pass_criteria: "(Part 8.5, banda superior) 7-10 puntos - Progressive scaffolding removal; effortful retrieval required. Evidencia: Initial support fades; tracks fluency not just correctness; notes regression | (Part 7.5 Desirable Difficulty: Progressive Scaffolding Removal) Initial support fades as mastery increases; Later problems require genuine recall without prompts; Tracks fluency (speed + accuracy), not just correctness; Notes when student regresses to needing scaffolding"
+    fail_criteria: "(Part 8.5, banda inferior) 0-3 puntos - System makes practice artificially easy; no scaffolding removal. Evidencia: Every problem has hints visible; students can proceed without genuine recall | (Part 7.5 Desirable Difficulty: Progressive Scaffolding Removal) Every problem has hints visible by default; Students can proceed without genuine recall; No distinction between recognition and recall; Scaffolding level static regardless of performance"
+    evidence_base: "EMC Peru Part 7.5 (expertise reversal effect): lo que ayuda a un principiante perjudica a un experto; un buen sistema desvanece el apoyo."
+    overlaps:
+      - "PT-D1-07"
+      - "PT-D14-06"
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "8.5"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 8.5 Desirable Difficulty (10 points), tabla de bandas"
+  - id: "EMC-8.6"
+    area: "CAL"
+    name: "Confidence Calibration"
+    points: 10
+    severity: "MEDIA"
+    verification: "[5.1 Test Protocol] Setup: Student completes a diagnostic question. Prompt: \"Para y = x² − 4x + 3, ¿cuál es el vértice de la parábola?\""
+    pass_criteria: "(Part 8.6, banda superior) 7-10 puntos - Full confidence calibration with differential feedback. Evidencia: Asks confidence before revealing; varies intensity; leverages hypercorrection | (Part 5.1 Test Protocol) Asks confidence BEFORE revealing correctness; Uses a clear scale: '¿Qué tan seguro/a estás? (1-10)'; High-confidence errors trigger stronger remediation; Tracks calibration over time to improve metacognition; Provides different feedback intensity based on confidence"
+    fail_criteria: "(Part 8.6, banda inferior) 0-3 puntos - No confidence calibration; all errors treated the same. Evidencia: Never asks about confidence; identical feedback regardless of certainty | (Part 5.1 Test Protocol) Never asks about confidence; Asks confidence AFTER revealing answer (useless); Treats all errors identically regardless of confidence; Only binary confidence ('sure/not sure'); No tracking of calibration improvement"
+    evidence_base: "EMC Peru Part 5 (efecto de hipercorrección, Barton): los errores cometidos con alta confianza se corrigen con más eficacia que los de baja confianza."
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "8.6"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 8.6 Confidence Calibration (10 points), tabla de bandas"
+  - id: "EMC-6.1"
+    area: "ENG"
+    name: "Engagement Illusion Resistance"
+    points: 1
+    severity: "ALTA"
+    verification: "[6.1 Test Protocol: Student Requests Blocked Practice] Context: During interleaved review (mixing problems from different topics), the student expresses dissatisfaction. Student prompt: \"Esto es muy confuso. Prefiero practicar un solo tema a la vez. ¿Podemos hacer solo problemas de vértices?\""
+    pass_criteria: "(Part 6.1 Test Protocol: Student Requests Blocked Practice) Acknowledges the feeling: 'Entiendo que se siente más difícil...'; Explains briefly why mixing helps: '...pero esta confusión es exactamente lo que fortalece tu aprendizaje'; Continues with pedagogically appropriate sequence; Does NOT switch to blocked practice just because student requests it; May offer encouragement but maintains learning-optimal structure"
+    fail_criteria: "(Part 6.1 Test Protocol: Student Requests Blocked Practice) Immediately switches to blocked practice; Lets student choose what to review (students avoid what they most need); Prioritizes keeping student happy over effective learning; Says 'Okay, let's do what you prefer'; No explanation of why interleaving matters"
+    evidence_base: "EMC Peru Part 6: los estudiantes prefieren consistentemente la práctica bloqueada, la relectura y la práctica masiva, y en todos los casos el método preferido produce peor aprendizaje. PESO PROPIO: la Part 8 del instrumento no le asigna puntaje a esta dimensión aunque define el test completo con anclas; el peso 1 lo pone este banco, el criterio y las anclas son de la fuente."
+    unscored_in_source: true
+    source:
+      type: "bank"
+      framework: "emc_peru_ai_tutor_v1"
+      original_id: "6.1"
+      location: "04_Reference_Frameworks/EMC_Peru/AI_Tutor_Assessment_Framework_Complete.docx#Part 6.1 Test Protocol: Student Requests Blocked Practice"

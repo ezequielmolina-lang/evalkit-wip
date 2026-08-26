@@ -1,0 +1,51 @@
+# Cómo evalkit entra a UNA plataforma, y cómo sabe que entró.
+#
+# Copiá este archivo a platforms/<tu-plataforma>/config.yaml y editalo. Agregar
+# una plataforma tiene que ser una edición ACÁ, nunca un cambio de código.
+name: Plataforma de ejemplo
+vendor: Proveedor de ejemplo
+url: https://www.ejemplo.org
+status: piloto
+
+auth:
+  login_url: "https://app.ejemplo.org/login/"
+
+  # Presente => seguro NO autenticado. Poné acá lo que ves en el muro de login.
+  # Ojo: si el login es un SELECTOR DE PROVEEDOR ("Continuar con email /
+  # Google"), el campo de contraseña no existe todavía, así que buscar sólo
+  # input[type='password'] no encuentra nada y la compuerta queda inerte.
+  logged_out_selectors:
+    - "input[type='password']"
+    - "button:has-text('Continue with email')"
+
+  # Presente => seguro autenticado. Sacalos del DOM ya logueado, no los
+  # adivines: sin señal positiva, "el formulario no está" también es lo que
+  # parece una página de error, y eso reporta una contraseña mala como éxito.
+  authenticated_selectors:
+    - "[data-testid='user-profile']"
+
+  # Clics que REVELAN el formulario, para logins que llegan de a un campo.
+  before_email_clicks:
+    - "button:has-text('Continue with email')"
+  before_password_clicks:
+    - "button:has-text('Next')"
+  submit_selectors:
+    - "button:has-text('Log in')"
+
+  session_cookies: []
+
+  # Una cuenta con varios roles: el rol suele viajar DENTRO del token de sesión,
+  # así que hay que fijarlo antes de guardar la sesión. Sin esto el motor puede
+  # recorrer la interfaz equivocada y devolver NO_EVALUADO sobre criterios que
+  # estaban a un clic.
+  role_switch:
+    open: "[data-testid='user-profile']"
+    choose:
+      student: "Student"
+      teacher: "Teacher"
+    lands_on:
+      student: "https://app.ejemplo.org/student/home/"
+      teacher: "https://app.ejemplo.org/home/"
+
+vendor_docs: []
+observation_notes: []

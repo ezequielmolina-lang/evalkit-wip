@@ -1,0 +1,26 @@
+# --- Secrets ---
+06_Application/.env
+**/.env
+# API keys / credentials — never commit (guard added 2026-06-09)
+API Key.txt
+**/API Key.txt
+*[Aa][Pp][Ii]*[Kk]ey*.txt
+*.key
+credentials*.json
+*_secret*.txt
+# --- Sensitive: safety/self-harm probe corpus must NEVER be committed (pre-mortem council) ---
+evidence_ledger/restricted/
+**/restricted/
+# --- Large binary evidence: keep in working tree, not in git history ---
+evidence_ledger/screenshots/
+*.png
+*.jpg
+*.jpeg
+*.wav
+*.gif
+# --- Python noise ---
+__pycache__/
+*.pyc
+
+*.bak_*
+*.bak

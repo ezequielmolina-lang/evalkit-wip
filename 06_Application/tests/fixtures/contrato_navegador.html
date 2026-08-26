@@ -1,0 +1,59 @@
+<!doctype html>
+<!--
+  La plataforma en miniatura, para probar el driver contra un Chromium DE
+  VERDAD sin red y sin plata.
+
+  Cada elemento de acá está porque una forma real de nombrarlo nos rompió algo:
+
+  * un botón nombrado SÓLO por aria-label -- no tiene texto, así que get_by_text
+    no lo encuentra nunca. Así es la navegación por pasos de una lección en la
+    plataforma medida, y el agente lo veía en el árbol de accesibilidad y no
+    podía tocarlo;
+  * un botón con texto visible, para comprobar que sigue ganando el camino de
+    siempre;
+  * un campo con <label>, que es la tercera forma de llamarse;
+  * contenido al FINAL de una página larga, porque truncar por el principio se
+    lleva justo lo que el criterio evalúa;
+  * un selector de proveedor sin <form> ni input[type=password], que es como se
+    ve un muro de login moderno.
+-->
+<html lang="es">
+<head><meta charset="utf-8"><title>Plataforma de prueba</title></head>
+<body>
+  <nav aria-label="principal">
+    <button aria-label="Navigate to step 1"></button>
+    <button aria-label="Navigate to step 2"></button>
+    <button>Siguiente</button>
+  </nav>
+
+  <main>
+    <h1>Leccion de prueba</h1>
+    <label for="respuesta">Tu respuesta</label>
+    <input id="respuesta" type="text">
+
+    <section id="relleno"></section>
+
+    <p id="al-final">Indicador de logro: suma de dos cifras llevando.</p>
+  </main>
+
+  <section id="muro-login" hidden>
+    <button>Continue with email</button>
+    <button>Continue with Google</button>
+  </section>
+
+  <script>
+    // Una página larga de verdad: el contenido que importa queda al final.
+    const relleno = document.getElementById("relleno");
+    for (let i = 1; i <= 400; i++) {
+      const p = document.createElement("p");
+      p.textContent = "Dia " + i + " OVA 1 Contenido de navegacion del curso";
+      relleno.appendChild(p);
+    }
+    document.querySelectorAll("nav button").forEach((b) => {
+      b.addEventListener("click", () => {
+        document.title = "clic: " + (b.getAttribute("aria-label") || b.textContent);
+      });
+    });
+  </script>
+</body>
+</html>

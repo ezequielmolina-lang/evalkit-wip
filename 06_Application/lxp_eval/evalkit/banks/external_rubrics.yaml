@@ -1,0 +1,547 @@
+# Banco de criterios de evalkit -- NO editar a mano.
+# Generado por lxp_eval/evalkit/banks/build_external_bank.py
+#
+# Cuatro instrumentos que NO escribió nadie de este proyecto. Las anclas que la
+# fuente enuncia van verbatim; las que no enuncia se declaran faltantes con
+# `needs_anchors: true` y la marca [SIN ANCLA EN LA FUENTE]. Nunca se sintetiza
+# un umbral.
+#
+# Qué se dejó afuera y por qué está en la cabecera del builder. Leer eso antes
+# de agregar nada acá.
+#
+# Los ids van entre comillas a propósito: sin comillas YAML lee 1.10 como 1.1.
+
+bank_id: "external_rubrics"
+version: "1.0"
+
+frameworks:
+  - id: "bea_2025_ai_tutor"
+    name: "BEA 2025 Shared Task on Pedagogical Ability Assessment of AI-powered Tutors"
+    location: "04_Reference_Frameworks/External_Rubrics/BEA_2025_AI_Tutor/BEA_2025_findings.pdf"
+    note: >-
+      Kochmar, Maurya, Petukhova, Srivatsa, Tack, Vasselli (MBZUAI / KU Leuven /
+      NAIST). Cuatro dimensiones pedagógicas con definiciones verbatim y una
+      escala de 3 puntos. La rúbrica LXP ya citaba "BEA-MI/ML/PG/AC" como base
+      de evidencia sin que la fuente estuviera en el banco.
+  - id: "edreports_math_k8"
+    name: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics"
+    location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf"
+    note: >-
+      Unidad: la hoja de calificación (Rating Sheet), que es lo que el
+      instrumento puntúa y ancla. Los indicadores sueltos no entran: no llevan
+      ancla propia y duplicarían el peso de su hoja. Rating Sheet 3.5 tampoco,
+      porque la fuente dice "This section is not scored".
+  - id: "essa_evidence_tiers"
+    name: "ESSA Evidence Tiers (ESSA Section 8101(21)(A)) via US ED / IES / WWC"
+    location: "04_Reference_Frameworks/External_Rubrics/ESSA_Evidence_Tiers/ESSA_finding_tier1-3_evidence.pdf"
+    note: >-
+      Escalera excluyente de 4 niveles. Definiciones verbatim del PDF de
+      IES/NCEE; los umbrales numéricos (350 estudiantes, 2 sitios) del
+      infográfico oficial WWC->ESSA, citado por entrada.
+  - id: "unicef_edtech_for_good"
+    name: "UNICEF EdTech for Good Framework, 1st Edition (Nov 2024)"
+    location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx"
+    note: >-
+      Hoja "Full assessment": 14 secciones puntuadas en 5 pilares. Cada sección
+      trae descripción y puntaje máximo de la fuente, pero el instrumento no
+      dice qué gana el máximo: las 14 declaran la falta de ancla. La hoja
+      "Quick assessment" es un subconjunto y no se importa.
+
+areas:
+  - id: "D2"
+    name: "Cognitive Load Theory + multimedia design"
+    evidence_base: "Sweller / Mayer; EdReports Rating Sheet 3.1"
+  - id: "D4"
+    name: "Formative assessment + mastery gating"
+    evidence_base: "Rosenshine + BEA; EdReports Rating Sheet 3.3"
+  - id: "D5"
+    name: "Misconception tracking + refutational teaching"
+    evidence_base: "BEA 2025 mistake identification/location"
+  - id: "D6"
+    name: "Curriculum coherence + EdReports criteria"
+    evidence_base: "EdReports Gateways 1-2; UNICEF Pillar 3"
+  - id: "D7"
+    name: "Teacher in the loop + dashboards"
+    evidence_base: "EdReports Rating Sheet 3.2; UNICEF stakeholder feedback"
+  - id: "D12"
+    name: "Evidence quality (ESSA Tier 1-4)"
+    evidence_base: "ESSA Section 8101(21)(A) via US ED / IES / WWC"
+  - id: "D14"
+    name: "Adaptive Software / Personalization"
+    evidence_base: "EdReports Rating Sheet 3.4"
+  - id: "PRIV"
+    name: "Privacidad y datos de menores"
+    evidence_base: "UNICEF EdTech for Good, Pillar 1: Safety First"
+  - id: "INFRA"
+    name: "Infraestructura, adaptabilidad local y asequibilidad"
+    evidence_base: "UNICEF EdTech for Good, Pillar 4: Ready to Scale - área nueva: ninguno de los 14 dominios del banco LXP evalúa si el producto puede desplegarse y pagarse en el contexto"
+  - id: "INCL"
+    name: "Accesibilidad, equidad de acceso y género"
+    evidence_base: "UNICEF EdTech for Good, Pillar 5: Leave No One Behind - área nueva: el banco LXP no puntúa accesibilidad para personas con discapacidad ni equidad de género"
+
+entries:
+  - id: "BEA-MI"
+    area: "D5"
+    name: "Mistake identification"
+    points: 1
+    severity: "ALTA"
+    verification: "Definición de la fuente: Since all dialogues in the dataset contain a mistake made by the student, we expect a good quality response from the tutor to include relevant and clear mistake identification. Anotar la respuesta del tutor en la escala de 3 puntos del instrumento. All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium."
+    pass_criteria: "(p. 3) \"Yes\" denotes that it is good (e.g., the mistake is identified clearly and correctly)."
+    fail_criteria: "(p. 3) \"No\" denotes that the particular aspect of the tutor response is bad (e.g., the mistake is not identified at all)."
+    evidence_base: "BEA 2025 Shared Task, definiciones tomadas de Maurya et al. (2025); alineadas por el paper con los principios de las ciencias del aprendizaje (Chi & Wylie 2014; Mayer 2002). PESO PROPIO: el shared task no pondera las dimensiones (evalúa macro F1 por track), el peso 1 lo pone este banco."
+    overlaps:
+      - "PT-D4-02"
+      - "PT-D5-01"
+      - "EMC-8.1"
+    source:
+      type: "bank"
+      framework: "bea_2025_ai_tutor"
+      original_id: "mistake_identification"
+      location: "04_Reference_Frameworks/External_Rubrics/BEA_2025_AI_Tutor/BEA_2025_findings.pdf#p. 2, §2 (definiciones de Maurya et al. 2025)"
+  - id: "BEA-ML"
+    area: "D5"
+    name: "Mistake location"
+    points: 1
+    severity: "ALTA"
+    verification: "Definición de la fuente: In addition to notifying the student about the committed error, a good tutor response should also point to its location in the answer and explain what the error is to help the student remediate it. Anotar la respuesta del tutor en la escala de 3 puntos del instrumento. All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento define la dimensión pero ilustra la escala de 3 puntos sólo para mistake identification. Escala genérica declarada (p. 3): All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium. Falta el umbral específico de esta dimensión; hay que anclarlo antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia el umbral de esta dimensión."
+    evidence_base: "BEA 2025 Shared Task, definiciones tomadas de Maurya et al. (2025); alineadas por el paper con los principios de las ciencias del aprendizaje (Chi & Wylie 2014; Mayer 2002). PESO PROPIO: el shared task no pondera las dimensiones (evalúa macro F1 por track), el peso 1 lo pone este banco."
+    needs_anchors: true
+    overlaps:
+      - "PT-D5-03"
+      - "PT-D5-06"
+      - "EMC-8.1"
+    source:
+      type: "bank"
+      framework: "bea_2025_ai_tutor"
+      original_id: "mistake_location"
+      location: "04_Reference_Frameworks/External_Rubrics/BEA_2025_AI_Tutor/BEA_2025_findings.pdf#p. 2, §2 (definiciones de Maurya et al. 2025)"
+  - id: "BEA-PG"
+    area: "D4"
+    name: "Providing guidance"
+    points: 1
+    severity: "ALTA"
+    verification: "Definición de la fuente: Ideally, a good tutor should not reveal the answer immediately and instead should provide the student with relevant and helpful guidance, consisting, for example, of a hint, an explanation, or a supporting question. Anotar la respuesta del tutor en la escala de 3 puntos del instrumento. All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento define la dimensión pero ilustra la escala de 3 puntos sólo para mistake identification. Escala genérica declarada (p. 3): All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium. Falta el umbral específico de esta dimensión; hay que anclarlo antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia el umbral de esta dimensión."
+    evidence_base: "BEA 2025 Shared Task, definiciones tomadas de Maurya et al. (2025); alineadas por el paper con los principios de las ciencias del aprendizaje (Chi & Wylie 2014; Mayer 2002). PESO PROPIO: el shared task no pondera las dimensiones (evalúa macro F1 por track), el peso 1 lo pone este banco."
+    needs_anchors: true
+    overlaps:
+      - "PT-D4-08"
+      - "PT-D1-06"
+    source:
+      type: "bank"
+      framework: "bea_2025_ai_tutor"
+      original_id: "providing_guidance"
+      location: "04_Reference_Frameworks/External_Rubrics/BEA_2025_AI_Tutor/BEA_2025_findings.pdf#p. 2, §2 (definiciones de Maurya et al. 2025)"
+  - id: "BEA-AC"
+    area: "D4"
+    name: "Actionability"
+    points: 1
+    severity: "ALTA"
+    verification: "Definición de la fuente: Finally, once the guidance is provided to a student, a good tutor response should make it clear to the student what they are supposed to do next. I.e., the tutor's response should not be vague, unclear, or a conversation stopper. Anotar la respuesta del tutor en la escala de 3 puntos del instrumento. All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento define la dimensión pero ilustra la escala de 3 puntos sólo para mistake identification. Escala genérica declarada (p. 3): All aspects are annotated on a 3-point scale, where \"No\" denotes that the particular aspect of the tutor response is bad, \"Yes\" denotes that it is good, and \"To some extent\" denotes that the quality of the response, according to the particular aspect, is medium. Falta el umbral específico de esta dimensión; hay que anclarlo antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia el umbral de esta dimensión."
+    evidence_base: "BEA 2025 Shared Task, definiciones tomadas de Maurya et al. (2025); alineadas por el paper con los principios de las ciencias del aprendizaje (Chi & Wylie 2014; Mayer 2002). PESO PROPIO: el shared task no pondera las dimensiones (evalúa macro F1 por track), el peso 1 lo pone este banco."
+    needs_anchors: true
+    overlaps:
+      - "PT-D4-07"
+    source:
+      type: "bank"
+      framework: "bea_2025_ai_tutor"
+      original_id: "actionability"
+      location: "04_Reference_Frameworks/External_Rubrics/BEA_2025_AI_Tutor/BEA_2025_findings.pdf#p. 2, §2 (definiciones de Maurya et al. 2025)"
+  - id: "EDR-1.1"
+    area: "D6"
+    name: "Focus on Major Work of the Grade"
+    points: 6
+    severity: "MEDIA"
+    verification: "Criterio del instrumento: Materials do not assess topics before the grade level in which the topic should be introduced. (Maximum Points: 2) / Students and teachers using the materials as designed devote the large majority of class time in each grade K-8 to the major work of the grade. (Maximum Points: 4) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "Meets expectations (2 points) / Meets expectations (4 points). Nota al pie del instrumento: The materials should devote at least 65% and up to approximately 85% of class time to the major work of the grade with Grades K-2 nearer the upper end of that range, i.e., 85%."
+    fail_criteria: "Does not meet expectations (0 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "1.1"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 5-6, Rating Sheet 1.1"
+  - id: "EDR-1.2"
+    area: "D6"
+    name: "Coherence"
+    points: 8
+    severity: "MEDIA"
+    verification: "Criterio del instrumento: Each grade's instructional materials are coherent and consistent with the Standards. (Maximum Points: 8) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "Meets expectations (7-8 points)."
+    fail_criteria: "Partially meets expectations (5-6 points) / Does not meet expectations (<5 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "1.2"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 6-7, Rating Sheet 1.2"
+  - id: "EDR-2.1"
+    area: "D6"
+    name: "Rigor and Balance"
+    points: 8
+    severity: "MEDIA"
+    verification: "Criterio del instrumento: The instructional materials reflect the balances in the Standards and help students meet the Standards' rigorous expectations, by giving appropriate attention to: developing students' conceptual understanding; procedural skill and fluency; and engaging applications. (Maximum Points: 8) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "For 'Rigor and Balance' to attain a score of 'Meets Expectations,' materials must earn at least 7 points."
+    fail_criteria: "Does not meet expectations (<5 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "2.1"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 9, Rating Sheet 2.1"
+  - id: "EDR-2.2"
+    area: "D6"
+    name: "Practice-Content Connection"
+    points: 10
+    severity: "MEDIA"
+    verification: "Criterio del instrumento: Materials meaningfully connect the Standards for Mathematical Content and the Standards for Mathematical Practice. (Maximum Points: 10) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "For 'Practice-Content Connection' to attain a score of 'Meets Expectations,' materials must earn at least 9 points."
+    fail_criteria: "Does not meet expectations."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "2.2"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 10, Rating Sheet 2.2"
+  - id: "EDR-3.1"
+    area: "D2"
+    name: "Use and Design to Facilitate Student Learning"
+    points: 8
+    severity: "MEDIA"
+    verification: "Criterio del instrumento: Materials are well designed and take into account effective lesson structure and pacing. (Maximum Points: 8) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "For 'Use and design facilitate student learning' to attain a score of 'Meets Expectations,' material must earn at least 7 points."
+    fail_criteria: "Does not meet expectations (<5 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "3.1"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 12, Rating Sheet 3.1"
+  - id: "EDR-3.2"
+    area: "D7"
+    name: "Teacher Planning and Learning for Success with CCSS"
+    points: 8
+    severity: "MEDIA"
+    verification: "Criterio del instrumento: Materials support teacher learning and understanding of the Standards. (Maximum Points: 8) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "For 'Teacher Planning and Learning for Success with CCSS' to attain a score of 'Meets Expectations,' materials must earn at least 7 points. Meets expectations (7-8 points)."
+    fail_criteria: "Partially meets expectations (5-6 points) / Does not meet expectations (<5 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "3.2"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 13, Rating Sheet 3.2"
+  - id: "EDR-3.3"
+    area: "D4"
+    name: "Assessment"
+    points: 10
+    severity: "ALTA"
+    verification: "Criterio del instrumento: Materials offer teachers resources and tools to collect ongoing data about student progress on the Standards. (Maximum Points: 10) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "For 'Assessment' to attain a score of 'Meets Expectations,' materials must earn at least 9 points. Meets expectations (9-10 points)."
+    fail_criteria: "Partially meets expectations (6-8 points) / Does not meet expectations (<6 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    overlaps:
+      - "PT-D4-05"
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "3.3"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 14, Rating Sheet 3.3"
+  - id: "EDR-3.4"
+    area: "D14"
+    name: "Differentiated Instruction"
+    points: 12
+    severity: "ALTA"
+    verification: "Criterio del instrumento: Materials support teachers in differentiating instruction for diverse learners within and across grades. (Maximum Points: 12) Calificar los indicadores de la hoja y totalizar contra la banda enunciada."
+    pass_criteria: "For 'Differentiated Instruction' to attain a score of 'Meets Expectations,' materials must earn at least 11 points. Meets expectations (10-12 points)."
+    fail_criteria: "Partially meets expectations (8-9 points) / Does not meet expectations (<8 points)."
+    evidence_base: "EdReports.org Quality Instructional Materials Tool: K-8 Mathematics. El puntaje y las bandas son los de la hoja de calificación. ALCANCE: el instrumento evalúa materiales de matemática K-8 alineados a CCSS; las Gateways 1-2 son específicas de ese currículo y no se trasladan sin más a otro sistema educativo."
+    overlaps:
+      - "PT-D14-05"
+      - "EMC-8.3"
+    source:
+      type: "bank"
+      framework: "edreports_math_k8"
+      original_id: "3.4"
+      location: "04_Reference_Frameworks/External_Rubrics/EdReports/EdReports_Math_K8_Review_Criteria.pdf#p. 15, Rating Sheet 3.4"
+  - id: "ESSA-T1"
+    area: "D12"
+    name: "Tier 1 - Strong Evidence"
+    points: 4
+    severity: "ALTA"
+    verification: "Definición estatutaria: Evidence includes a statistically significant and positive [favorable] finding from at least one \"well-designed and well-implemented experimental study\". Buscar los estudios del producto en el What Works Clearinghouse (whatworks.ed.gov) y verificar si alguno cumple."
+    pass_criteria: "(WWC_to_ESSA_Tiers_Infographic.pdf, p. 1) Meets WWC Standards Without Reservations under version 2.1 or later to meet Tier 1; Statistically significant positive effect to meet Tier 1; At least 350 students to meet Tier 1; At least two educational sites to meet Tier 1."
+    fail_criteria: "No alcanza alguno de los cuatro requisitos enunciados para Tier 1 (estándar WWC sin reservas, efecto positivo estadísticamente significativo, 350 estudiantes, 2 sitios)."
+    evidence_base: "ESSA Section 8101(21)(A), vía US ED / IES / WWC. Los 4 tiers de ESSA son una escalera excluyente: aplica el más alto que la evidencia del producto alcance, no se suman."
+    overlaps:
+      - "PT-D12-01"
+    source:
+      type: "bank"
+      framework: "essa_evidence_tiers"
+      original_id: "Tier 1"
+      location: "04_Reference_Frameworks/External_Rubrics/ESSA_Evidence_Tiers/ESSA_finding_tier1-3_evidence.pdf#p. 6, tabla 'ESSA Definitions of Individual Studies Providing Tier 1, Tier 2, or Tier 3 Evidence'"
+  - id: "ESSA-T2"
+    area: "D12"
+    name: "Tier 2 - Moderate Evidence"
+    points: 3
+    severity: "ALTA"
+    verification: "Definición estatutaria: Evidence includes a statistically significant and positive [favorable] finding from at least one \"well-designed and well-implemented quasi-experimental design study\". Buscar los estudios del producto en el What Works Clearinghouse (whatworks.ed.gov) y verificar si alguno cumple."
+    pass_criteria: "(WWC_to_ESSA_Tiers_Infographic.pdf, p. 1) Meets WWC Standards With or Without Reservations under version 2.1 or later to meet Tier 2; Statistically significant positive effect to meet Tier 2; At least 350 students to meet Tier 2; At least two educational sites to meet Tier 2."
+    fail_criteria: "No alcanza alguno de los cuatro requisitos enunciados para Tier 2."
+    evidence_base: "ESSA Section 8101(21)(A), vía US ED / IES / WWC. Los 4 tiers de ESSA son una escalera excluyente: aplica el más alto que la evidencia del producto alcance, no se suman."
+    source:
+      type: "bank"
+      framework: "essa_evidence_tiers"
+      original_id: "Tier 2"
+      location: "04_Reference_Frameworks/External_Rubrics/ESSA_Evidence_Tiers/ESSA_finding_tier1-3_evidence.pdf#p. 6, tabla 'ESSA Definitions of Individual Studies Providing Tier 1, Tier 2, or Tier 3 Evidence'"
+  - id: "ESSA-T3"
+    area: "D12"
+    name: "Tier 3 - Promising Evidence"
+    points: 2
+    severity: "ALTA"
+    verification: "Definición estatutaria: Evidence includes a statistically significant and positive [favorable] finding from at least one \"well-designed and well-implemented correlational study with statistical controls for selection bias\". Buscar los estudios del producto en el What Works Clearinghouse (whatworks.ed.gov) y verificar si alguno cumple."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] La definición estatutaria de este tier no trae los umbrales numéricos que el infográfico oficial sí enuncia para Tier 1 y Tier 2 (350 estudiantes, 2 sitios). Hay que anclarlo antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbrales para este tier."
+    evidence_base: "ESSA Section 8101(21)(A), vía US ED / IES / WWC. Los 4 tiers de ESSA son una escalera excluyente: aplica el más alto que la evidencia del producto alcance, no se suman."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "essa_evidence_tiers"
+      original_id: "Tier 3"
+      location: "04_Reference_Frameworks/External_Rubrics/ESSA_Evidence_Tiers/ESSA_finding_tier1-3_evidence.pdf#p. 6, tabla 'ESSA Definitions of Individual Studies Providing Tier 1, Tier 2, or Tier 3 Evidence'"
+  - id: "ESSA-T4"
+    area: "D12"
+    name: "Tier 4 - Demonstrates a Rationale"
+    points: 1
+    severity: "ALTA"
+    verification: "Definición estatutaria: Tier 4 is evidence that \"demonstrates a rationale, based on high-quality research findings or positive evaluation [findings], that [an] activity, strategy, or intervention is likely to improve student outcomes or other relevant outcomes\". Buscar los estudios del producto en el What Works Clearinghouse (whatworks.ed.gov) y verificar si alguno cumple."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] La definición estatutaria de este tier no trae los umbrales numéricos que el infográfico oficial sí enuncia para Tier 1 y Tier 2 (350 estudiantes, 2 sitios). Hay que anclarlo antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbrales para este tier."
+    evidence_base: "ESSA Section 8101(21)(A), vía US ED / IES / WWC. Los 4 tiers de ESSA son una escalera excluyente: aplica el más alto que la evidencia del producto alcance, no se suman."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "essa_evidence_tiers"
+      original_id: "Tier 4"
+      location: "04_Reference_Frameworks/External_Rubrics/ESSA_Evidence_Tiers/ESSA_finding_tier1-3_evidence.pdf#p. 6, nota al pie de la tabla de definiciones"
+  - id: "UNI-1.1"
+    area: "PRIV"
+    name: "Privacy and Transparency"
+    points: 4
+    severity: "CRITICA"
+    verification: "Descripción de la sección: Privacy and Transparency - This section details how the product notifies users about the collection and purpose of their personal data, ensuring compliance with privacy regulations and promoting transparency. Preguntas del instrumento: (1) Please provide the following information regarding your privacy policy. Check all that apply. (2) Does your product provide alerts or notifications to users about significant updates to the privacy policy, including changes to the privacy notice, data collection practices, or data usage policies? (3) Please add a link to your data privacy and protection terms."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (4) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 1: Safety First. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    overlaps:
+      - "CSP-01"
+      - "CSP-02"
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Privacy and Transparency"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 5 (Pillar 1: Safety First)"
+  - id: "UNI-1.2"
+    area: "PRIV"
+    name: "Data Protection and Privacy - Data Sharing"
+    points: 3
+    severity: "CRITICA"
+    verification: "Descripción de la sección: Data Protection and Privacy - Data Sharing - This section ensures that the product has clear data sharing protocols, which is crucial for fostering transparency and enabling collaboration. Preguntas del instrumento: (1) Does your product share personal or sensitive data with third parties? (2) Please specify the entities with whom you are sharing personal or sensitive information and the purposes for such sharing. (3) Do you have data sharing agreements with these third parties? (4) Do you use external advertisements in the product? (5) Please describe the advertising strategy, specifying the target audience and types of ads used (e.g., in-app ads for online games designed for children)? (6) Data Protection and Privacy - Data Origin - This section outlines data protection considerations for solutions that utilise AI models, emphasising the significance of safeguarding user privacy and data security. (7) Does your product utilise AI in any capacity? (8) Can you state the origin of your datasets? (9) Have any of the datasets been used to train any AI model? (10) Please elaborate on how your product utilises AI and what are your datasets. For example: 'Our model was developed using data from 30,000 schools in Country X' or 'We incorporate a GPT-powered feature, utilising data from OpenAI.'"
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (3) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 1: Safety First. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Data Protection and Privacy - Data Sharing"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 24 (Pillar 1: Safety First)"
+  - id: "UNI-1.3"
+    area: "PRIV"
+    name: "Information Security"
+    points: 3
+    severity: "CRITICA"
+    verification: "Descripción de la sección: Information Security - This section outlines the importance of implementing industry-standard controls to protect the confidentiality, integrity and availability of information. Preguntas del instrumento: (1) Do you have a cybersecurity program that addresses cybersecurity roles, governance and reporting, standards, awareness and risk management? (2) Do you have in place Cybersecurity Technical Best Practices, including patching and vulnerability management, secure device configuration, deployment of prevention systems, identity and access management and networks? (3) Do you have in place cybersecurity threat detection and response technologies and process, ensuring monitoring, detection, response and recovery (4) Have you completed any self-assessment questionnaire from an industry standard body, e.g. The Cloud Security Alliance Consensus Assessments Initiative Questionnaire (CAIQ), related to cybersecurity? (5) Please provide proof of submission to a self-assessment questionnaire from an industry standard body (add link) (6) Has your product been assessed by a third party to prove compliance with an Industry standard cybersecurity framework? For example, ISO Standard or other (7) Please provide proof of a valid certificate (add link)"
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (3) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 1: Safety First. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Information Security"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 53 (Pillar 1: Safety First)"
+  - id: "UNI-1.4"
+    area: "PRIV"
+    name: "Safeguards"
+    points: 2
+    severity: "CRITICA"
+    verification: "Descripción de la sección: Safeguards - Our suite of moderation, machine-generated content, and child protection mechanisms ensures a safe and appropriate environment for users. Preguntas del instrumento: (1) Does your product have direct interactions between users, or does it allow users to contribute content? (2) Please explain what mechanisms you have in place to ensure that any interactions or contributions are appropriately moderated (3) Does the product use Large Language Models (LLM) or other AI technologies to generate pedagogical content? (4) Please explain briefly how machine-generated content is utilised. (5) Do you have AI guardrails in place, such as safety controls that monitor and regulate a user's interaction with AI models? (6) Do you have mechanisms for reviewing and sampling machine generated content to check accuracy? (7) Please explain how the product ensures that users receive age-appropriate content and experiences. (8) Hardware Health and Safety standards - This section discusses the safety of hardware solutions or solutions that include a hardware component, which is important to ensure their reliability and prevent potential hazards. (9) Does your product include any hardware? (10) Does the manufacturer certify the product with an industry standard (for example, CE mark) to demonstrate that the hardware device complies with health and safety standards? (11) Please provide proof of the certification (add link). (12) This section on Data Protection and Privacy ensures that the product has clear data sharing protocols, fostering transparency and enabling collaboration. It is important to outline data protection considerations for solutions that utilise AI models, emphasising the significance of safeguarding user privacy and data security."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (2) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 1: Safety First. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Safeguards"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 74 (Pillar 1: Safety First)"
+  - id: "UNI-2.1"
+    area: "D12"
+    name: "Evidence and Impact Assessment"
+    points: 6
+    severity: "ALTA"
+    verification: "Descripción de la sección: Evidence and Impact Assessment - This section explores the product's approach to achieving impact and the supporting evidence, highlighting the importance of understanding the product's impact strategy. Preguntas del instrumento: (1) Please provide an overview of the learning theories behind the product, its design to achieve learning objectives, and how impact is measured, such as through your logic model, theory of change, or whitepaper. (2) Which of the following best describes the level/strength of evidence that you have of the impact of your solutions on learning outcomes. Select all that apply. (3) What type of evidence has been produced for your solution? (4) What type of evidence has been produced for your solution? (5) Key findings of the evidence (6) Link to the evidence (7) Was some of the evidence or research conducted by a third party or external group? (8) Evidence can be published in the Learning Cabinet (9) Has your EdTech product third party evaluations or certifications? If so, please specify."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (6) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 2: Impact on Learning. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    overlaps:
+      - "ESSA-T1"
+      - "ESSA-T2"
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Evidence and Impact Assessment"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 106 (Pillar 2: Impact on Learning)"
+  - id: "UNI-2.2"
+    area: "D7"
+    name: "Stakeholder Feedback"
+    points: 3
+    severity: "MEDIA"
+    verification: "Descripción de la sección: Stakeholder Feedback - This section explores the methods and importance of collecting and utilising user feedback to enhance product development and customer satisfaction. Preguntas del instrumento: (1) Is user feedback from individual users (students, teachers, parents or caregivers, etc), institutional users (governments or companies) systematically collected, available and used to constantly inform and improve the product? (2) Please share links to any documentation that demonstrates how you utilise user feedback to improve the product."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (3) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 2: Impact on Learning. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Stakeholder Feedback"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 135 (Pillar 2: Impact on Learning)"
+  - id: "UNI-2.3"
+    area: "D7"
+    name: "Usage and Engagement"
+    points: 4
+    severity: "MEDIA"
+    verification: "Descripción de la sección: Usage and Engagement - This section analyses user data to gain insights into your users' demographics, behaviours and engagement patterns, helping you make informed product decisions. Preguntas del instrumento: (1) Which target audience is your solution developed for? (2) Is your EdTech product primarily designed for use in a classroom setting? (3) Please describe the recommended usage of your product, including frequency of use (e.g., times per week), whether it is designed for individual or group use, and the suggested duration for each session. (4) Does your product require supervision or specific skills to use? (5) Please explain what type of supervision or skills are required to use this product? (6) Please indicate all appropriate age groups for the users of this product. (7) What skills does your product develop? (8) How many users do you have? (total active + inactive users) (9) How do you define your active users? (10) How is your active user definition linked to the learning outcomes in your product? For instance, your tool needs to be used x times a week in order for it to deliver and sustain the expected learning outcomes. (11) How many active users do you have? (12) What percentage of your active users are girls/women? (13) How many downloads does your product have on Google Play or Apple App Store? (14) What is your year-on-year user growth rates for each of the past two years? (15) What is your product churn rate? Please include your exact way of measuring churn. Tooltip: This information will not be published. (16) In how many countries is your product widely adopted? (Please indicate only the number of countries with a significant number of active users) (17) Which countries have the majority of your active users? (18) Could you explain the broad adoption of your product within particular geographic contexts? (19) Do you gather and assess data on how users interact with your product to understand their engagement levels? (20) Please provide a breakdown of user engagement metrics, such as average session duration and frequency of use. How do these metrics inform your understanding of user interaction with your product? (21) This section analyses user data to gain insights into your users' demographics, behaviours, and engagement patterns, helping you make informed product decisions. It is important to understand your users' needs and preferences to continuously improve your product."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (4) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 2: Impact on Learning. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Usage and Engagement"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 142 (Pillar 2: Impact on Learning)"
+  - id: "UNI-3.1"
+    area: "D6"
+    name: "Learning objectives"
+    points: 8
+    severity: "ALTA"
+    verification: "Descripción de la sección: Learning objectives - This section explains the learning objectives and their relation to a specific curriculum, which is important for understanding the educational goals and outcomes. Preguntas del instrumento: (1) Is the product linked to a national curriculum or a global curricular framework(s)? Check those that apply: (2) List the curriculum(s) and framework(s) your product is currently applied to. (3) Please describe in a single sentence the primary learning objective(s) of your EdTech tool. Example: 'To enhance math skills in students aged 6-12 by utilising adaptive learning algorithms to personalise instruction for each learner.' (4) Pedagogical design - This section delves into the educational approach and structure behind the product, emphasising its significance in delivering effective learning experiences. (5) Could you provide details about the pedagogical design of your product? Specifically, explain how educational theories are incorporated into the design and implementation of the product. (6) Flexibility. Does the product provide flexibility for learner or teacher to act out their intentions and choose their preferred ways of working and get information concerning the learning process? Check those that apply: (7) Learner engagement. Does the product promote significant learner engagement through interactive features and content connection? Check those that apply: (8) Creativity. Does the product enable learners to express themselves and solve problems creatively? Check those that apply: (9) Collaboration. Does the product enable a digital social interaction between learners and instructor, like peer-assessment, peer-support, or collaborative work? Check those that apply: (10) Multimodality. Does the product offer multiple ways of interacting with the content? Check those that apply: (11) Gamification. If the product uses some type of gamification, explain the details below. (12) Assessment. Does the product include assessment tools and functionalities to evaluate learners' progress and performance? Check those that apply: (13) User Experience - This section focuses on the application of best practices in User Experience (UX) / User Interface (UI) design. Best practices in UX/UI design are crucial for creating user-friendly and engaging digital experiences. (14) How have you ensured an intuitive user interface for your users? Please provide examples of improvements, such as the consistent application of usability tests to enhance the product. (15) How do you use evidence and data insights on how your product improves learning outcomes, to inform enhancements to your product? How do you use evidence and data insights on how your product improves learning outcomes, to inform enhancements to your product? (16) Was your product developed with a particular geographical location as focus? Please specify the region, country, or continent if applicable. (17) Has your product undergone testing in specific geographical contexts? If applicable, please list those areas. (18) Is there documentation, contextual support, tutorials and other types of help available to users? (19) How do you ensure that the content used on your product is of high quality? The content used in the product (check those that apply): (20) Communication features. Do your solution's features support communication and collaboration among learners, educators, and stakeholders to boost engagement and knowledge sharing? Select all that apply: (21) This section analyses user data to gain insights into your users' demographics, behaviours, and engagement patterns, helping you make informed product decisions. It is important to understand your users' needs and preferences to continuously improve your product."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (8) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 3: Designed for Children. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Learning objectives"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 202 (Pillar 3: Designed for Children)"
+  - id: "UNI-4.1"
+    area: "INFRA"
+    name: "Infrastructure"
+    points: 3
+    severity: "ALTA"
+    verification: "Descripción de la sección: Infrastructure – This section covers the infrastructure requirements (devices, operating system, connectivity, interoperability) that are essential for successful product implementation. Preguntas del instrumento: (1) On what types of devices can your product be used? (2) Please select the options that describe your product's deployment. Choose all that apply. (3) What operating systems are compatible with your product? (4) Is the product specifically designed to work on low-cost devices? (5) Please elaborate on how you have designed for low-cost devices (for example, storage size, memory, resolution, screen size). (6) Does the product work without connectivity? (7) What is the minimum internet connectivity requirement for using your product effectively? (8) Can this product be integrated or connected with the following third-party platform types?"
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (3) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 4: Ready to Scale. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Infrastructure"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 278 (Pillar 4: Ready to Scale)"
+  - id: "UNI-4.2"
+    area: "INFRA"
+    name: "Local Adaptability"
+    points: 4
+    severity: "ALTA"
+    verification: "Descripción de la sección: Local Adaptability – This section seeks to understand how easy it is to adapt the solution to different contexts Preguntas del instrumento: (1) What types of training materials and user guidance do you offer? (2) Which language(s) are your training materials and user manuals in? (3) Which target audiences does training and user guidance cater to? Please select all applicable options to indicate for whom your training materials and user guidance is intended: (4) What type of online technical support is available? (5) Does the product have community support options? Check all that apply. (6) Can the product's curriculum and educational content be customised to align with local culture and values? (7) Could you provide examples detailing how the product's curriculum and educational content can be customised to align with local cultures and values, or how such customisations have been implemented previously? (8) Can the product's visual/audiovisual content be tailored to suit local culture and values? (9) Could you provide examples detailing how the product's visuals and non-curriculum content can be customised to align with local cultures and values, or how such customisations have been implemented previously? (10) In which languages is the product currently available? Please list all available languages. (11) Does the product allow customisation of the content by the users? Please explain how (e.g. teachers can modify the content for differentiation purposes): (12) Can your product accommodate multiple writing systems? If so, please specify which scripts (e.g., Chinese, Arabic) are supported. (13) Are you prepared to consider translating your product into another language, and if so, how long do you estimate this process would take? (14) Does the product offer options for exporting data? (15) What types of data can be exported from the product? Select all that apply: (16) Does the product offer options for importing data? (17) What degree of automation is available for user onboarding? Please select all applicable options. (18) Is the software, content, data, and/or hardware openly licensed under one of the open-source licenses recommended by the Digital Public Goods Alliance? https://github.com/DPGAlliance/dpg-resources/wiki/2.-Open-Licensing (19) Please specify the licenses used by your product, differentiating between hardware and software components. (20) Is your solution a certified Digital Public Good? https://digitalpublicgoods.net/registry/"
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (4) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 4: Ready to Scale. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Local Adaptability"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 322 (Pillar 4: Ready to Scale)"
+  - id: "UNI-4.3"
+    area: "INFRA"
+    name: "Affordability"
+    points: 4
+    severity: "MEDIA"
+    verification: "Descripción de la sección: Affordability – This section covers the business and pricing models of the EdTech tool Preguntas del instrumento: (1) Who is the target customer for your product (who pays)? (2) What is the product's pricing model? Please choose the models that is most relevant to your product. (3) Please explain your pricing strategy. Can you provide concrete examples, such as specific pricing tiers, discount models, or subscription plans, to demonstrate how this strategy is applied in practice? (4) Do you provide adjustable/context dependent pricing options? For example, pricing based on geographic or economic factors (such as purchasing parity pricing) (5) Please specify the indicative annual starting price per user in USD, if applicable. (6) What types of pricing tiers do you offer? (7) Organisation and Operations – This section covers the stage and size of your organisation, and the experience with large scale implementations (8) What is the stage of your organisation? (9) What is the year of establishment of your organisation? (10) What is the current employee count within your organisation? (11) If your company is listed in Pitchbook, please share a link here. (12) What experience does your organisation have with large scale implementations? (13) Could you describe any significant projects your organisation has executed on a large scale? Example: Implemented across 50 schools in Vietnam, reaching over 4,000 users (14) Link to a case study or additional information about a large scale implementation your organisation has implemented. (15) This section aims to understand how users with disability have been taken into account in the design of the product"
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (4) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 4: Ready to Scale. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Affordability"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 402 (Pillar 4: Ready to Scale)"
+  - id: "UNI-5.1"
+    area: "INCL"
+    name: "Accessibility of Design"
+    points: 2
+    severity: "ALTA"
+    verification: "Descripción de la sección: Accessibility of Design – This section aims to understand how users with disability have been taken into account in the design of the product Preguntas del instrumento: (1) Does the product fulfil the WCAG 2.1 level AA requirements? (https://www.w3.org/TR/WCAG21/) (2) Have you conducted accessibility testing with automatic tools, by experts or with individuals with disabilities, such as a blind person using a screen reader? If so, please specify the type(s) of testing performed and provide examples."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (2) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 5: Leave No One Behind. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Accessibility of Design"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 458 (Pillar 5: Leave No One Behind)"
+  - id: "UNI-5.2"
+    area: "INCL"
+    name: "Equity of access"
+    points: 2
+    severity: "ALTA"
+    verification: "Descripción de la sección: Equity of access – This section aims to understand if and how the product and its design address inclusion and equity Preguntas del instrumento: (1) What measures have you implemented to overcome disparities in access, opportunities, and outcomes among learners, ensuring that children from all backgrounds can benefit from your product? (2) Is your product designed to specifically support disadvantaged or marginalised children? Please specify which group(s). (3) How does the product cater to the needs of marginalised or disadvantaged child groups? (4) List and explain the principles of inclusion and equity that your product adheres to across its design, functionality, user interface and business model. (e.g. representation of users, power dynamics, composition of the team behind the product, etc.) (5) How does your product promote AI equity? Please briefly describe your approaches to e.g., mitigating bias and ensuring transparency & accountability."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (2) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 5: Leave No One Behind. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Equity of access"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 467 (Pillar 5: Leave No One Behind)"
+  - id: "UNI-5.3"
+    area: "INCL"
+    name: "Gender"
+    points: 2
+    severity: "MEDIA"
+    verification: "Descripción de la sección: Gender – This section aims at understanding if and how the product and it's design promotes equity of genders Preguntas del instrumento: (1) Does your product collect user data disaggregated by sex to inform its development and improvement? (2) Describe how gender inclusivity is reflected in your product’s development process. How do you ensure diverse gender representation? How do you use the sex-disaggregated data collected? (3) Is your product designed to be equally accessible and usable by women and girls as it is by men and boys? (4) Have you identified differences in the ways or extent that women/girls and men/boys will benefit from the product? For example: access to learning opportunities, status, or will the innovation be affected by unequal decision-making ability within households, by mobility restrictions on women and girls, by violence against women, by gender stereotypes, by the unequal division of care responsibilities inside the family."
+    pass_criteria: "[SIN ANCLA EN LA FUENTE] El instrumento enuncia el puntaje máximo de la sección (2) y sus preguntas, pero NO dice qué respuestas ganan el máximo ni cuál es el mínimo aceptable. Hay que anclarlo con el evaluador antes de puntuar."
+    fail_criteria: "[SIN ANCLA EN LA FUENTE] Ver pass_criteria: la fuente no enuncia umbral para esta sección."
+    evidence_base: "UNICEF EdTech for Good Framework, 1a edición (Nov 2024), Pillar 5: Leave No One Behind. Puntaje máximo de la fuente. Formato de autoevaluación del proveedor con columna 'Evaluator score': las respuestas hay que verificarlas, no aceptarlas."
+    needs_anchors: true
+    source:
+      type: "bank"
+      framework: "unicef_edtech_for_good"
+      original_id: "Gender"
+      location: "04_Reference_Frameworks/External_Rubrics/UNICEF_EdTech_for_Good/EdTechForGoodFramework_1stEdition_1_0.xlsx#hoja 'Full assessment', fila 486 (Pillar 5: Leave No One Behind)"

@@ -1,0 +1,25 @@
+anthropic>=0.40.0
+openpyxl>=3.1.0
+python-docx>=1.1.0
+pypdf>=4.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0
+rich>=13.0.0
+
+# Second PDF reader (lxp_eval.evalkit.extract). pypdf and pdfplumber fail on
+# different producers -- pdfplumber rebuilds text from character positions and
+# gets it out of layouts pypdf returns blank for -- and only the SECOND blank
+# means the PDF is a scan. An uploaded norm is worth a second attempt.
+pdfplumber>=0.11.0
+
+# Browser-test agents (lxp_eval.browser_agents)
+# After installing this package, run once:  python -m playwright install chromium
+playwright>=1.40.0
+
+# Tests
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+# Authors the PDF fixtures in tests/test_extract.py. Tests build every document
+# they read with the real library instead of committing binary blobs: a .docx in
+# git is a file nobody can review in a diff, and it rots in silence.
+PyMuPDF>=1.24.0
