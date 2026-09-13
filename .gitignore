@@ -24,3 +24,16 @@ __pycache__/
 
 *.bak_*
 *.bak
+
+# --- Entornos y artefactos de build (añadido con el CI) ---
+.venv/
+venv/
+node_modules/
+.next/
+.next-check/
+*.tsbuildinfo
+06_Application/runs/
+.pytest_cache/
+*.egg-info/
+build/
+dist/

@@ -1,6 +1,8 @@
 """The site's worked example, built from a real run and anonymised."""
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from lxp_eval.web_sample import anonymise, build_plan, build_report, render_report_ts
@@ -46,6 +48,7 @@ def _record():
     }
 
 
+@pytest.mark.needs_real_platform
 def test_the_vendor_and_the_people_are_gone():
     out = json.dumps(anonymise(_record()), ensure_ascii=False)
     for secreto in ("Plataforma A", "plataforma_a-learning", "Estudiante de prueba", "ejemplo.org"):

@@ -1,5 +1,7 @@
 # evalkit
 
+[![CI](https://github.com/ezequielmolina-lang/evalkit-wip/actions/workflows/ci.yml/badge.svg)](https://github.com/ezequielmolina-lang/evalkit-wip/actions/workflows/ci.yml)
+
 > **Work in progress.** Funciona de punta a punta y hay una corrida completa
 > contra una plataforma real detrás de los ejemplos, pero está en desarrollo
 > activo: la interfaz se mueve, los formatos pueden cambiar sin aviso y hay
@@ -65,7 +67,8 @@ recon → rúbrica → consejo de jueces → tu aprobación → recorrido → pu
 ```bash
 cd 06_Application
 python -m pip install -r requirements.txt -r requirements-service.txt
-python -m playwright install chromium      # sólo para corridas reales
+#   ...o `-r requirements.lock` para las versiones exactas que el CI verifica
+python -m playwright install chromium      # corridas reales y tests de navegador
 
 export ANTHROPIC_API_KEY="tu-clave"
 python evalkit_app.py                      # levanta motor + web y abre el navegador
@@ -91,10 +94,17 @@ guardar la sesión.
 cd 06_Application && python -m pytest -q
 ```
 
-929 pasan. **17 saltan**, y el motivo está escrito: leen los datos de una
+947 pasan en menos de un minuto. **16 saltan** marcadas
+`needs_real_platform`, y el motivo está escrito: leen los datos de una
 evaluación real —los `config.yaml` de las plataformas medidas, sus mapas de
-superficies, la evidencia capturada— que este repositorio no publica. Poné tu
-propia plataforma y las que dependen de configuración empiezan a correr solas.
+superficies, la evidencia capturada— que este repositorio no publica. Si los
+tenés, `pytest --real-platform` las incluye. Otras 2 saltan fuera de Windows:
+son las de ACL, y por eso el CI corre también en Windows.
+
+Siete de esas pruebas (`tests/test_driver_contract.py`) levantan un **Chromium
+de verdad** contra una página local. Sin navegador instalado se saltean solas;
+con `EVALKIT_REQUIRE_BROWSER=1` —lo que hace el CI— faltar el navegador es un
+error, no un salteo silencioso.
 
 Vale decir qué NO cubren esos tests: corren contra clientes falsos, así que ven
 la lógica y no ven el mundo. Los errores más caros de este proyecto —una API que

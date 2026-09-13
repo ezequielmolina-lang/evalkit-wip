@@ -1,0 +1,42 @@
+# Metadatos del paquete y configuración de pytest, en un solo lugar.
+#
+# POR QUÉ EXISTE. Sin esto `import lxp_eval` sólo resolvía porque pytest.ini
+# empujaba el directorio al sys.path: la suite corría y `python -c "import
+# lxp_eval"` desde otro directorio, no. Eso alcanza para una máquina; no alcanza
+# para un contenedor, ni para un CI, ni para el `pip install -e .` que hace
+# cualquiera que quiera tocar el motor desde afuera.
+#
+# Las dependencias NO se repiten acá. Se leen de requirements.txt, que es donde
+# están los comentarios que explican por qué está cada una (por qué hay DOS
+# lectores de PDF, por qué python-multipart tira el servicio entero al arrancar
+# si falta). Duplicar esa lista es garantizar que las dos versiones se separen.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalkit"
+version = "0.1.0"
+description = "Evaluación agéntica de plataformas de aprendizaje, con evidencia hasheada"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dynamic = ["dependencies", "optional-dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+optional-dependencies.service = { file = ["requirements-service.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["lxp_eval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Se mantiene a propósito: el README promete que `pip install -r
+# requirements.txt` + pytest alcanza, sin instalar el paquete. Con
+# `pip install -e .` deja de hacer falta, pero no molesta.
+pythonpath = ["."]
+markers = [
+  "needs_real_platform: necesita los datos de una evaluación real (config.yaml de una plataforma medida, su mapa de superficies, su evidencia) que este repo no publica. Se saltea salvo que se pase --real-platform o EVALKIT_REAL_PLATFORM=1.",
+]

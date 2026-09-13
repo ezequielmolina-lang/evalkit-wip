@@ -13,6 +13,7 @@ BANKS = Path(__file__).resolve().parents[1] / "lxp_eval/evalkit/banks"
 PLATAFORMA_A = Path(__file__).resolve().parents[1] / "platforms/plataforma_a/surfaces.yaml"
 
 
+@pytest.mark.needs_real_platform
 def test_navigation_comes_from_the_platform_not_the_probe():
     """The same three navigation steps were hand-copied into eight probes.
 
@@ -36,6 +37,7 @@ def test_navigation_comes_from_the_platform_not_the_probe():
     assert "anotar el grado" not in joined
 
 
+@pytest.mark.needs_real_platform
 def test_a_sequence_becomes_one_send_and_one_read_per_stimulus():
     bank = ProbeBank.load(BANKS / "probes_sv_v7_4.yaml")
     surfaces = load_surfaces(PLATAFORMA_A)
@@ -47,6 +49,7 @@ def test_a_sequence_becomes_one_send_and_one_read_per_stimulus():
     assert sum(1 for s in steps if s.startswith("Esperar")) == 3
 
 
+@pytest.mark.needs_real_platform
 def test_an_unavailable_surface_refuses_instead_of_substituting():
     """Declaring what the account cannot reach beats discovering it mid-run.
 
@@ -81,6 +84,7 @@ def test_every_entry_has_countable_verdict_anchors():
         ), f"{cid} neither sends nor reads"
 
 
+@pytest.mark.needs_real_platform
 def test_a_read_only_probe_still_reads_the_surface():
     """Not every probe sends a message. Reading a lesson is a probe too.
 
@@ -101,6 +105,7 @@ def test_a_read_only_probe_still_reads_the_surface():
     assert not any("escribir exactamente" in s for s in steps)
 
 
+@pytest.mark.needs_real_platform
 def test_a_privacy_probe_reads_the_published_policy_not_the_app():
     """CSP criteria are about what the published policy DECLARES, not app behaviour.
 
