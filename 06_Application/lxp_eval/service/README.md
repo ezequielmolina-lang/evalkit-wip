@@ -308,7 +308,9 @@ invariants:
   so `JobRunner.runnable_probes` drops it and its criterion scores `NO_EVALUADO`.
   This is the existing gate, untouched — the batch only chooses not to wait for
   what has no gate. Default `approval_policy` is `human`: today's behaviour, the
-  job parks at `awaiting_approval`.
+  job parks at `awaiting_approval`. The same `approval_policy: "human" | "auto"`
+  is accepted on `POST /jobs`, so a single request can also run unattended —
+  build, approve and run as one supervised chain — with the identical gate rule.
 * **An auto-approved run is never presented as human-approved.** The approval row
   on the ledger carries the machine actor (`serialize.APPROVAL_NOTE_AUTO`), its
   provenance line reads "aprobado automáticamente", and the report's

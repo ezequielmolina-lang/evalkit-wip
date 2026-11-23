@@ -233,6 +233,7 @@ def _public_state(record: JobRecord, store: JobStore) -> dict:
         "platform": record.platform,
         "objective": record.objective,
         "areas": list(record.areas),
+        "approvalPolicy": record.approval_policy,
         "hasCredentials": record.has_credentials,
         "evidencePath": str(store.ledger_path(record.job_id)),
         "createdAt": record.created_at,
@@ -362,6 +363,33 @@ def _ledger_the_signoff(
             "gated_class": probe["signoffReason"],
         },
     )
+
+
+def auto_approve(store: JobStore, record: JobRecord) -> None:
+    """Aprobar el plan sin humano, dejando el gate exactamente donde estaba.
+
+    Lo comparten el corredor de lotes y POST /jobs bajo `approval_policy="auto"`.
+    Es `POST /jobs/{id}/approve` menos la persona: el plan por defecto (sin
+    ediciones, `probes=None` -> `runnable_probes` toma TODAS las pruebas
+    guardadas) y el actor MÁQUINA en la fila del ledger. No se escribe ningún
+    signoff, así que cada prueba con compuerta la deja afuera
+    `JobRunner.runnable_probes` y su criterio vuelve NO_EVALUADO. La firma sigue
+    siendo por prueba, y acá no hay ninguna.
+
+    Mismo orden que el endpoint: guardar el registro primero, poner la fila en el
+    ledger después y ANTES de que `execute` corra sobre su autoridad.
+    `_ledger_the_approval` es fail-closed, así que una aprobación que no se puede
+    registrar no surte efecto.
+    """
+    record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
+    record.approved_plan = {
+        "criteria": serialize.criteria_out(record.criteria),
+        "probes": None,
+        "sampling": record.sampling,
+    }
+    record.approved_at = now()
+    store.save(record)
+    _ledger_the_approval(store, record, note=serialize.APPROVAL_NOTE_AUTO)
 
 
 # --- the app ----------------------------------------------------------------
@@ -496,6 +524,28 @@ def create_app(
             return record
         return await coro_fn(record)
 
+    async def _build_then_maybe_run(record: JobRecord) -> JobRecord:
+        """build_plan y, SÓLO bajo approval_policy="auto", aprobar y ejecutar.
+
+        La única cadena que maneja POST /jobs, así que humano y auto comparten
+        camino y el default humano queda intacto: arma el plan y PARA en
+        awaiting_approval, el comportamiento de hoy. Bajo `auto` las pruebas SIN
+        compuerta siguen solas; cada prueba con compuerta queda detrás de su
+        signoff -- que esto nunca escribe -- y vuelve NO_EVALUADO.
+
+        Toda la cadena corre bajo la MISMA supervisión que build_plan solo: en
+        segundo plano es una sola tarea supervisada, así que un cuelgue en la
+        etapa de run lo atrapa el watchdog en vez de quedar colgado. Sólo se
+        aprueba un plan que llegó a la compuerta: un build_plan que murió quedó en
+        `error` y no se ejecuta.
+        """
+        await runner.build_plan(record)
+        fresh = store.get(record.job_id) or record
+        if fresh.approval_policy == "auto" and fresh.stage == Stage.AWAITING_APPROVAL:
+            auto_approve(store, fresh)
+            await runner.execute(fresh)
+        return store.get(record.job_id) or fresh
+
     def _require(job_id: str) -> JobRecord:
         record = store.get(job_id)
         if record is None:
@@ -596,6 +646,12 @@ def create_app(
             platform=platform_label(body.platform.url),
             platform_kind=body.platform.kind or "",
             documents=[d.model_dump() for d in body.documents],
+            # "human" (el default) parquea en awaiting_approval, como siempre.
+            # "auto" aprueba el plan y corre las pruebas SIN compuerta sin
+            # esperar a nadie; las de compuerta quedan sin firmar y vuelven
+            # NO_EVALUADO. La cadena entera (build -> aprobar -> run) va por
+            # `_build_then_maybe_run`, supervisada igual que build_plan solo.
+            approval_policy=body.approval_policy,
         )
 
         # Credentials: encrypted into their own file, immediately, and dropped
@@ -614,7 +670,7 @@ def create_app(
             record.has_credentials = True
             store.save(record)
 
-        await _drive(runner.build_plan, record)
+        await _drive(_build_then_maybe_run, record)
         return {"job_id": record.job_id, "jobId": record.job_id}
 
     # --- read --------------------------------------------------------------

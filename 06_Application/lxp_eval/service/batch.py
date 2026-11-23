@@ -53,11 +53,10 @@ from typing import Any, Awaitable, Callable, Protocol, Sequence
 from ..config import CONFIG
 from ..evalkit.framework import NO_EVALUADO
 from ..evalkit.generator import DEFAULT_RISK_POLICY, RISK_POLICIES
-from . import serialize
-from .app import _ledger_the_approval  # la MISMA fila de aprobación que /approve
+from .app import auto_approve  # la MISMA aprobación-máquina que POST /jobs bajo "auto"
 from .crypto import SecretBox, ServiceError
 from .jobs import Engine, JobRunner, Stage, platform_label
-from .store import JobRecord, JobStore, now
+from .store import JobRecord, JobStore
 from .watchdog import Clock, Supervisor
 
 logger = logging.getLogger(__name__)
@@ -278,35 +277,6 @@ def _load_documents(documents: Sequence[dict]) -> list[dict]:
     return out
 
 
-# --- auto-approval ----------------------------------------------------------
-
-
-def _auto_approve(store: JobStore, record: JobRecord) -> None:
-    """Aprobar el plan sin humano, dejando el gate exactamente donde estaba.
-
-    Es `POST /jobs/{id}/approve` menos la persona: el plan por defecto (sin
-    ediciones, `probes=None` -> `runnable_probes` toma TODAS las pruebas
-    guardadas) y el actor máquina en la fila del ledger. No se escribe ningún
-    signoff: por eso cada prueba con compuerta queda fuera de la corrida y su
-    criterio vuelve NO_EVALUADO. La firma sigue siendo por prueba, y acá no hay
-    ninguna.
-
-    Mismo orden que el endpoint: guardar el registro primero, poner la fila en el
-    ledger después y ANTES de que `execute` corra sobre su autoridad. El helper
-    es fail-closed a propósito (ver `app._ledger_decision`): una aprobación que
-    no se puede registrar no debe surtir efecto.
-    """
-    record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
-    record.approved_plan = {
-        "criteria": serialize.criteria_out(record.criteria),
-        "probes": None,
-        "sampling": record.sampling,
-    }
-    record.approved_at = now()
-    store.save(record)
-    _ledger_the_approval(store, record, note=serialize.APPROVAL_NOTE_AUTO)
-
-
 # --- the runner seam --------------------------------------------------------
 
 
@@ -436,7 +406,7 @@ async def run_batch(
             # se ejecuta. Bajo `human` no se aprueba nada: queda esperando, que es
             # el comportamiento de hoy.
             if policy == "auto" and fresh.stage == Stage.AWAITING_APPROVAL:
-                _auto_approve(store, fresh)
+                auto_approve(store, fresh)
                 await runner.execute(fresh)
             return store.get(record.job_id) or fresh
         finally:

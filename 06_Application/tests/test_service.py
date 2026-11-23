@@ -642,6 +642,86 @@ def test_approval_advances_to_done(client_factory):
 
 
 # =============================================================================
+# approval_policy=auto on POST /jobs: unattended, but the gate still holds
+# =============================================================================
+#
+# Same two invariants the batch runner is held to, now on the HTTP path: under
+# `auto` the UNGATED probes run with no human, and every GATED probe stays behind
+# its signoff -> NO_EVALUADO. The default is `human`, which is unchanged: the job
+# parks at awaiting_approval and nothing runs until POST /approve.
+
+
+def test_auto_policy_runs_to_done_without_a_human_approve(client_factory):
+    """`approval_policy=auto` reaches `done` from the single POST, no approve call."""
+    c = client_factory()
+    job_id = start(c, approval_policy="auto")
+    state = c.get(f"/jobs/{job_id}").json()
+    assert state["stage"] == Stage.DONE
+    assert state["report"] is not None
+    assert state["approvalPolicy"] == "auto"
+    assert state["report"]["meta"]["approvalPolicy"] == "auto"
+    assert state["report"]["meta"]["autoApproved"] is True
+    # the two OBSERVABLE criteria were scored without anyone approving
+    scored = [r for r in state["report"]["rows"] if r["verdict"] != NO_EVALUADO]
+    assert len(scored) == 2
+
+
+def test_auto_policy_does_not_run_a_gated_probe(client_factory, tmp_path):
+    """THE invariant, on HTTP: auto never signs, so a gated probe never runs."""
+    engine = make_engine(tmp_path, client=FakeAnthropic(safety_verdict=REVISE))
+    c = client_factory(engine)
+    job_id = start(c, approval_policy="auto")
+
+    state = c.get(f"/jobs/{job_id}").json()
+    assert state["stage"] == Stage.DONE
+    assert _probe_steps(engine) == [], "una prueba con firma pendiente corrió igual"
+    assert all(r["verdict"] == NO_EVALUADO for r in state["report"]["rows"])
+    # and nobody was signed off along the way
+    assert all(not p["signedOff"] for p in plan_of(c, job_id)["probes"])
+
+
+def test_default_policy_still_parks_for_a_human(client_factory):
+    """No approval_policy = hoy: para en awaiting_approval, sin informe."""
+    c = client_factory()
+    job_id = start(c)  # no policy
+    state = c.get(f"/jobs/{job_id}").json()
+    assert state["stage"] == Stage.AWAITING_APPROVAL
+    assert state["report"] is None
+    assert state["approvalPolicy"] == "human"
+
+
+def test_auto_approval_over_http_names_the_machine_actor(client_factory):
+    """La aprobación-máquina va al ledger y la procedencia lo dice."""
+    c = client_factory()
+    job_id = start(c, approval_policy="auto")
+    rows = _approval_rows(c, job_id)
+    assert len(rows) == 1, "una fila de aprobación, ni más ni menos"
+    prov = c.get(f"/jobs/{job_id}").json()["report"]["provenance"]
+    approval = next(p for p in prov if p["kind"] == "approval")
+    assert "autom" in approval["line"].lower()
+    assert "evaluador humano" not in approval["line"].lower()
+
+
+def test_an_auto_job_cannot_be_approved_again(client_factory):
+    """Ya corrió: POST /approve sobre un trabajo auto terminado es 409."""
+    c = client_factory()
+    job_id = start(c, approval_policy="auto")
+    r = c.post(f"/jobs/{job_id}/approve", json={"plan": {}})
+    assert r.status_code == 409
+
+
+def test_an_invalid_approval_policy_is_refused(client_factory):
+    c = client_factory()
+    body = {
+        "objective": "x",
+        "platform": {"url": "https://plataforma.test"},
+        "approval_policy": "a-medias",
+    }
+    r = c.post("/jobs", json=body)
+    assert r.status_code == 422
+
+
+# =============================================================================
 # the gate: approving the plan does NOT approve a gated probe
 # =============================================================================
 
