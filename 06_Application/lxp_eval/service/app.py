@@ -308,8 +308,18 @@ def _ledger_decision(
     )
 
 
-def _ledger_the_approval(store: JobStore, record: JobRecord) -> None:
-    """The approval row: one per POST /approve, artifact = the approved plan."""
+def _ledger_the_approval(
+    store: JobStore, record: JobRecord, *, note: str | None = None
+) -> None:
+    """The approval row: one per approval, artifact = the approved plan.
+
+    `note` names the actor on the audit record and is rendered verbatim into the
+    report's provenance line (`serialize.provenance_of`). It defaults to the
+    human sentence, so POST /approve is unchanged. The unattended batch runner
+    passes `serialize.APPROVAL_NOTE_AUTO`, so an auto-approved run is recorded
+    as machine-approved rather than borrowing a human's signature -- the row is
+    otherwise identical (same `kind`, same snapshot), only the actor differs.
+    """
     _ledger_decision(
         store,
         record,
@@ -317,7 +327,7 @@ def _ledger_the_approval(store: JobStore, record: JobRecord) -> None:
         kind="approval",
         probe_id="__plan__",
         test_id="__plan__",
-        note="plan aprobado por el evaluador humano",
+        note=note or serialize.APPROVAL_NOTE_HUMAN,
         timestamp=record.approved_at,
         payload=record.approved_plan,
     )

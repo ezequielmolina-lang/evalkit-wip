@@ -29,6 +29,23 @@ from ..evalkit.ledger import GOVERNANCE_KINDS
 from ..evalkit.probes import DEFAULT_CAPTURE, Probe
 from ..evalkit.scoring import DomainScore, TestVerdict
 
+#: The note written on an approval ledger row, and rendered verbatim (only its
+#: first letter capitalised) into the report's provenance line. Two values, so
+#: the audit trail says WHO approved -- a person, or the unattended policy.
+#:
+#: These are not decoration. `provenance_of` reads the approval line from the
+#: ledger (the tamper-evident source of truth), and before this it rendered
+#: "Plan aprobado por el evaluador humano" for EVERY approval row. An
+#: auto-approved batch run would then have claimed a human approval that never
+#: happened -- exactly the class of false claim the ledger exists to prevent.
+#: The human value is byte-for-byte the old sentence's stem, so the delivered
+#: report for a human-approved job is unchanged.
+APPROVAL_NOTE_HUMAN = "plan aprobado por el evaluador humano"
+APPROVAL_NOTE_AUTO = (
+    'plan aprobado automáticamente por la política de aprobación "auto": las '
+    "pruebas con compuerta quedan sin firmar y no se ejecutan (NO_EVALUADO)"
+)
+
 #: The sampling plan the review screen gets when nobody has edited one yet.
 #: `repeats` is 1 rather than 3 on purpose: re-probing a live platform three
 #: times is a real cost decision, and the tool must not spend it by default.
@@ -431,7 +448,17 @@ def provenance_of(ledger_rows: list[dict]) -> list[dict]:
         stamp = row.get("timestamp", "")
         detail = f"(sha256 {sha[:_SHA_PREFIX]}, archivo {name})"
         if kind == "approval":
-            line = f"Plan aprobado por el evaluador humano el {stamp} {detail}"
+            # From the ROW's own note, not a hardcoded sentence: a machine
+            # approval (the `auto` batch policy) and a human one write different
+            # notes, and the provenance line has to say which actually happened.
+            # The human note IS the old sentence, so its output is unchanged; an
+            # empty note (a row written before the notes existed) falls back to
+            # the human sentence rather than rendering a blank line.
+            note = (row.get("note") or "").strip()
+            sentence = (note[:1].upper() + note[1:]) if note else (
+                "Plan aprobado por el evaluador humano"
+            )
+            line = f"{sentence} el {stamp} {detail}"
         elif kind == "signoff":
             line = (
                 f'Firma humana para el probe "{row.get("probe_id", "")}" '

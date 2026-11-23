@@ -66,6 +66,14 @@ class JobRecord:
     platform_kind: str = ""
     documents: list[dict] = field(default_factory=list)
     has_credentials: bool = False
+    #: Who gets to approve the plan: "human" (the default, and today's whole
+    #: behaviour -- the job parks at `awaiting_approval` until a person calls
+    #: POST /approve) or "auto". "auto" is the unattended-batch policy: the
+    #: UNGATED probes proceed without a human, each gated probe stays behind its
+    #: own signoff and so scores NO_EVALUADO. Set by the batch runner; a job
+    #: created through the HTTP surface keeps "human", which is why old job.json
+    #: files -- which have no such field -- read back as "human" too.
+    approval_policy: str = "human"
 
     # --- the stage machine -------------------------------------------------
     stage: str = "framework"

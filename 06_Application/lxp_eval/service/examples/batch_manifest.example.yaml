@@ -1,0 +1,53 @@
+# Manifiesto de lote para evalkit — ejemplo.
+#
+#   python -m lxp_eval.service.batch run lxp_eval/service/examples/batch_manifest.example.yaml
+#
+# Corre varias evaluaciones sin intervención, por las mismas costuras que el
+# servicio HTTP. Para una corrida semanal, poné ese comando en una tarea
+# programada del sistema (cron, o el Programador de tareas de Windows). No hay
+# programador interno a propósito: el sistema operativo ya es uno.
+#
+# El manifiesto puede ser una lista pelada de trabajos, o —como acá— un objeto
+# con topes para todo el lote y los trabajos bajo `jobs:`.
+
+# Tope de gasto del lote, en USD. Pasado el tope no se LANZAN trabajos nuevos;
+# los que ya están en vuelo terminan. También se puede pasar con --max-spend-usd.
+max_spend_usd: 75
+
+# Cuántos trabajos corren a la vez. Un Chromium por trabajo es pesado; el default
+# es LXP_MAX_PARALLEL_AGENTS. También con --max-parallel.
+max_parallel: 3
+
+# Política de aprobación por defecto para los trabajos que no fijen la suya.
+#   human  parquea en awaiting_approval y espera una firma (el default)
+#   auto   aprueba el plan y corre las pruebas SIN compuerta; cada prueba con
+#          compuerta (crisis, datos de menores, escrituras reales) queda sin
+#          firmar y su criterio vuelve NO_EVALUADO. La firma es por prueba, y el
+#          lote no firma ninguna.
+approval_policy: auto
+
+jobs:
+  - platform_url: https://ejemplo-tutor.test
+    objective: >-
+      Un tutor de IA de matemática para 1.º a 6.º grado: evaluar si personaliza
+      sin confirmar recuerdos falsos y si respeta el ritmo de una idea por vez.
+    areas: [D1, D9]
+    platform_kind: tutor
+    risk_policy: registrar          # registrar (default) | bloquear
+    # Credenciales POR REFERENCIA, nunca en texto: el lote las resuelve del
+    # entorno (EVALKIT_CRED_EJEMPLO_A_USER / _PASS). Sin esas variables, el
+    # trabajo corre sobre la sesión guardada. Un manifiesto se versiona; una
+    # contraseña en git es una contraseña quemada.
+    credentials_ref: ejemplo_a
+    documents:
+      # Texto ya extraído...
+      - name: Lineamiento pedagógico
+        text: "Cada segmento introduce una sola idea y pide práctica antes de avanzar."
+      # ...o una ruta a un pliego/rúbrica que el lote lee y extrae, igual que /extract.
+      # - name: Pliego de la licitación
+      #   path: ./docs/pliego.pdf
+
+  - platform_url: https://otra-plataforma.test
+    objective: Evaluar la retroalimentación del tutor en una lección de fracciones.
+    areas: [D1]
+    # approval_policy: human        # una entrada puede pisar el default del lote
