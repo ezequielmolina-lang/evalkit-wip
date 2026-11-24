@@ -330,6 +330,23 @@ returned. A job that dies later, mid-stage, is recorded on its own job by the
 supervisor as usual. Stopping the batch cancels the jobs in flight, and each one
 records that it was cancelled and where.
 
+**The exit code is the report.** Under a scheduler nobody reads the summary, so
+the command's exit code says what happened, and the last line of the output says
+the same thing in words:
+
+| Code | Meaning |
+|---|---|
+| `0` | Everything the manifest asked for was attended to and nothing failed. |
+| `1` | At least one job failed. The summary names it and says why. |
+| `2` | The manifest (or the invocation) is invalid. Nothing ran. |
+| `3` | No job failed, but the spend cap left entries unlaunched. |
+
+A job counts as fine only if it ended `done`, or `awaiting_approval` under
+`approval_policy: human` (the end that job was asked to reach). Anything else —
+`error`, an entry that could not be launched, a stage that is not a resting
+place — counts as failed. A `done` job whose criteria are all `NO_EVALUADO` is
+**not** a failure: not being able to observe is a valid result of an evaluation.
+
 **Credentials by reference, never in the manifest.** An entry's
 `credentials_ref: foo` is resolved from `EVALKIT_CRED_FOO_USER` /
 `EVALKIT_CRED_FOO_PASS`. With those unset the job runs on the saved session (the

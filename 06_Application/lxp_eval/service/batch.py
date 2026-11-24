@@ -87,9 +87,15 @@ SETUP_ERROR = "setup_error"
 
 __all__ = [
     "BatchSummary",
+    "EXIT_BAD_MANIFEST",
+    "EXIT_HALTED",
+    "EXIT_JOB_FAILED",
+    "EXIT_OK",
     "JobOutcome",
     "Manifest",
     "ManifestEntry",
+    "exit_code_for",
+    "job_failed",
     "load_manifest",
     "run_batch",
     "main",
@@ -383,6 +389,66 @@ def _outcome(store: JobStore, job_id: str) -> JobOutcome:
     )
 
 
+# --- ¿salió bien? El código de salida del CLI --------------------------------
+#
+# El CLI devolvía 0 SIEMPRE que lograba leer el manifiesto, hubiera pasado lo que
+# hubiera pasado con los trabajos. Se vio al comprobar el lote de punta a punta:
+# un lote con una entrada en `setup_error` terminaba con el mismo código que uno
+# perfecto. Este comando existe para correr dentro de una tarea programada, sin
+# nadie mirando, y lo ÚNICO que un programador de tareas lee es el código de
+# salida: con 0 fijo, una semana entera de trabajos fallidos se ve verde.
+#
+# Códigos distintos para causas distintas, porque piden acciones distintas:
+
+#: Todo lo que pedía el manifiesto se atendió y nada falló.
+EXIT_OK = 0
+#: Al menos un trabajo falló. El resumen dice cuál y por qué.
+EXIT_JOB_FAILED = 1
+#: El manifiesto no se pudo leer o es inválido: no corrió nada. Es también el
+#: código con que argparse rechaza una invocación mal escrita, a propósito: en
+#: los dos casos el problema está en CÓMO se llamó al lote, no en el lote.
+EXIT_BAD_MANIFEST = 2
+#: Ningún trabajo falló, pero el tope de gasto cortó el lote y quedaron entradas
+#: sin lanzar. No es una falla de nadie, y tampoco es "listo": hay plataformas
+#: del manifiesto que esta corrida no evaluó.
+EXIT_HALTED = 3
+
+
+def job_failed(outcome: JobOutcome) -> bool:
+    """¿Este trabajo terminó como tenía que terminar? Estricto a propósito.
+
+    Sólo hay dos finales buenos: `done`, o `awaiting_approval` bajo política
+    `human` -- que es el final PEDIDO de ese trabajo, esperar a una persona. Todo
+    lo demás cuenta como falla: `error`, una entrada que no se pudo lanzar, un
+    registro que desapareció, y también cualquier etapa que no debería ser un
+    final (un trabajo `auto` parado en la compuerta, uno que quedó en `run`). La
+    lista se escribe por lo que está BIEN y no por lo que está mal para que una
+    etapa nueva o un final raro caigan del lado de avisar, no del de callar.
+
+    Un trabajo `done` con todos sus criterios en NO_EVALUADO NO es una falla: no
+    haber podido observar es un resultado válido de la evaluación, y la corrida
+    que lo produjo funcionó.
+    """
+    if outcome.stage == Stage.DONE:
+        return False
+    if outcome.stage == Stage.AWAITING_APPROVAL and outcome.approval_policy == "human":
+        return False
+    return True
+
+
+def exit_code_for(summary: BatchSummary) -> int:
+    """El código de salida que le corresponde a un lote terminado.
+
+    Un trabajo fallido gana sobre el corte por tope: si pasaron las dos cosas, lo
+    que hay que mirar primero es la falla.
+    """
+    if any(job_failed(o) for o in summary.jobs):
+        return EXIT_JOB_FAILED
+    if summary.halted:
+        return EXIT_HALTED
+    return EXIT_OK
+
+
 # --- the batch loop ---------------------------------------------------------
 
 
@@ -656,6 +722,22 @@ def _print_summary(summary: BatchSummary) -> None:
     print(f"Gasto total del lote: ${summary.total_spend_usd:.2f}")
     if summary.halted:
         print(f"ATENCIÓN: {summary.halted_reason}")
+    # La última línea dice lo mismo que el código de salida, en palabras: quien
+    # abre el log de la tarea programada no tiene por qué saber qué es un 3.
+    fallidos = [o for o in summary.jobs if job_failed(o)]
+    code = exit_code_for(summary)
+    if code == EXIT_JOB_FAILED:
+        print(
+            f"RESULTADO: FALLARON {len(fallidos)} de {len(summary.jobs)} "
+            f"trabajo(s). El comando termina con código {code}."
+        )
+    elif code == EXIT_HALTED:
+        print(
+            "RESULTADO: INCOMPLETO. Ningún trabajo falló, pero el tope de gasto "
+            f"dejó entradas sin lanzar. El comando termina con código {code}."
+        )
+    else:
+        print(f"RESULTADO: OK. El comando termina con código {code}.")
 
 
 def _cli_run(args: argparse.Namespace) -> int:
@@ -663,7 +745,7 @@ def _cli_run(args: argparse.Namespace) -> int:
         manifest = load_manifest(args.manifest)
     except (OSError, ValueError) as exc:
         print(f"no se pudo leer el manifiesto: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_BAD_MANIFEST
 
     root = args.root or manifest.root or DEFAULT_ROOT
     store = JobStore(root)
@@ -696,7 +778,7 @@ def _cli_run(args: argparse.Namespace) -> int:
         )
     )
     _print_summary(summary)
-    return 0
+    return exit_code_for(summary)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -706,6 +788,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Corre un lote de evaluaciones sin intervención, por las mismas "
             "costuras que el servicio. Para una corrida semanal, poné este "
             "comando en una tarea programada del sistema."
+        ),
+        epilog=(
+            "Códigos de salida: 0 = todo se atendió y nada falló; 1 = falló al "
+            "menos un trabajo; 2 = el manifiesto o la invocación son inválidos y "
+            "no corrió nada; 3 = ningún trabajo falló, pero el tope de gasto dejó "
+            "entradas sin lanzar."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -731,7 +819,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run":
         return _cli_run(args)
     parser.print_help(sys.stderr)  # pragma: no cover
-    return 2  # pragma: no cover
+    return EXIT_BAD_MANIFEST  # pragma: no cover
 
 
 if __name__ == "__main__":  # pragma: no cover

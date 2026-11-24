@@ -26,8 +26,16 @@ from lxp_eval.evalkit.generator import REVISE
 from lxp_eval.evalkit.ledger import EvidenceEntry, EvidenceLedger
 from lxp_eval.service import batch as batch_mod
 from lxp_eval.service.batch import (
+    EXIT_BAD_MANIFEST,
+    EXIT_HALTED,
+    EXIT_JOB_FAILED,
+    EXIT_OK,
     SETUP_ERROR,
+    BatchSummary,
+    JobOutcome,
     ManifestEntry,
+    exit_code_for,
+    job_failed,
     load_manifest,
     resolve_credentials,
     run_batch,
@@ -398,6 +406,149 @@ def test_cancelling_the_batch_cancels_what_is_in_flight(tmp_path, n_entries):
     # the supervisor wrote WHY on the job itself: cancelled, not left hanging
     assert record.stage == Stage.ERROR
     assert record.error["kind"] == "CancelledError"
+
+
+# --- the exit code: the only thing a scheduler reads -------------------------
+#
+# The CLI used to return 0 whenever it could read the manifest, whatever became
+# of the jobs. Under a scheduled task nobody reads the summary; the exit code IS
+# the report. A week of failed jobs looked green.
+
+
+def _outcome_of(stage, policy="auto", **kw):
+    return JobOutcome(
+        job_id=kw.pop("job_id", "abc"), platform="p.test", stage=stage,
+        approval_policy=policy, spend_usd=0.0,
+        no_evaluado=kw.pop("no_evaluado", 0), scored=kw.pop("scored", 0),
+        error=kw.pop("error", ""),
+    )
+
+
+@pytest.mark.parametrize(
+    "stage, policy, failed",
+    [
+        (Stage.DONE, "auto", False),
+        (Stage.DONE, "human", False),
+        # the end a `human` job was ASKED to reach: waiting for a person
+        (Stage.AWAITING_APPROVAL, "human", False),
+        # ...and not an end at all for an `auto` job: it should have gone on
+        (Stage.AWAITING_APPROVAL, "auto", True),
+        (Stage.ERROR, "auto", True),
+        (Stage.ERROR, "human", True),
+        (SETUP_ERROR, "auto", True),
+        ("missing", "auto", True),
+        # a stage that is not a resting place: counted as failed, not ignored
+        (Stage.RUN, "auto", True),
+        ("una-etapa-que-no-existe", "auto", True),
+    ],
+)
+def test_what_counts_as_a_failed_job(stage, policy, failed):
+    assert job_failed(_outcome_of(stage, policy)) is failed
+
+
+def test_all_no_evaluado_is_a_result_not_a_failure():
+    """No haber podido observar es un resultado válido; la corrida funcionó."""
+    outcome = _outcome_of(Stage.DONE, no_evaluado=3, scored=0)
+    assert job_failed(outcome) is False
+    assert exit_code_for(BatchSummary(jobs=[outcome], total_spend_usd=0.0)) == EXIT_OK
+
+
+def test_exit_codes_tell_the_causes_apart():
+    ok = _outcome_of(Stage.DONE)
+    parked = _outcome_of(Stage.AWAITING_APPROVAL, "human")
+    bad = _outcome_of(Stage.ERROR, error="la sesión expiró")
+
+    def code(jobs, halted=False):
+        return exit_code_for(
+            BatchSummary(jobs=jobs, total_spend_usd=0.0, halted=halted)
+        )
+
+    assert code([ok, parked]) == EXIT_OK == 0
+    assert code([ok, bad]) == EXIT_JOB_FAILED == 1
+    assert code([ok], halted=True) == EXIT_HALTED == 3
+    # both happened: the failure is what to look at first
+    assert code([ok, bad], halted=True) == EXIT_JOB_FAILED
+    # the cap cut the batch before anything launched: still not "done"
+    assert code([], halted=True) == EXIT_HALTED
+    assert EXIT_BAD_MANIFEST == 2
+
+
+def _manifest(tmp_path, body="- platform_url: https://a.test\n  objective: evaluar\n"):
+    path = tmp_path / "m.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "jobs, halted, expected, says",
+    [
+        ([("done", "auto")], False, 0, "RESULTADO: OK"),
+        ([("done", "auto"), ("error", "auto")], False, 1, "FALLARON 1 de 2"),
+        ([("done", "auto")], True, 3, "RESULTADO: INCOMPLETO"),
+    ],
+)
+def test_the_cli_returns_the_batch_outcome(
+    tmp_path, monkeypatch, capsys, jobs, halted, expected, says
+):
+    """`main()` devuelve lo que pasó con el lote, y lo dice en la última línea."""
+    summary = BatchSummary(
+        jobs=[_outcome_of(stage, policy) for stage, policy in jobs],
+        total_spend_usd=0.0, halted=halted,
+        halted_reason="se alcanzó el tope de gasto" if halted else "",
+    )
+
+    async def fake_run_batch(entries, **kwargs):
+        return summary
+
+    monkeypatch.setattr(batch_mod, "run_batch", fake_run_batch)
+    code = batch_mod.main(
+        ["run", str(_manifest(tmp_path)), "--root", str(tmp_path / "jobs")]
+    )
+    assert code == expected
+    out = capsys.readouterr().out
+    assert says in out
+    assert f"código {expected}" in out.strip().splitlines()[-1]
+
+
+def test_an_unreadable_manifest_is_exit_2_and_runs_nothing(tmp_path, monkeypatch):
+    async def must_not_run(entries, **kwargs):
+        raise AssertionError("corrió un lote con un manifiesto inválido")
+
+    monkeypatch.setattr(batch_mod, "run_batch", must_not_run)
+    bad = _manifest(tmp_path, "- objective: sin url\n")
+    assert batch_mod.main(["run", str(bad)]) == EXIT_BAD_MANIFEST
+    assert batch_mod.main(["run", str(tmp_path / "no-existe.yaml")]) == EXIT_BAD_MANIFEST
+
+
+def test_the_exit_code_reaches_the_operating_system(tmp_path):
+    """De punta a punta, por `python -m`, sin dobles: lo que ve el programador.
+
+    La única entrada apunta a un documento que no existe, así que falla al
+    prepararse -- antes de que el motor abra un navegador o llame al modelo -- y
+    el comando REAL tiene que salir con 1. Esto prueba la última línea del
+    módulo (`raise SystemExit(main())`), que ningún otro test ejecuta.
+    """
+    import subprocess
+    import sys
+
+    manifest = _manifest(
+        tmp_path,
+        "- platform_url: https://a.test\n"
+        "  objective: evaluar\n"
+        "  documents:\n"
+        "    - name: Pliego\n"
+        f"      path: {json.dumps(str(tmp_path / 'no-existe.pdf'))}\n",
+    )
+    done = subprocess.run(
+        [sys.executable, "-m", "lxp_eval.service.batch", "run", str(manifest),
+         "--root", str(tmp_path / "jobs")],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    assert done.returncode == EXIT_JOB_FAILED, done.stdout[-600:] + done.stderr[-600:]
+    assert "FALLARON 1 de 1" in done.stdout
+    assert "Pliego" in done.stdout
 
 
 # --- the CLI path stays free of the web stack --------------------------------
