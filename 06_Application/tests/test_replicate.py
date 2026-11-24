@@ -260,6 +260,7 @@ def test_evidence_map_fails_loud_on_missing_artifact(tmp_path: Path):
     assert "línea" in msg  # and the line
 
 
+@pytest.mark.needs_real_platform
 def test_shipped_evidence_map_loads_and_every_artifact_exists():
     m = load_evidence_map(EVIDENCE_MAP)
     assert m  # non-empty

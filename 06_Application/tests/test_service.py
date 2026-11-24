@@ -2907,6 +2907,7 @@ def test_resolving_the_environment_never_raises_on_a_missing_key():
     assert dict(os.environ).items() <= dict(environ_mod.engine_environ()).items()
 
 
+@pytest.mark.needs_real_platform
 def test_dotenv_is_read_from_the_same_file_config_uses():
     """The one thing the deliberate override=False difference could hide: the
     two loaders drifting onto different files."""

@@ -242,6 +242,7 @@ def _english_heuristic():
     return is_english_anchor
 
 
+@pytest.mark.needs_real_platform
 def test_operative_bank_text_is_in_spanish():
     """330 veredictos pagados mostraron al juez citando anclas en ingles como
     defecto -- con razon: es una herramienta para el país. El texto

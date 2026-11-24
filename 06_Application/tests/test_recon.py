@@ -298,6 +298,7 @@ def test_detect_course_returns_none_when_only_navigation_is_present():
     assert _detect_course("Home\nSettings\nHelp\nCode Editor") is None
 
 
+@pytest.mark.needs_real_platform
 def test_detect_course_passes_on_the_captured_plataforma_a_fixture():
     """La regla de fixtures que la auditoría volvió obligatoria: ningún parser
     corre en vivo sin pasar primero sobre texto REAL capturado. Las corridas

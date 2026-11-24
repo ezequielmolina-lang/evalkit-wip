@@ -1842,6 +1842,7 @@ def test_the_quorum_survives_into_the_written_provenance(tmp_path):
     assert seat["verdict"] == REJECT and seat["answered"] is False
 
 
+@pytest.mark.needs_real_platform
 def test_a_banked_probe_is_used_verbatim_not_redrafted():
     """A probe validated against the live platform must not be reinvented.
 
@@ -1875,6 +1876,7 @@ def test_a_banked_probe_is_used_verbatim_not_redrafted():
     assert gp.provenance.rounds, "the council must still review a banked probe"
 
 
+@pytest.mark.needs_real_platform
 def test_a_criterion_without_a_banked_probe_still_drafts_normally():
     from lxp_eval.evalkit.probe_bank import ProbeBank, load_surfaces
 

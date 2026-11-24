@@ -431,6 +431,7 @@ def test_config_with_a_broken_auth_block_points_at_the_line(tmp_path: Path):
     assert e.value.line == 4  # points inside the auth block, at login_url
 
 
+@pytest.mark.needs_real_platform
 def test_the_shipped_platform_configs_carry_their_auth_block():
     # plataforma_a and plataforma_b must be config-driven now, not hardcoded in session.py
     for platform in ("plataforma_a", "plataforma_b"):
@@ -692,6 +693,7 @@ async def test_login_still_demands_positive_proof(monkeypatch):
     assert await is_logged_out_page(ambiguous, auth) is True
 
 
+@pytest.mark.needs_real_platform
 def test_plataforma_a_can_tell_it_is_logged_out_on_a_provider_chooser():
     """Plataforma A's /login/ has no password field until a provider is chosen.
 
@@ -809,6 +811,7 @@ async def test_a_missing_pre_click_does_not_abort_the_login():
     assert await auto_login("plataforma_a", "student", page, credentials=creds, auth=auth) is True
 
 
+@pytest.mark.needs_real_platform
 def test_the_chooser_steps_are_read_from_the_plataforma_a_config():
     from pathlib import Path
 
@@ -911,6 +914,7 @@ async def test_a_platform_with_one_interface_needs_no_role_switch():
     assert await auto_login("plataforma_a", "student", page, credentials=creds, auth=AUTH_STRONG) is True
 
 
+@pytest.mark.needs_real_platform
 def test_the_role_switch_is_read_from_the_plataforma_a_config():
     from pathlib import Path
 
