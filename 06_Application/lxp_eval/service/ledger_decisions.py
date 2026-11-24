@@ -13,6 +13,7 @@ en los docstrings de cada función.
 """
 from __future__ import annotations
 
+import copy
 import json
 
 from ..evalkit.ledger import EvidenceLedger
@@ -147,12 +148,26 @@ def auto_approve(store: JobStore, record: JobRecord) -> None:
     """Aprobar el plan sin humano, dejando el gate exactamente donde estaba.
 
     Lo comparten el corredor de lotes y POST /jobs bajo `approval_policy="auto"`.
-    Es `POST /jobs/{id}/approve` menos la persona: el plan por defecto (sin
-    ediciones, `probes=None` -> `runnable_probes` toma TODAS las pruebas
-    guardadas) y el actor MÁQUINA en la fila del ledger. No se escribe ningún
+    Es `POST /jobs/{id}/approve` menos la persona: el plan por defecto, sin
+    ediciones, y el actor MÁQUINA en la fila del ledger. No se escribe ningún
     signoff, así que cada prueba con compuerta la deja afuera
     `JobRunner.runnable_probes` y su criterio vuelve NO_EVALUADO. La firma sigue
     siendo por prueba, y acá no hay ninguna.
+
+    LAS PRUEBAS VAN EN LA INSTANTÁNEA. El plan aprobado lleva una copia de las
+    pruebas tal como el servidor las tenía guardadas -- pasos, regla de veredicto,
+    el consejo que las revisó y `requiresSignoff` -- y esa copia es lo que se
+    hashea en la fila de aprobación. La primera versión guardaba `probes: None`
+    ("corré todas las guardadas"), que ejecutaba lo mismo pero dejaba el registro
+    de auditoría sin decir QUÉ se aprobó: los criterios estaban en el archivo con
+    hash y las pruebas sólo en `job.json`, que es editable. Una aprobación humana
+    por la interfaz sí las guarda; una aprobación-máquina, que es justo la que
+    nadie miró, no puede guardar menos.
+
+    Guardarlas no mueve el gate: `runnable_probes` lee `requiresSignoff` de la
+    copia del SERVIDOR y exige la firma en `record.signoffs`, nunca en el plan.
+    Que la instantánea muestre una prueba con compuerta y sin firmar es, de paso,
+    la evidencia de por qué su criterio volvió NO_EVALUADO.
 
     Mismo orden que el endpoint: guardar el registro primero, poner la fila en el
     ledger después y ANTES de que `execute` corra sobre su autoridad.
@@ -162,7 +177,9 @@ def auto_approve(store: JobStore, record: JobRecord) -> None:
     record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
     record.approved_plan = {
         "criteria": serialize.criteria_out(record.criteria),
-        "probes": None,
+        # Copia profunda: la instantánea es lo que había AL APROBAR, y no debe
+        # cambiar si después alguien toca `record.probes` en memoria.
+        "probes": copy.deepcopy(record.probes),
         "sampling": record.sampling,
     }
     record.approved_at = now()

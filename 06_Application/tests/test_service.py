@@ -664,6 +664,11 @@ def test_auto_policy_runs_to_done_without_a_human_approve(client_factory):
     # the two OBSERVABLE criteria were scored without anyone approving
     scored = [r for r in state["report"]["rows"] if r["verdict"] != NO_EVALUADO]
     assert len(scored) == 2
+    # The approved plan carries the probes verbatim, so the council's review
+    # still describes what ran: nothing is reported as edited by a human.
+    probes = state["plan"]["probes"]
+    assert probes and all(p["humanEdited"] is False for p in probes)
+    assert all(p["approved"] is True for p in probes)
 
 
 def test_auto_policy_does_not_run_a_gated_probe(client_factory, tmp_path):

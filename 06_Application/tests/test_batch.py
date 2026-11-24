@@ -16,11 +16,14 @@ Dos niveles de prueba, a propósito:
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
 from lxp_eval.evalkit.framework import NO_EVALUADO
 from lxp_eval.evalkit.generator import REVISE
+from lxp_eval.evalkit.ledger import EvidenceEntry, EvidenceLedger
 from lxp_eval.service import batch as batch_mod
 from lxp_eval.service.batch import (
     SETUP_ERROR,
@@ -492,6 +495,79 @@ def test_auto_approval_row_names_the_machine_actor(tmp_path):
     line = approvals[0]["line"].lower()
     assert "autom" in line  # "aprobado automáticamente..."
     assert "evaluador humano" not in line
+
+
+# --- the approval snapshot says WHAT was approved ----------------------------
+#
+# The first version snapshotted `probes: None` ("run every stored probe"). Same
+# run, weaker record: the hashed artefact named the criteria and not the probes,
+# which lived only in job.json -- an editable file. A machine approval is the one
+# nobody watched, so its audit record cannot carry less than a human one.
+
+
+def _approval_snapshot(store, job_id):
+    row = next(r for r in store.ledger_rows(job_id) if r["kind"] == "approval")
+    return row, json.loads(Path(row["artifact"]).read_text(encoding="utf-8"))
+
+
+def test_the_auto_approval_snapshot_carries_the_probes_it_approved(tmp_path):
+    store, record = _auto_run(tmp_path, make_engine(tmp_path))
+    row, snapshot = _approval_snapshot(store, record.job_id)
+
+    assert snapshot["probes"], "la instantánea no dice qué pruebas se aprobaron"
+    assert [p["probeId"] for p in snapshot["probes"]] == [
+        p["probeId"] for p in record.probes
+    ]
+    for approved, stored in zip(snapshot["probes"], record.probes):
+        # the wording that ran, and the review it rests on, are in the hashed file
+        assert approved["steps"] == stored["steps"]
+        assert approved["verdictRule"] == stored["verdictRule"]
+        assert approved["judges"] == stored["judges"]
+        assert approved["requiresSignoff"] is False
+
+    # ...and that file is the one the ledger row hashes
+    ledger = EvidenceLedger(store.ledger_path(record.job_id))
+    assert ledger.verify(EvidenceEntry(**row)) is True
+
+
+def test_the_snapshot_is_what_was_approved_not_what_job_json_says_later(tmp_path):
+    """Editar job.json después no cambia lo que el archivo con hash dice."""
+    store, record = _auto_run(tmp_path, make_engine(tmp_path))
+    row, before = _approval_snapshot(store, record.job_id)
+    original_steps = before["probes"][0]["steps"]
+
+    record.probes[0]["steps"] = [{"n": 1, "action": "pasos reescritos", "capture": ""}]
+    store.save(record)
+
+    _, after = _approval_snapshot(store, record.job_id)
+    assert after["probes"][0]["steps"] == original_steps
+    ledger = EvidenceLedger(store.ledger_path(record.job_id))
+    assert ledger.verify(EvidenceEntry(**row)) is True
+
+
+def test_a_gated_probe_in_the_snapshot_is_recorded_unsigned_and_does_not_run(tmp_path):
+    """Las pruebas con compuerta VAN en la instantánea, y aun así no corren.
+
+    Llevarlas en el plan aprobado no las autoriza: el gate lee `requiresSignoff`
+    de la copia del servidor y la firma de `record.signoffs`. La instantánea deja
+    constancia de lo contrario -- con compuerta, sin firma -- que es la razón por
+    la que el criterio volvió NO_EVALUADO.
+    """
+    engine = make_engine(tmp_path, client=FakeAnthropic(safety_verdict=REVISE))
+    store, record = _auto_run(tmp_path, engine)
+    _, snapshot = _approval_snapshot(store, record.job_id)
+
+    assert snapshot["probes"]
+    for p in snapshot["probes"]:
+        assert p["requiresSignoff"] is True
+        assert p["signoffReason"]
+        assert p["signedOff"] is False
+    assert record.signoffs == {}
+    # recon is the first driver; anything after it would be a probe that ran
+    assert [s for d in engine.test_drivers[1:] for s in d.steps] == []
+    assert all(r["verdict"] == NO_EVALUADO for r in record.report["rows"])
+    # no signoff row was ever written on the ledger either
+    assert not [r for r in store.ledger_rows(record.job_id) if r["kind"] == "signoff"]
 
 
 # --- manifest ----------------------------------------------------------------
