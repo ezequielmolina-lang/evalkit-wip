@@ -1,0 +1,153 @@
+# La suite corre sola, en una máquina que no es la de su autor.
+#
+# Hasta ahora el verde de evalkit era una afirmación sobre cosmo: 940 tests que
+# pasaban cuando alguien se acordaba de escribir pytest, con las versiones que
+# ese disco tuviera ese día. Eso no es una garantía, es una anécdota.
+#
+# Tres trabajos, cada uno respondiendo una pregunta distinta:
+#
+#   motor   -- ¿pasa la suite en Linux y en Windows? Windows no es un capricho:
+#              los tests de ACL (icacls) SÓLO existen ahí y en Linux se saltean,
+#              así que sin ese trabajo la protección de credenciales en disco no
+#              la verifica nadie. Instala las dependencias FLOTANTES, que es como
+#              las instala quien clona el repo hoy.
+#   fijado  -- ¿arranca una máquina nueva con las versiones exactas del lock, y
+#              el preflight la aprueba? Es el ensayo del despliegue.
+#   web     -- ¿tipa y compila el front? Un `next build` roto se descubre al
+#              levantar la app, que es el peor momento.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # Lunes 09:00 UTC. Las dependencias del motor flotan (`>=`), así que una
+    # corrida semanal SIN cambios propios es lo único que avisa que el mundo se
+    # movió. Enterarse un lunes es barato; enterarse a los veinte minutos de una
+    # corrida paga contra una plataforma en vivo, no.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  motor:
+    name: motor (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: windows-latest   # los tests de ACL/icacls sólo corren acá
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+    defaults:
+      run:
+        working-directory: 06_Application
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            06_Application/requirements.txt
+            06_Application/requirements-service.txt
+
+      - name: instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-service.txt
+
+      # `--with-deps` instala las librerías de sistema que Chromium necesita, y
+      # sólo existe para Debian/Ubuntu. En Windows el navegador se instala solo.
+      - name: instalar Chromium (Linux)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+
+      - name: instalar Chromium (Windows)
+        if: runner.os == 'Windows'
+        run: python -m playwright install chromium
+
+      - name: pytest
+        env:
+          # Sin esto, los siete tests de tests/test_driver_contract.py se saltean
+          # solos cuando no hay navegador. Son los ÚNICOS que corren un Chromium
+          # de verdad, así que un CI verde con ellos salteados no dice nada sobre
+          # la capa que produjo los defectos más caros del proyecto.
+          EVALKIT_REQUIRE_BROWSER: "1"
+        run: python -m pytest -q -rs
+
+  fijado:
+    name: instalación fijada + preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: 06_Application
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: 06_Application/requirements.lock
+
+      - name: instalar versiones exactas
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+
+      - name: instalar Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: pytest
+        env:
+          EVALKIT_REQUIRE_BROWSER: "1"
+        run: python -m pytest -q
+
+      - name: preflight (lxp_eval.service.selfcheck)
+        env:
+          # Valores DESCARTABLES, generados para este trabajo. selfcheck no
+          # llama a la API a propósito, así que una clave con la forma correcta
+          # alcanza para ejercitar el chequeo sin gastar un centavo ni exponer
+          # un secreto real en un log público.
+          ANTHROPIC_API_KEY: "sk-ci-placeholder-nunca-se-usa"
+        run: |
+          export EVALKIT_SECRET_KEY="$(python -c 'from lxp_eval.service.crypto import generate_key; print(generate_key())')"
+          export EVALKIT_SERVICE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          python -m lxp_eval.service.selfcheck
+
+  web:
+    name: web (typecheck + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: typecheck
+        run: npx tsc --noEmit
+
+      - name: build
+        run: npm run build

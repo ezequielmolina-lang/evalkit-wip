@@ -25,6 +25,7 @@ hacen falta.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,18 @@ async def driver():
     async with playwright.async_playwright() as p:
         try:
             browser = await p.chromium.launch(headless=True)
-        except Exception as exc:  # noqa: BLE001 -- sin navegador instalado, se saltea
+        except Exception as exc:  # noqa: BLE001
+            # Sin navegador estos siete se saltean, que es lo correcto en la
+            # máquina de alguien que todavía no corrió `playwright install`.
+            # En CI NO lo es: son los únicos que ejercitan un Chromium de
+            # verdad, así que un salteo silencioso ahí convierte el verde en
+            # una afirmación sobre los dobles y nada más. EVALKIT_REQUIRE_BROWSER
+            # lo vuelve un error ruidoso, y el workflow lo pone en 1.
+            if os.environ.get("EVALKIT_REQUIRE_BROWSER"):
+                raise RuntimeError(
+                    "EVALKIT_REQUIRE_BROWSER=1 y no hay Chromium: corré "
+                    f"`python -m playwright install chromium`. Causa: {exc}"
+                ) from exc
             pytest.skip(f"no hay chromium: {exc}")
         page = await (await browser.new_context()).new_page()
         await page.goto(PAGINA)

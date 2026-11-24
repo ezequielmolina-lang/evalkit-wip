@@ -1,0 +1,77 @@
+# Versiones EXACTAS, resueltas el 2026-09-13 sobre Python 3.11 / Linux.
+#
+# POR QUÉ EXISTE. requirements.txt declara pisos (`>=`), que es lo correcto para
+# una librería y lo peor posible para esto: una corrida contra una plataforma en
+# vivo dura decenas de minutos y cuesta plata, y `pip install` en una máquina
+# nueva puede traer un SDK con otra firma. El motor ya vio ese golpe: el
+# docstring de service/retry.py dice "verificado contra anthropic 0.116.0" y hoy
+# el índice entrega 1.5.0, o sea un cambio de versión MAYOR por debajo de una
+# capa cuyo trabajo es no romperse.
+#
+#   pip install -r requirements.lock     # despliegue, contenedor, CI reproducible
+#   pip install -r requirements.txt      # desarrollo, y para ver si el mundo se movió
+#
+# El CI corre las dos cosas a propósito: el trabajo `fijado` prueba que esta
+# lista funciona, y el trabajo `motor` (flotante, más el cron de los lunes) es lo
+# que avisa que llegó la hora de regenerar este archivo:
+#
+#   pip install -r requirements.txt -r requirements-service.txt && pip freeze > requirements.lock
+#
+# Linux/CPython 3.11. Trae uvloop, que en Windows no instala: en cosmo usá
+# requirements.txt.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.5.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+cryptography==50.0.1
+docstring_parser==0.18.0
+et_xmlfile==2.0.0
+fastapi==0.141.1
+greenlet==3.5.5
+h11==0.16.0
+httpcore==1.0.9
+httpcore2==2.12.0
+httptools==0.8.0
+httpx==0.28.1
+httpx2==2.12.0
+idna==3.19
+iniconfig==2.3.0
+jiter==0.17.0
+lxml==6.1.3
+markdown-it-py==4.2.0
+mdurl==0.1.2
+openpyxl==3.1.5
+packaging==26.3
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.3.0
+playwright==1.62.0
+pluggy==1.6.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pyee==13.0.1
+Pygments==2.21.0
+pymupdf==1.28.2
+pypdf==6.18.1
+pypdfium2==5.13.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-docx==1.2.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+PyYAML==6.0.3
+rich==15.0.0
+sniffio==1.3.1
+starlette==1.6.0
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.4
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==17.1
