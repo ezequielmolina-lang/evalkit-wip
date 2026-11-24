@@ -21,8 +21,9 @@ import pytest
 
 from lxp_eval.evalkit.framework import NO_EVALUADO
 from lxp_eval.evalkit.generator import REVISE
-from lxp_eval.service import serialize
+from lxp_eval.service import batch as batch_mod
 from lxp_eval.service.batch import (
+    SETUP_ERROR,
     ManifestEntry,
     load_manifest,
     resolve_credentials,
@@ -177,6 +178,266 @@ def test_no_cap_runs_everything(tmp_path):
     ))
     assert summary.halted is False
     assert len(summary.jobs) == 4
+
+
+def test_the_halt_reason_quotes_the_final_spend(tmp_path):
+    """El motivo del corte cita el gasto FINAL, con los que estaban en vuelo.
+
+    Dos a la vez, tope=$10, $10 por trabajo, y el segundo tarda: cuando el
+    primero termina el tope ya saltó y el segundo sigue en vuelo. El motivo se
+    armaba en ese instante y decía $10 mientras el total del mismo resumen decía
+    $20. Tiene que decir lo mismo que el total.
+    """
+    calls: list = []
+    made = []
+
+    class SlowSecond(FakeRunner):
+        async def build_plan(self, record):
+            if self.slow:
+                await asyncio.sleep(0.05)
+            return await super().build_plan(record)
+
+    def factory(store, engine, box, clock):
+        runner = SlowSecond(store, engine, box, clock, calls=calls, spend=10.0)
+        runner.slow = len(made) == 1          # the second job launched
+        made.append(runner)
+        return runner
+
+    store = JobStore(tmp_path / "jobs")
+    entries = [_entry(f"https://p{i}.test") for i in range(4)]
+    summary = asyncio.run(run_batch(
+        entries, store=store, runner_factory=factory,
+        default_approval_policy="auto", max_parallel=2, max_spend_usd=10.0,
+    ))
+    assert summary.halted is True
+    assert len(summary.jobs) == 2
+    assert summary.total_spend_usd == pytest.approx(20.0)
+    assert "$20.00" in summary.halted_reason
+    assert "2 de 4" in summary.halted_reason      # how many were never launched
+
+
+# --- one bad entry does not take the batch down ------------------------------
+#
+# Found by code review, before a real run could: per-entry setup used to
+# re-raise, so a missing document path in ONE entry killed a 100-job weekly run
+# with a traceback and no summary. Each of these would have been that crash.
+
+
+def _run(coro):
+    """Run with a ceiling: a leaked semaphore permit shows up as a HANG, and a
+    hung test suite is the worst way to learn about it."""
+    async def bounded():
+        return await asyncio.wait_for(coro, timeout=20)
+    return asyncio.run(bounded())
+
+
+def test_a_missing_document_fails_that_entry_not_the_batch(tmp_path):
+    calls: list = []
+    store = JobStore(tmp_path / "jobs")
+    entries = [
+        _entry("https://a.test"),
+        _entry("https://b.test", documents=[
+            {"name": "Pliego", "path": str(tmp_path / "no-existe.pdf")},
+        ]),
+        _entry("https://c.test"),
+    ]
+    summary = _run(run_batch(
+        entries, store=store, runner_factory=_fake_factory(calls, spend=1.0),
+        default_approval_policy="auto", max_parallel=1,
+    ))
+    # manifest order is kept, and the bad entry is LISTED, with its reason
+    assert [o.platform for o in summary.jobs] == ["a.test", "b.test", "c.test"]
+    bad = summary.jobs[1]
+    assert bad.stage == SETUP_ERROR
+    assert bad.job_id == ""
+    assert "Pliego" in bad.error and "no existe" in bad.error
+    # the other two ran to the end -- including the one AFTER the failure,
+    # which with max_parallel=1 proves the permit was given back
+    assert summary.jobs[0].stage == Stage.DONE
+    assert summary.jobs[2].stage == Stage.DONE
+    # no orphan record was left behind for the entry that never started
+    assert len(store.list_ids()) == 2
+
+
+def test_a_failure_after_the_record_exists_is_written_on_the_record(
+    tmp_path, monkeypatch
+):
+    """Si el registro ya existe, el motivo queda EN el registro.
+
+    Sin eso quedaría en su etapa inicial con latido fresco, y la reconciliación
+    del servicio lo reportaría después como "murió el worker" -- un motivo falso.
+    """
+    monkeypatch.setenv("EVALKIT_CRED_ROTA_USER", "cuenta")
+    monkeypatch.setenv("EVALKIT_CRED_ROTA_PASS", "clave-de-prueba")
+
+    class FakeBox:
+        def encrypt_credentials(self, user, password):
+            return b"cifrado"
+
+    class DiskFull(JobStore):
+        def put_credentials(self, job_id, blob):
+            raise OSError("no queda espacio en el disco")
+
+    calls: list = []
+    store = DiskFull(tmp_path / "jobs")
+    entries = [
+        _entry("https://a.test", credentials_ref="rota"),
+        _entry("https://b.test"),
+    ]
+    summary = _run(run_batch(
+        entries, store=store, box=FakeBox(),
+        runner_factory=_fake_factory(calls, spend=1.0),
+        default_approval_policy="auto", max_parallel=1,
+    ))
+    failed, ok = summary.jobs
+    assert failed.job_id, "el registro existía: tiene que listarse con su id"
+    record = store.get(failed.job_id)
+    assert record.stage == Stage.ERROR
+    assert "no se pudo preparar" in record.error["message"]
+    assert "no queda espacio" in record.error["message"]
+    assert record.error["kind"] == "OSError"
+    # never started, so the runner never saw it -- and the batch went on
+    assert ("build_plan", failed.job_id) not in calls
+    assert ok.stage == Stage.DONE
+    # the credential itself is nowhere in what the summary or the record carry
+    assert "clave-de-prueba" not in failed.error
+    assert "clave-de-prueba" not in str(record.error)
+
+
+def test_an_oversized_document_is_refused_by_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch_mod, "MAX_DOCUMENT_BYTES", 10)
+    big = tmp_path / "volcado.txt"
+    big.write_text("x" * 500, encoding="utf-8")
+    calls: list = []
+    store = JobStore(tmp_path / "jobs")
+    summary = _run(run_batch(
+        [_entry(documents=[{"name": "Volcado", "path": str(big)}])],
+        store=store, runner_factory=_fake_factory(calls, spend=1.0),
+        default_approval_policy="auto", max_parallel=1,
+    ))
+    assert summary.jobs[0].stage == SETUP_ERROR
+    assert "Volcado" in summary.jobs[0].error
+    assert "supera el límite" in summary.jobs[0].error
+    assert calls == []
+
+
+def test_a_document_path_is_read_by_its_extension_not_its_title(tmp_path):
+    """Un título sin extensión más una ruta: el caso del manifiesto de ejemplo.
+
+    `extract_text` elige el lector por la extensión del nombre que recibe. Pasarle
+    el título ("Lineamiento pedagógico") rechazaba el archivo como formato no
+    soportado; tiene que recibir el nombre del ARCHIVO.
+    """
+    doc = tmp_path / "lineamiento.txt"
+    doc.write_text("Una idea por segmento.", encoding="utf-8")
+    calls: list = []
+    store = JobStore(tmp_path / "jobs")
+    summary = _run(run_batch(
+        [_entry(documents=[{"name": "Lineamiento pedagógico", "path": str(doc)}])],
+        store=store, runner_factory=_fake_factory(calls, spend=1.0),
+        default_approval_policy="auto", max_parallel=1,
+    ))
+    assert summary.jobs[0].stage == Stage.DONE, summary.jobs[0].error
+    record = store.get(summary.jobs[0].job_id)
+    # the record keeps {name, text} -- the title, the extracted text, no path
+    assert record.documents == [
+        {"name": "Lineamiento pedagógico", "text": "Una idea por segmento."}
+    ]
+
+
+@pytest.mark.parametrize(
+    "n_entries",
+    [
+        # every entry launched: the cancel lands while the batch WAITS for jobs
+        pytest.param(1, id="while-draining"),
+        # the second entry is still queued behind the one slot: the cancel lands
+        # in the LAUNCH loop, and the queued entry must never be created
+        pytest.param(2, id="while-launching"),
+    ],
+)
+def test_cancelling_the_batch_cancels_what_is_in_flight(tmp_path, n_entries):
+    """Frenar el lote no deja trabajos corriendo sin nadie que los espere."""
+
+    class Hangs(FakeRunner):
+        async def build_plan(self, record):
+            self.started.set()
+            await asyncio.Event().wait()          # never returns on its own
+
+    store = JobStore(tmp_path / "jobs")
+
+    async def scenario():
+        started = asyncio.Event()
+
+        def factory(store_, engine, box, clock):
+            runner = Hangs(store_, engine, box, clock, calls=[], spend=0.0)
+            runner.started = started
+            return runner
+
+        task = asyncio.ensure_future(run_batch(
+            [_entry(f"https://p{i}.test") for i in range(n_entries)],
+            store=store, runner_factory=factory,
+            default_approval_policy="auto", max_parallel=1,
+        ))
+        await asyncio.wait_for(started.wait(), timeout=10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+        # nothing of the batch is left running behind the cancelled launcher
+        leftovers = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        assert leftovers == [], [t.get_name() for t in leftovers]
+
+    asyncio.run(scenario())
+    (job_id,) = store.list_ids()                  # the queued entry never existed
+    record = store.get(job_id)
+    # the supervisor wrote WHY on the job itself: cancelled, not left hanging
+    assert record.stage == Stage.ERROR
+    assert record.error["kind"] == "CancelledError"
+
+
+# --- the CLI path stays free of the web stack --------------------------------
+
+
+def test_importing_the_batch_runner_does_not_load_the_web_server():
+    """El lote corre desatendido y sin servidor: no tiene por qué cargar FastAPI.
+
+    En un proceso LIMPIO, porque en éste `test_service` ya lo importó. Antes el
+    paquete hacía `from .app import create_app` arriba de todo, así que cualquier
+    submódulo arrastraba el stack web sólo por vivir ahí.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import sys; import lxp_eval.service.batch; "
+        "bad = [m for m in ('fastapi', 'starlette', 'lxp_eval.service.app') "
+        "if m in sys.modules]; "
+        "print(','.join(bad)); sys.exit(1 if bad else 0)"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, f"se cargó: {done.stdout.strip()} {done.stderr[-400:]}"
+
+
+def test_create_app_is_still_importable_from_the_package():
+    """El export perezoso no cambia el contrato: `from lxp_eval.service import create_app`."""
+    from lxp_eval.service import create_app
+    from lxp_eval.service.app import create_app as real
+
+    assert create_app is real
+
+
+def test_the_document_cap_is_the_upload_cap():
+    """Repetido en `batch` para no importar el servidor; atado acá para que no derive."""
+    from lxp_eval.service.app import MAX_UPLOAD_BYTES
+
+    assert batch_mod.MAX_DOCUMENT_BYTES == MAX_UPLOAD_BYTES
 
 
 # --- auto vs human / gated vs ungated, against the REAL gate ------------------

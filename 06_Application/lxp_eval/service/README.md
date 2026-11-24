@@ -322,6 +322,14 @@ invariants:
 finish. **Concurrency** is bounded by a semaphore the size of
 `LXP_MAX_PARALLEL_AGENTS` — one Chromium per job is heavy.
 
+**One bad entry does not take the batch down.** Each entry's setup — reading its
+documents, creating the record, encrypting credentials, scheduling — is isolated.
+If it fails (a `path:` that does not exist, a file over 25 MB), *that* entry is
+listed as failed with its reason and the batch carries on; the summary is always
+returned. A job that dies later, mid-stage, is recorded on its own job by the
+supervisor as usual. Stopping the batch cancels the jobs in flight, and each one
+records that it was cancelled and where.
+
 **Credentials by reference, never in the manifest.** An entry's
 `credentials_ref: foo` is resolved from `EVALKIT_CRED_FOO_USER` /
 `EVALKIT_CRED_FOO_PASS`. With those unset the job runs on the saved session (the

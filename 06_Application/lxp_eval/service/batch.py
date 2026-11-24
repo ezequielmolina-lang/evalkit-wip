@@ -53,11 +53,14 @@ from typing import Any, Awaitable, Callable, Protocol, Sequence
 from ..config import CONFIG
 from ..evalkit.framework import NO_EVALUADO
 from ..evalkit.generator import DEFAULT_RISK_POLICY, RISK_POLICIES
-from .app import auto_approve  # la MISMA aprobación-máquina que POST /jobs bajo "auto"
 from .crypto import SecretBox, ServiceError
 from .jobs import Engine, JobRunner, Stage, platform_label
+# La MISMA aprobación-máquina que POST /jobs bajo "auto". Se importa de
+# `ledger_decisions` y NO de `app`: este CLI corre desatendido, sin servidor, y no
+# tiene por qué cargar FastAPI para alcanzar una función de store + ledger.
+from .ledger_decisions import auto_approve
 from .store import JobRecord, JobStore
-from .watchdog import Clock, Supervisor
+from .watchdog import Clock, Supervisor, mark_error
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +70,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_ROOT = Path("runs") / "jobs"
 
 VALID_APPROVAL_POLICIES = ("human", "auto")
+
+#: Tope de un documento leído desde una ruta del manifiesto. El mismo que
+#: `app.MAX_UPLOAD_BYTES` pone a una subida por la interfaz (un test los ata),
+#: repetido acá en vez de importado para no traer el servidor web al CLI. Sin
+#: tope, una ruta mal puesta -- un video, un volcado -- se lee entera a memoria
+#: antes de que nadie pueda decir que no era un pliego.
+MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+MAX_DOCUMENT_LABEL = "25 MB"
+
+#: La "etapa" que el resumen muestra para una entrada que no llegó a ser un
+#: trabajo: falló antes de crear su registro, así que no hay job_id ni etapa del
+#: motor que citar. No es un valor de `Stage` a propósito -- no existe en el store.
+SETUP_ERROR = "setup_error"
 
 
 __all__ = [
@@ -259,6 +275,12 @@ def _load_documents(documents: Sequence[dict]) -> list[dict]:
     Extraer acá, en el borde, es lo mismo que hace `/extract` por la interfaz: el
     registro del trabajo guarda SIEMPRE `{name, text}`, nunca una ruta, así que
     el motor no gana un camino nuevo que pueda nombrar un archivo.
+
+    Una ruta que no existe o un archivo desmedido se rechazan ACÁ, con un mensaje
+    que nombra el documento, y no con el `FileNotFoundError` pelado de
+    `read_bytes`. Quien lee el resumen de un lote de cien trabajos tiene que
+    poder saber cuál pliego faltaba sin abrir un traceback. `run_batch` convierte
+    este rechazo en un trabajo fallido listado, no en un lote caído.
     """
     from ..evalkit.extract import extract_text
 
@@ -273,7 +295,24 @@ def _load_documents(documents: Sequence[dict]) -> list[dict]:
             continue
         p = Path(path)
         name = doc.get("name") or p.name
-        out.append({"name": name, "text": extract_text(name, p.read_bytes())})
+        if not p.is_file():
+            raise ValueError(
+                f'el documento "{name}" apunta a una ruta que no existe o no es '
+                f"un archivo: {path}"
+            )
+        size = p.stat().st_size
+        if size > MAX_DOCUMENT_BYTES:
+            raise ValueError(
+                f'el documento "{name}" pesa {size / (1024 * 1024):.1f} MB y '
+                f"supera el límite de {MAX_DOCUMENT_LABEL}: poné sólo la sección "
+                "que importa, o una versión sin las imágenes"
+            )
+        # `p.name`, NO `name`: `extract_text` elige el lector por la EXTENSIÓN
+        # del nombre que recibe, y `name` es el título que el manifiesto le puso
+        # al documento ("Pliego de la licitación"), que no tiene por qué llevar
+        # una. Pasarle el título rechazaba como "formato no soportado" justo el
+        # caso del manifiesto de ejemplo: un título más una ruta a un PDF.
+        out.append({"name": name, "text": extract_text(p.name, p.read_bytes())})
     return out
 
 
@@ -377,6 +416,21 @@ async def run_batch(
     SUPERVISIÓN. Cada trabajo se agenda con `Supervisor.start`, así que el mismo
     watchdog que cubre al servicio cubre al lote: un trabajo que se cuelga se
     marca `error` por latido vencido en vez de colgar el lote entero.
+
+    UNA ENTRADA MALA NO TUMBA EL LOTE. La preparación de cada entrada -- leer sus
+    documentos, crear el registro, cifrar credenciales, agendar -- está aislada:
+    si falla, ESA entrada queda listada como fallida con su motivo y el lote
+    sigue. La primera versión re-lanzaba la excepción desde acá, y una revisión
+    de código lo encontró antes que una corrida real: bastaba un `path:` de
+    documento inexistente en la entrada 3 de 100 para que el lote muriera con un
+    traceback, sin resumen, y sin esperar a los trabajos que ya estaban en vuelo.
+    Para una corrida semanal sin nadie mirando, eso es perder la semana por un
+    archivo mal nombrado.
+
+    Lo que SÍ se propaga es lo que no es de una entrada: una cancelación (alguien
+    frenó el lote) cancela los trabajos en vuelo -- `Supervisor._guarded` deja el
+    motivo en cada uno -- y, pase lo que pase, lo lanzado se espera y el
+    supervisor se cierra antes de salir.
     """
     engine = engine or Engine()
     clock = clock or Clock()
@@ -389,7 +443,10 @@ async def run_batch(
     total_spend = 0.0
     halted = False
     halted_reason = ""
-    launched: list[str] = []
+    #: Una posición por entrada ATENDIDA, en el orden del manifiesto: el job_id
+    #: de un trabajo que tiene registro (se lee del store al final), o el
+    #: resultado ya armado de una entrada que falló antes de tenerlo.
+    slots: list[str | JobOutcome] = []
 
     def _over_cap() -> bool:
         return max_spend_usd is not None and total_spend >= float(max_spend_usd)
@@ -422,76 +479,152 @@ async def run_batch(
             return await _worker(record, entry, policy)
         return _coro
 
-    tasks: list[asyncio.Task] = []
-    for entry in entries:
-        if _over_cap():
-            halted = True
-            break
-        await sem.acquire()
-        # Un trabajo pudo terminar mientras esperábamos lugar y hacer saltar el
-        # tope: re-chequear antes de gastar en uno nuevo.
-        if _over_cap():
-            sem.release()
-            halted = True
-            break
+    def _credentials_blob(entry: ManifestEntry) -> bytes | None:
+        """Las credenciales de la entrada, YA cifradas, o None. Nunca en un log.
 
-        policy = entry.approval_policy or default_approval_policy or "human"
-        try:
-            record = store.create(
-                objective=entry.objective,
-                areas=list(entry.areas),
-                platform_url=entry.platform_url,
-                platform=platform_label(entry.platform_url),
-                platform_kind=entry.platform_kind,
-                documents=_load_documents(entry.documents),
-                approval_policy=policy,
+        Se resuelven y cifran ANTES de crear el registro: si el cifrado falla, no
+        queda un trabajo a medio armar en el disco.
+        """
+        if not entry.credentials_ref:
+            return None
+        creds = resolve_credentials(entry.credentials_ref)
+        if creds is None:
+            logger.info(
+                "%s: credentials_ref %s sin variables de entorno; corre sobre la "
+                "sesión guardada",
+                entry.platform_url, entry.credentials_ref,
             )
-            if entry.credentials_ref:
-                creds = resolve_credentials(entry.credentials_ref)
-                if creds and box is not None:
-                    store.put_credentials(
-                        record.job_id, box.encrypt_credentials(creds[0], creds[1])
-                    )
+            return None
+        if box is None:
+            logger.warning(
+                "%s: hay credenciales para %s pero falta EVALKIT_SECRET_KEY para "
+                "cifrarlas; corre sobre la sesión guardada",
+                entry.platform_url, entry.credentials_ref,
+            )
+            return None
+        return box.encrypt_credentials(creds[0], creds[1])
+
+    tasks: list[asyncio.Task] = []
+    try:
+        for index, entry in enumerate(entries):
+            if _over_cap():
+                halted = True
+                break
+            await sem.acquire()
+            # Un trabajo pudo terminar mientras esperábamos lugar y hacer saltar
+            # el tope: re-chequear antes de gastar en uno nuevo.
+            if _over_cap():
+                sem.release()
+                halted = True
+                break
+
+            policy = entry.approval_policy or default_approval_policy or "human"
+            record: JobRecord | None = None
+            try:
+                # Lo que puede fallar por culpa del manifiesto -- un documento
+                # que no está, credenciales que no cifran -- va ANTES de
+                # `store.create`, para que ese fallo no deje un registro huérfano.
+                documents = _load_documents(entry.documents)
+                blob = _credentials_blob(entry)
+                record = store.create(
+                    objective=entry.objective,
+                    areas=list(entry.areas),
+                    platform_url=entry.platform_url,
+                    platform=platform_label(entry.platform_url),
+                    platform_kind=entry.platform_kind,
+                    documents=documents,
+                    approval_policy=policy,
+                )
+                if blob is not None:
+                    store.put_credentials(record.job_id, blob)
                     record.has_credentials = True
                     store.save(record)
-                elif creds and box is None:
-                    logger.warning(
-                        "job %s: hay credenciales para %s pero el servicio no "
-                        "tiene EVALKIT_SECRET_KEY; corre sobre la sesión guardada",
-                        record.job_id, entry.credentials_ref,
+                tasks.append(supervisor.start(_make_coro(entry, policy), record))
+            except Exception as exc:  # noqa: BLE001 -- el motivo es el producto
+                # ESTA entrada no se pudo lanzar; las demás sí. Soltar el lugar
+                # (o el semáforo se desangra y el lote se cuelga en el próximo
+                # acquire), dejar el motivo donde el resumen lo lee, y seguir.
+                sem.release()
+                motivo = (
+                    "no se pudo preparar el trabajo: "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+                logger.warning(
+                    "entrada %d (%s) no se lanzó: %s", index, entry.platform_url, motivo
+                )
+                if record is not None:
+                    # Ya tiene registro: que diga por qué murió. Sin esto queda
+                    # en su etapa inicial con latido fresco, y la reconciliación
+                    # del servicio lo reportaría más tarde como "murió el
+                    # worker", que no es lo que pasó.
+                    mark_error(
+                        store, record,
+                        stage=record.stage,
+                        message=motivo,
+                        kind=exc.__class__.__name__,
+                        at=clock.now(),
                     )
+                    slots.append(record.job_id)
                 else:
-                    logger.info(
-                        "job %s: credentials_ref %s sin variables de entorno; "
-                        "corre sobre la sesión guardada",
-                        record.job_id, entry.credentials_ref,
-                    )
-        except BaseException:
-            # El trabajo no llegó a agendarse: soltar el lugar que tomamos, o el
-            # semáforo se desangra y el lote se cuelga en el próximo acquire.
-            sem.release()
-            raise
-
-        tasks.append(supervisor.start(_make_coro(entry, policy), record))
-        launched.append(record.job_id)
+                    slots.append(JobOutcome(
+                        job_id="",
+                        platform=platform_label(entry.platform_url),
+                        stage=SETUP_ERROR,
+                        approval_policy=policy,
+                        spend_usd=0.0,
+                        no_evaluado=0,
+                        scored=0,
+                        error=motivo,
+                    ))
+                continue
+            except BaseException:
+                # No es un fallo de la entrada (cancelación, apagado): soltar el
+                # lugar y dejar que el `finally` de abajo cierre lo lanzado.
+                sem.release()
+                raise
+            slots.append(record.job_id)
+    except asyncio.CancelledError:
+        # Alguien frenó el lote MIENTRAS se lanzaba. Dejar los trabajos corriendo
+        # sin lanzador sería gastar sin nadie que lea el resultado: se cancelan,
+        # y `_guarded` deja escrito en cada uno que fue cancelado y en qué etapa.
+        for task in tasks:
+            task.cancel()
+        raise
+    finally:
+        # SIEMPRE: esperar lo lanzado y cerrar el supervisor. `_guarded` ya
+        # registró cualquier muerte en el propio registro del trabajo, así que
+        # un error acá no es una sorpresa: es un trabajo marcado `error` que el
+        # resumen va a listar.
+        #
+        # El cierre del supervisor va en su PROPIO finally. Lo más común es que
+        # la cancelación llegue acá mismo, con todo lanzado y el lote esperando:
+        # `gather` se la pasa a los trabajos (que quedan marcados) y la relanza
+        # al terminar -- y sin el finally anidado esa relanzada se saltaba el
+        # cierre y dejaba a los vigías del supervisor sin dueño.
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            if owns_supervisor:
+                await supervisor.shutdown()
 
     if halted:
+        # Armado DESPUÉS de esperar a los que estaban en vuelo: la cifra de
+        # gasto es la final. Antes se armaba al cortar, y el motivo citaba un
+        # total menor que el de la línea "Gasto total" del mismo resumen.
         halted_reason = (
-            f"se alcanzó el tope de gasto del lote: ${total_spend:.2f} de un "
-            f"máximo de ${float(max_spend_usd):.2f}. Se dejaron de lanzar "
-            f"trabajos nuevos; los {len(tasks)} ya lanzados terminan."
+            f"se alcanzó el tope de gasto del lote (máximo "
+            f"${float(max_spend_usd):.2f}) y no se lanzaron más trabajos: "
+            f"quedaron {len(entries) - len(slots)} de {len(entries)} entradas sin "
+            f"lanzar. Gasto total al cierre, con los que estaban en vuelo ya "
+            f"terminados: ${total_spend:.2f}."
         )
         logger.warning(halted_reason)
 
-    # Esperar a que termine todo lo lanzado. `_guarded` ya registró cualquier
-    # muerte en el propio registro del trabajo, así que un error acá no es una
-    # sorpresa: es un trabajo marcado `error` que el resumen va a listar.
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    if owns_supervisor:
-        await supervisor.shutdown()
-
-    outcomes = [_outcome(store, job_id) for job_id in launched]
+    outcomes = [
+        slot if isinstance(slot, JobOutcome) else _outcome(store, slot)
+        for slot in slots
+    ]
     return BatchSummary(
         jobs=outcomes,
         total_spend_usd=round(total_spend, 4),
@@ -504,10 +637,15 @@ async def run_batch(
 
 
 def _print_summary(summary: BatchSummary) -> None:
-    print(f"\nLote terminado: {len(summary.jobs)} trabajo(s) lanzados.")
+    sin_lanzar = sum(1 for o in summary.jobs if o.stage == SETUP_ERROR)
+    print(
+        f"\nLote terminado: {len(summary.jobs)} entrada(s) atendidas"
+        + (f", {sin_lanzar} sin poder lanzarse." if sin_lanzar else ".")
+    )
     for o in summary.jobs:
         linea = (
-            f"  - {o.job_id}  {o.platform or '(sin plataforma)'}  "
+            f"  - {o.job_id or '(sin registro)'}  "
+            f"{o.platform or '(sin plataforma)'}  "
             f"[{o.approval_policy}]  etapa={o.stage}  gasto=${o.spend_usd:.2f}"
         )
         if o.stage == Stage.DONE:
