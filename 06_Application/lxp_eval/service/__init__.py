@@ -11,12 +11,31 @@ Playwright and the long-running work.
 
 Run it: see lxp_eval/service/README.md.
 """
-from .app import create_app
 from .crypto import SecretBox, ServiceError, generate_key
 from .jobs import Engine, JobRunner, Stage
 from .retry import RetryPolicy
 from .store import JobRecord, JobStore
 from .watchdog import Clock, Supervisor, reconcile
+
+
+def __getattr__(name: str):
+    """`create_app`, importado recién cuando alguien lo pide.
+
+    `from lxp_eval.service import create_app` sigue funcionando igual (PEP 562).
+    Lo que cambia es que importar el PAQUETE ya no carga `app.py`, y con él
+    FastAPI y Starlette. Antes era `from .app import create_app` arriba de todo,
+    así que cualquier submódulo -- en particular `batch`, el CLI que corre
+    desatendido y sin servidor -- arrastraba el stack web sólo por vivir en este
+    paquete. El motor no depende del front; el lote tampoco tiene por qué
+    depender del servidor. Un test lo ata: importar `batch` en un proceso limpio
+    no puede dejar `fastapi` en `sys.modules`.
+    """
+    if name == "create_app":
+        from .app import create_app
+
+        return create_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "Clock",

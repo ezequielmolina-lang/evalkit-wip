@@ -41,7 +41,6 @@ configured without being usable as one. The key itself lives encrypted in
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -54,12 +53,23 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from ..evalkit.errors import EvalkitError
 from ..evalkit.extract import extract_text
-from ..evalkit.ledger import EvidenceLedger
 from ..textio import first_lone_surrogate, scrub_surrogates
 from . import auth as auth_mod
 from . import serialize
 from .crypto import SecretBox, ServiceError
 from .jobs import Engine, JobRunner, Stage, platform_label
+# The decision rows (approval, signoff) and the machine approval live in their
+# own module because none of them touches the network: the batch CLI needs
+# `auto_approve` and must not have to import a web server to reach it. They are
+# imported BY NAME here so the endpoints below read as they always did, and so
+# `app._slug` stays importable (a test pins it against the runner's rule).
+from .ledger_decisions import (  # noqa: F401 -- _slug/_ledger_decision re-exported
+    _ledger_decision,
+    _ledger_the_approval,
+    _ledger_the_signoff,
+    _slug,
+    auto_approve,
+)
 from .models import ApiKeyIn, ApproveIn, SignoffIn, StartJobIn
 from .settings import SettingsStore
 from .store import JobRecord, JobStore, now
@@ -233,125 +243,13 @@ def _public_state(record: JobRecord, store: JobStore) -> dict:
         "platform": record.platform,
         "objective": record.objective,
         "areas": list(record.areas),
+        "approvalPolicy": record.approval_policy,
         "hasCredentials": record.has_credentials,
         "evidencePath": str(store.ledger_path(record.job_id)),
         "createdAt": record.created_at,
         "updatedAt": record.updated_at,
         "approvedAt": record.approved_at,
     }
-
-
-def _slug(value: str) -> str:
-    """Same rule the runner applies to probe ids in artifact filenames."""
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in value)
-
-
-def _ledger_decision(
-    store: JobStore,
-    record: JobRecord,
-    *,
-    name_stem: str,
-    kind: str,
-    probe_id: str,
-    test_id: str,
-    note: str,
-    timestamp: str,
-    payload: object,
-) -> None:
-    """Put a human decision on the evidence ledger, snapshot first.
-
-    The operating model's answer to "why was probing this platform defensible?"
-    is that a human saw it and authorized it -- so the authorization has to
-    live in the same tamper-evident file as the probes it authorized, backed by
-    an artifact an auditor can re-hash: a byte-for-byte snapshot of the
-    decision. Snapshot written first, THEN hashed into the row, the same
-    capture-time rule every other ledger entry follows.
-
-    The filename is versioned, never reused. `verify()` re-hashes the file a
-    row points at, so overwriting an earlier snapshot on a repeat decision
-    would retroactively break verification of the earlier row -- a rewritten
-    artifact is exactly the tampering the ledger exists to expose. Append-only
-    holds for decisions too.
-
-    FAIL CLOSED, deliberately: no try/except here. This row IS the audit record
-    that makes the run defensible, so a decision that cannot be recorded must
-    not take effect downstream -- and each caller sequences its writes to keep
-    that true. The approval saves the record first but only drives the runner
-    after this returns. The signoff calls this BEFORE touching the record,
-    because /approve consults `record.signoffs` and never the ledger: a saved
-    signature whose append then failed would authorize a run with no row
-    behind it.
-    """
-    evidence_dir = store.evidence_dir(record.job_id)
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    n = 1
-    while True:
-        name = f"{name_stem}.json" if n == 1 else f"{name_stem}_{n}.json"
-        snapshot = evidence_dir / name
-        if not snapshot.exists():
-            break
-        n += 1
-    snapshot.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    EvidenceLedger(store.ledger_path(record.job_id)).append(
-        probe_id=probe_id,
-        test_id=test_id,
-        platform=record.platform,
-        run_index=0,
-        url="",
-        artifact=snapshot,
-        kind=kind,
-        note=note,
-        timestamp=timestamp,
-    )
-
-
-def _ledger_the_approval(store: JobStore, record: JobRecord) -> None:
-    """The approval row: one per POST /approve, artifact = the approved plan."""
-    _ledger_decision(
-        store,
-        record,
-        name_stem="approved_plan",
-        kind="approval",
-        probe_id="__plan__",
-        test_id="__plan__",
-        note="plan aprobado por el evaluador humano",
-        timestamp=record.approved_at,
-        payload=record.approved_plan,
-    )
-
-
-def _ledger_the_signoff(
-    store: JobStore, record: JobRecord, probe: dict, signed_at: str
-) -> None:
-    """The signoff row: one per POST /signoff, never bulk.
-
-    Mirrors the endpoint's own rule -- a signoff granted by approving a list
-    of thirty probes is not a signoff -- so each signature gets its own row
-    and its own snapshot. The snapshot is small and explicit: which probe,
-    which criterion, when, and the gated class the probe itself declares
-    (`signoffReason`), i.e. WHY a human signature was required at all.
-    """
-    probe_id = probe["probeId"]
-    test_id = probe["criterionId"]
-    _ledger_decision(
-        store,
-        record,
-        name_stem=f"signoff_{_slug(probe_id)}",
-        kind="signoff",
-        probe_id=probe_id,
-        test_id=test_id,
-        note=f'firma humana para el probe "{probe_id}"',
-        timestamp=signed_at,
-        payload={
-            "probe_id": probe_id,
-            "test_id": test_id,
-            "signed_at": signed_at,
-            "gated_class": probe["signoffReason"],
-        },
-    )
 
 
 # --- the app ----------------------------------------------------------------
@@ -486,6 +384,28 @@ def create_app(
             return record
         return await coro_fn(record)
 
+    async def _build_then_maybe_run(record: JobRecord) -> JobRecord:
+        """build_plan y, SÓLO bajo approval_policy="auto", aprobar y ejecutar.
+
+        La única cadena que maneja POST /jobs, así que humano y auto comparten
+        camino y el default humano queda intacto: arma el plan y PARA en
+        awaiting_approval, el comportamiento de hoy. Bajo `auto` las pruebas SIN
+        compuerta siguen solas; cada prueba con compuerta queda detrás de su
+        signoff -- que esto nunca escribe -- y vuelve NO_EVALUADO.
+
+        Toda la cadena corre bajo la MISMA supervisión que build_plan solo: en
+        segundo plano es una sola tarea supervisada, así que un cuelgue en la
+        etapa de run lo atrapa el watchdog en vez de quedar colgado. Sólo se
+        aprueba un plan que llegó a la compuerta: un build_plan que murió quedó en
+        `error` y no se ejecuta.
+        """
+        await runner.build_plan(record)
+        fresh = store.get(record.job_id) or record
+        if fresh.approval_policy == "auto" and fresh.stage == Stage.AWAITING_APPROVAL:
+            auto_approve(store, fresh)
+            await runner.execute(fresh)
+        return store.get(record.job_id) or fresh
+
     def _require(job_id: str) -> JobRecord:
         record = store.get(job_id)
         if record is None:
@@ -586,6 +506,12 @@ def create_app(
             platform=platform_label(body.platform.url),
             platform_kind=body.platform.kind or "",
             documents=[d.model_dump() for d in body.documents],
+            # "human" (el default) parquea en awaiting_approval, como siempre.
+            # "auto" aprueba el plan y corre las pruebas SIN compuerta sin
+            # esperar a nadie; las de compuerta quedan sin firmar y vuelven
+            # NO_EVALUADO. La cadena entera (build -> aprobar -> run) va por
+            # `_build_then_maybe_run`, supervisada igual que build_plan solo.
+            approval_policy=body.approval_policy,
         )
 
         # Credentials: encrypted into their own file, immediately, and dropped
@@ -604,7 +530,7 @@ def create_app(
             record.has_credentials = True
             store.save(record)
 
-        await _drive(runner.build_plan, record)
+        await _drive(_build_then_maybe_run, record)
         return {"job_id": record.job_id, "jobId": record.job_id}
 
     # --- read --------------------------------------------------------------

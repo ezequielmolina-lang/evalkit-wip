@@ -45,6 +45,12 @@ class StartJobIn(BaseModel):
     areas: list[str] = Field(default_factory=list)
     platform: PlatformIn
     documents: list[DocumentIn] = Field(default_factory=list)
+    #: Quién aprueba el plan. "human" (el default) = comportamiento de hoy: el
+    #: trabajo parquea en awaiting_approval hasta POST /approve. "auto" lo aprueba
+    #: solo y corre las pruebas SIN compuerta; las de compuerta quedan sin firmar
+    #: y vuelven NO_EVALUADO (la firma es por prueba, no por plan). Los valores
+    #: viven acá en texto para no crear un ciclo de importación con `batch`.
+    approval_policy: str = "human"
 
     @field_validator("objective")
     @classmethod
@@ -55,6 +61,17 @@ class StartJobIn(BaseModel):
                 "seleccionar criterios"
             )
         return v.strip()
+
+    @field_validator("approval_policy")
+    @classmethod
+    def _policy_valid(cls, v: str) -> str:
+        v = (v or "human").strip() or "human"
+        if v not in ("human", "auto"):
+            raise ValueError(
+                f'approval_policy "{v}" no existe: usá "human" (parquea para '
+                'revisión) o "auto" (aprueba y corre lo que no tiene compuerta)'
+            )
+        return v
 
 
 class ApiKeyIn(BaseModel):

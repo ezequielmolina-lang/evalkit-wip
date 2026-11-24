@@ -280,6 +280,15 @@ class Engine:
     bank: Any = None
     model: str | None = None
     max_rounds: int = 2
+    #: The risk policy handed to `generate_probes`. `registrar` (the default and
+    #: today's behaviour) FLAGS a risky probe, writes its vendor notice and marks
+    #: it `requires_human_signoff` -- the gate then holds it out of any run that
+    #: lacks a per-probe signature. `bloquear` refuses the flagged class outright
+    #: at generation time. Either way a gated probe never runs unsigned; this
+    #: knob only chooses whether such a probe is RECORDED-and-gated or REFUSED.
+    #: Exposed here so the batch runner can set a manifest's `risk_policy`
+    #: without a second call path into the generator.
+    risk_policy: str = generator_mod.DEFAULT_RISK_POLICY
     #: Bounded retry with backoff around every API call the service drives.
     #: A live run died on a bare `500 api_error` during the framework stage and
     #: discarded everything. Applied by wrapping the CLIENT, so it covers all
@@ -636,6 +645,10 @@ class JobRunner:
                 # pretending. `record.objective` is the same string
                 # `build_framework` was given, straight off POST /jobs.
                 objective=record.objective or None,
+                # The manifest's risk policy, threaded through the Engine. The
+                # default is the generator's own default (`registrar`), so the
+                # HTTP path -- which never sets this -- is unchanged.
+                risk_policy=self.engine.risk_policy,
                 # Hand-authored, live-validated probes replace the DRAFT for the
                 # criteria that have them; the council still reviews every one.
                 # Where there is no banked probe, drafting proceeds as before.
@@ -966,6 +979,14 @@ class JobRunner:
                     record.probes, record.executed_steps
                 ),
                 "coverage": record.coverage.get("summary_line", ""),
+                # WHO approved the plan this report rests on. A human-approved
+                # run (the default) reads "human"; an unattended batch run under
+                # the `auto` policy reads "auto", and `autoApproved` is the
+                # boolean a reader should not have to derive. The ledger's
+                # provenance section carries the same fact tamper-evidently; this
+                # puts it in the header a ministry reads first.
+                "approvalPolicy": record.approval_policy,
+                "autoApproved": record.approval_policy == "auto",
                 "note": (
                     "El juicio automático no es determinista: los parámetros de "
                     "muestreo del modelo fueron eliminados en este modelo y la API "

@@ -281,6 +281,79 @@ Test accounts are still accounts.
 There is deliberately no masked form. A masked-and-recoverable value is a leak
 with a decoration on it.
 
+## Batch / unattended runs
+
+One evaluation is a `POST /jobs` and a human at the approval screen. Fifty to a
+hundred tools a week cannot be. `lxp_eval.service.batch` runs a manifest of them
+unattended, through the **same** seams a request uses — `JobStore.create`, then
+`JobRunner.build_plan` / `execute`, under `Supervisor.start` — so the heartbeat,
+the watchdog and the orphan-reconcile all cover batch jobs unchanged. There is
+no second traversal of the engine here.
+
+```bash
+python -m lxp_eval.service.batch run lxp_eval/service/examples/batch_manifest.example.yaml \
+    --max-spend-usd 75 --max-parallel 3 --approval-policy auto
+```
+
+A weekly run is this command inside a system scheduler (cron, Windows Task
+Scheduler). There is deliberately no internal scheduler: the OS already is one.
+
+**Two things the batch does not negotiate**, because they are the repo's
+invariants:
+
+* **A gated probe never runs without a human signature, and the signature is
+  per probe, not per plan.** Under `approval_policy: auto` the batch approves the
+  plan and lets the **ungated** probes run; each gated probe (crisis, minors'
+  data, real writes) stays behind its own signoff, which the batch never writes,
+  so `JobRunner.runnable_probes` drops it and its criterion scores `NO_EVALUADO`.
+  This is the existing gate, untouched — the batch only chooses not to wait for
+  what has no gate. Default `approval_policy` is `human`: today's behaviour, the
+  job parks at `awaiting_approval`. The same `approval_policy: "human" | "auto"`
+  is accepted on `POST /jobs`, so a single request can also run unattended —
+  build, approve and run as one supervised chain — with the identical gate rule.
+* **An auto-approved run is never presented as human-approved.** The approval row
+  on the ledger carries the machine actor (`serialize.APPROVAL_NOTE_AUTO`), its
+  provenance line reads "aprobado automáticamente", and the report's
+  `meta.approvalPolicy` / `meta.autoApproved` record the fact in the header a
+  ministry reads first.
+
+**Spend ceiling.** `--max-spend-usd` (or `max_spend_usd:` in the manifest) stops
+*launching* new jobs once finished spend crosses the cap; jobs already in flight
+finish. **Concurrency** is bounded by a semaphore the size of
+`LXP_MAX_PARALLEL_AGENTS` — one Chromium per job is heavy.
+
+**One bad entry does not take the batch down.** Each entry's setup — reading its
+documents, creating the record, encrypting credentials, scheduling — is isolated.
+If it fails (a `path:` that does not exist, a file over 25 MB), *that* entry is
+listed as failed with its reason and the batch carries on; the summary is always
+returned. A job that dies later, mid-stage, is recorded on its own job by the
+supervisor as usual. Stopping the batch cancels the jobs in flight, and each one
+records that it was cancelled and where.
+
+**The exit code is the report.** Under a scheduler nobody reads the summary, so
+the command's exit code says what happened, and the last line of the output says
+the same thing in words:
+
+| Code | Meaning |
+|---|---|
+| `0` | Everything the manifest asked for was attended to and nothing failed. |
+| `1` | At least one job failed. The summary names it and says why. |
+| `2` | The manifest (or the invocation) is invalid. Nothing ran. |
+| `3` | No job failed, but the spend cap left entries unlaunched. |
+
+A job counts as fine only if it ended `done`, or `awaiting_approval` under
+`approval_policy: human` (the end that job was asked to reach). Anything else —
+`error`, an entry that could not be launched, a stage that is not a resting
+place — counts as failed. A `done` job whose criteria are all `NO_EVALUADO` is
+**not** a failure: not being able to observe is a valid result of an evaluation.
+
+**Credentials by reference, never in the manifest.** An entry's
+`credentials_ref: foo` is resolved from `EVALKIT_CRED_FOO_USER` /
+`EVALKIT_CRED_FOO_PASS`. With those unset the job runs on the saved session (the
+recon-first design). A manifest is versioned; a password in git is a burned one.
+
+See `examples/batch_manifest.example.yaml` for the full shape.
+
 ## Job directory layout
 
 ```
