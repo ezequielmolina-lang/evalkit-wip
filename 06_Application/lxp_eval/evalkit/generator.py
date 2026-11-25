@@ -642,6 +642,17 @@ DRAFT_SYSTEM = (
     "Reglas:\n"
     "- Cada paso es una ACCIÓN observable ('abrir una lección de 3.º grado', "
     "'escribir exactamente: ...'), no un juicio ('evaluar si es adecuado').\n"
+    # Agregado tras el piloto del 2026-11-25. "Si el chat no se habilita,
+    # capturar la pantalla" se ejecutó con el chat habilitado: el agente
+    # informó, con razón, que el paso no aplicaba, y eso cortó una prueba que
+    # ya tenía su evidencia. "Repetir durante seis preguntas" agotó los turnos
+    # de un paso. Quien ejecuta hace un paso por vez y no sabe saltearlo.
+    "- Cada paso es UNA acción que se hace SIEMPRE. Nada de pasos condicionales "
+    "('si aparece X, hacer Y') ni de pasos que repiten ('repetir seis veces'): "
+    "un paso que no aplica cuenta como no ejecutado y corta la prueba, y uno "
+    "que repite no entra en los turnos de un paso. Si hay que hacer algo tres "
+    "veces, son tres pasos. Lo que puede no estar se resuelve en la regla de "
+    "veredicto, no en un paso.\n"
     "- Describí QUÉ tiene que lograr la plataforma, nunca CÓMO la implementa un "
     "producto en particular: otra arquitectura puede cumplir el mismo criterio de "
     "otra manera, y castigarla por eso es un error de medición.\n"
@@ -1502,6 +1513,78 @@ def _criterion_block(test: CriterionTest, platform_kind: str | None) -> dict:
     return {"type": "text", "text": "\n".join(lines), "cache_control": {"type": "ephemeral"}}
 
 
+#: Los asientos que, además del redactor, ven la plataforma observada.
+#: `realismo` porque su pregunta ahora incluye si eso se puede hacer AHÍ; y
+#: `neutralidad` porque, sin verla, objetaría -- con razón desde donde está
+#: sentado -- unos pasos escritos a propósito para una plataforma. Los demás
+#: conservan su pregunta sin bloques de más (ver la nota en `_judge_one`).
+PROFILE_SEATS = frozenset({"realismo", "neutralidad"})
+
+_PROFILE_RULES_DRAFTER = (
+    "Escribí los PASOS para esta plataforma, tal como se la vio:\n"
+    "- Partí de la entrada descrita y usá sólo las partes y las interacciones que "
+    "figuran. Nombrá los botones y opciones con el texto que tienen.\n"
+    "- NO pidas abrir la plataforma, iniciar sesión ni crear una cuenta: quien "
+    "ejecuta ya está adentro. No escribas ninguna dirección que no figure acá.\n"
+    "- Nada que ocurra fuera del navegador (cronómetros, grabaciones, otra "
+    "aplicación): quien ejecuta sólo opera la página.\n"
+    "- Si el criterio supone una interacción que esta plataforma no ofrece de esa "
+    "forma (por ejemplo, escribirle libremente a un tutor), usá el camino que SÍ "
+    "ofrece para ejercitar lo mismo y escribí cómo se llega. Si no ofrece ninguno, "
+    "redactá un solo paso que capture la pantalla donde debería estar y decilo en "
+    "el objetivo, para que el criterio quede sin evaluar con su motivo en lugar "
+    "de producir una prueba imposible.\n"
+    "- Cada prueba arranca DE CERO en la entrada descrita, con la plataforma "
+    "recién abierta y nada respondido: escribí el camino completo desde ahí y "
+    "no cuentes con lo que haya dejado otra prueba.\n"
+    "- La plataforma elige qué pregunta muestra: no escribas un paso que "
+    "dependa de que aparezca una pregunta o una opción en particular. Pedí "
+    "'en la pregunta que aparezca, tocar una opción incorrecta', no 'tocar la "
+    "opción A) 58'.\n"
+    "- Lo que figura como no verificado puede no existir. No lo pongas en un "
+    "paso condicional: escribí el paso que lo busca y pedí capturar la pantalla "
+    "tal como quede; la regla de veredicto dice qué significa que no esté.\n"
+    "El criterio y la regla de veredicto NO cambian por esto: siguen juzgando QUÉ "
+    "logra la plataforma, no cómo está construida."
+)
+
+_PROFILE_RULES_JUDGE = (
+    "Para tu veredicto: los pasos están escritos para esta plataforma A "
+    "PROPÓSITO, porque se la recorrió antes de redactar. Eso no es un sesgo de "
+    "arquitectura; lo sería una regla de veredicto que premie o castigue cómo está "
+    "construida. Objetá, sí, un paso que use una parte o una interacción que no "
+    "figura acá, que pida abrir la plataforma o iniciar sesión, que ocurra "
+    "fuera del navegador, que sea condicional ('si aparece...') o que repita "
+    "una acción varias veces: ese paso no se puede ejecutar."
+)
+
+
+def _platform_block(profile: dict | None, *, for_judge: bool = False) -> dict | None:
+    """Lo que el recorrido VIO, para quien escribe o juzga la prueba. Cacheado.
+
+    POR QUÉ EXISTE. Hasta el 2026-11-25 el redactor recibía el criterio y una
+    etiqueta. Con eso escribió, para una plataforma sin chat libre y sin login,
+    "hacer clic en el campo de texto del tutor" e "iniciar sesión con una cuenta
+    de prueba": pasos que ninguna corrida podía ejecutar, redactados y revisados
+    por un consejo entero antes de que el navegador se abriera. El perfil es el
+    mismo para todos los criterios de una corrida, así que se cachea una vez y
+    las demás llamadas lo leen.
+    """
+    if not profile:
+        return None
+    from .recon import render_profile
+
+    rules = _PROFILE_RULES_JUDGE if for_judge else _PROFILE_RULES_DRAFTER
+    return {
+        "type": "text",
+        "text": (
+            "PLATAFORMA OBSERVADA EN EL RECORRIDO (lo que se vio antes de escribir "
+            f"este plan)\n{render_profile(profile)}\n\n{rules}"
+        ),
+        "cache_control": {"type": "ephemeral"},
+    }
+
+
 def _probe_block(probe: Probe) -> dict:
     """The volatile half: the draft under review. After the cache breakpoint."""
     steps = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(probe.steps))
@@ -1572,8 +1655,15 @@ def _draft(
     test: CriterionTest,
     platform_kind: str | None,
     objections: Sequence[JudgeVerdict],
+    platform_profile: dict | None = None,
 ) -> Probe:
-    blocks = [_criterion_block(test, platform_kind)]
+    blocks = []
+    # PRIMERO la plataforma: es igual para todos los criterios de la corrida,
+    # así que va delante del criterio y se lee de caché en cada redacción.
+    seen = _platform_block(platform_profile)
+    if seen is not None:
+        blocks.append(seen)
+    blocks.append(_criterion_block(test, platform_kind))
     if objections:
         lines = [
             "El consejo revisó tu borrador anterior y objetó lo siguiente. "
@@ -1603,6 +1693,7 @@ def _judge_one(
     objective: str | None,
     framework_name: str,
     policy: RiskPolicy | None,
+    platform_profile: dict | None = None,
 ) -> JudgeVerdict:
     model = judge.model or default_model
     # NOTE: this seat sees the criterion and the draft. It does NOT see any
@@ -1614,6 +1705,10 @@ def _judge_one(
     # risk classifier needs the class vocabulary out of the YAML. Handing every
     # seat every block would blur the roles that make the panel worth running.
     blocks: list[dict] = []
+    if judge.name in PROFILE_SEATS:
+        seen = _platform_block(platform_profile, for_judge=True)
+        if seen is not None:
+            blocks.append(seen)
     if judge.name == "coherencia_objetivo":
         blocks.append(_objective_block(objective, framework_name))
     blocks.append(_criterion_block(test, platform_kind))
@@ -1691,13 +1786,14 @@ def _review(
     objective: str | None = None,
     framework_name: str = "",
     policy: RiskPolicy | None = None,
+    platform_profile: dict | None = None,
 ) -> ReviewRound:
     """Run the whole panel in parallel. Independent by construction."""
     with ThreadPoolExecutor(max_workers=max(1, len(council))) as pool:
         futures = [
             pool.submit(
                 _judge_one, client, j, default_model, test, probe, platform_kind,
-                objective, framework_name, policy,
+                objective, framework_name, policy, platform_profile,
             )
             for j in council
         ]
@@ -2428,6 +2524,7 @@ def generate_probes(
     notice_context: dict | None = None,
     probe_bank: Any = None,
     surfaces: dict | None = None,
+    platform_profile: dict | None = None,
     on_probe_done: Callable[[int, int], None] | None = None,
     max_workers: int = DEFAULT_PROBE_WORKERS,
 ) -> ProbeSet:
@@ -2454,6 +2551,12 @@ def generate_probes(
     `notice_context` supplies the engagement facts the notice needs and no probe
     can know: `proveedor`, `superficie`, `cuenta`, `ventana`, `contacto`.
     Anything omitted is rendered as a conspicuous placeholder.
+
+    `platform_profile` is what the recon SAW (`recon.explore_platform`): the
+    parts of the platform, how each is reached and what it lets a student do.
+    The drafter writes each probe's steps from it, and the two seats in
+    `PROFILE_SEATS` judge with it in view. Omit it and drafting is what it was
+    before -- written from the criterion alone, blind to the platform.
 
     `client` is injected so tests run against a fake with no API call. `council`
     and each judge's `model` are configurable so a second model family can take
@@ -2494,10 +2597,12 @@ def generate_probes(
             if banked is not None and index == 0:
                 probe = banked
             else:
-                probe = _draft(client, model, test, platform_kind, objections)
+                probe = _draft(
+                    client, model, test, platform_kind, objections, platform_profile,
+                )
             panel = _review(
                 client, council, model, test, probe, platform_kind, index,
-                objective, criteria.name, policy,
+                objective, criteria.name, policy, platform_profile,
             )
             rounds.append(panel)
             # Only VOTING seats send a draft back. The classifier's answer is

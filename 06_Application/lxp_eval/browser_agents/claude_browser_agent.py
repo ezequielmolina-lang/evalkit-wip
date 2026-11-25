@@ -34,7 +34,11 @@ from anthropic import Anthropic, APIError
 
 from ..config import CONFIG
 from ..evalkit import pricing as _pricing
-from .playwright_driver import PlaywrightDriver
+from .playwright_driver import (
+    HumanVerificationRequired,
+    OffPlatformNavigation,
+    PlaywrightDriver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +82,9 @@ class AgentRunResult:
     #: not "I called done to explain that I could not do this".
     accomplished: bool | None = None
     done_reason: str = ""
+    #: Lo que el agente informó con una herramienta de cierre propia (hoy,
+    #: `describe_platform` del recorrido). None = no informó nada.
+    report: dict[str, Any] | None = None
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,6 +280,10 @@ def read_only_tools() -> list[dict[str, Any]]:
 # ----------------------------------------------------------------------
 
 
+#: Con cuántos turnos por delante se le avisa a un encargo con cierre
+#: obligatorio (ver `ClaudeBrowserAgent.run`) que tiene que informar.
+CLOSING_WARNING_TURNS = 4
+
 #: Anthropic rejects images whose longest edge exceeds this many pixels.
 _API_IMAGE_MAX_PX = 8000
 
@@ -377,6 +388,13 @@ class ClaudeBrowserAgent:
         # `accomplished` field. Sending the module global unconditionally would
         # make that swap silently inert.
         self.tools = self.tools_default()
+        # La herramienta con la que un encargo TIENE que cerrar, o None. Ver
+        # `run`: con esto puesto, quedarse sin turnos ya no pierde lo hecho.
+        self.closing_tool: str | None = None
+        # Cuánto puede escribir el modelo por turno. 2048 alcanza para un paso
+        # (una acción y un `done`); un informe del recorrido necesita más, y
+        # `AgentDriver.explore` lo sube mientras dura la exploración.
+        self.max_tokens = 2048
         self.price_per_m_input = price_per_m_input
         self.price_per_m_output = price_per_m_output
         self.transcript_dir = transcript_dir
@@ -411,9 +429,25 @@ class ClaudeBrowserAgent:
 
         assert self.client is not None
 
+        # EL CIERRE OBLIGATORIO. La primera exploración en vivo (2026-11-25) usó
+        # sus 30 turnos mirando -- y mirando bien -- y nunca informó: lo que vio
+        # se perdió y costó USD 1,76 averiguarlo. Un encargo cuyo producto es un
+        # informe no puede depender de que el modelo decida informar a tiempo.
+        # Con `closing_tool` puesto se le avisa cuando le quedan pocos turnos y,
+        # en el último, esa herramienta es la única respuesta posible.
+        #
+        # NO se usa para un paso de una prueba (`AgentDriver.do` lo deja en
+        # None): forzarle un `done` a un paso que no terminó sería inventarle un
+        # resultado, y ese paso tiene que seguir fallando ruidosamente.
+        closing = getattr(self, "closing_tool", None)
+
         for iteration in range(self.max_iterations):
             result.turns = iteration + 1
             logger.info("Claude turn %d / %d", result.turns, self.max_iterations)
+            remaining = self.max_iterations - result.turns
+            forced: dict[str, Any] = {}
+            if closing and remaining == 0:
+                forced = {"tool_choice": {"type": "tool", "name": closing}}
 
             try:
                 # PROMPT CACHING. This loop runs up to 20 turns per step and
@@ -430,7 +464,7 @@ class ClaudeBrowserAgent:
                 # re-processing it.
                 response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=2048,
+                    max_tokens=getattr(self, "max_tokens", 2048),
                     system=[{
                         "type": "text",
                         "text": system,
@@ -438,6 +472,7 @@ class ClaudeBrowserAgent:
                     }],
                     tools=self.tools,
                     messages=_with_cache_breakpoint(messages),
+                    **forced,
                 )
             except APIError as e:
                 logger.error("Claude API error on turn %d: %s", result.turns, e)
@@ -532,7 +567,33 @@ class ClaudeBrowserAgent:
                 if is_done:
                     done_requested = True
 
+            if closing and not done_requested and remaining == CLOSING_WARNING_TURNS:
+                # Va DESPUÉS de los resultados de herramientas, en el mismo
+                # mensaje: la API exige que los tool_result vayan primero.
+                tool_results.append({
+                    "type": "text",
+                    "text": (
+                        f"Te quedan {remaining} turnos. Terminá lo que estás "
+                        f"mirando e informá con `{closing}` todo lo que viste "
+                        "hasta ahora. Si te quedás sin turnos sin informar, lo "
+                        "que viste se pierde."
+                    ),
+                })
+
             messages.append({"role": "user", "content": tool_results})
+
+            if done_requested and stop_reason == "max_tokens" and result.report is not None:
+                # UN INFORME CORTADO NO ES UN INFORME. La salida se truncó en
+                # el límite: llegó lo primero que el modelo escribió y se
+                # perdió el resto. En vivo (2026-11-25) quedó la entrada y
+                # desapareció la lista de partes, y se aceptó sin decir nada.
+                result.report = None
+                result.accomplished = None
+                result.blocked = True
+                result.block_reason = (
+                    "el informe se cortó por el límite de salida del modelo"
+                )
+                break
 
             if done_requested:
                 logger.info("Claude called `done` — ending loop")
@@ -560,12 +621,28 @@ class ClaudeBrowserAgent:
         d = self.driver
         if name == "navigate":
             url = args.get("url", "")
-            final = await d.navigate(url)
+            try:
+                final = await d.navigate(url)
+            except OffPlatformNavigation as exc:
+                # El driver se negó: no es una dirección de la plataforma. Se
+                # le dice al modelo en limpio, para que cierre el paso en
+                # lugar de probar otra dirección inventada.
+                return (
+                    f"NAVEGACIÓN RECHAZADA: {exc.text} No inventes direcciones. "
+                    "Si el paso no se puede hacer dentro de la plataforma, "
+                    "terminá diciendo que no se pudo y por qué."
+                ), False
             return f"Navigated. Current URL: {final}", False
 
         if name == "click":
             desc = args.get("element_description", "")
-            ok = await d.click_element_description(desc)
+            try:
+                ok = await d.click_element_description(desc)
+            except HumanVerificationRequired as exc:
+                return (
+                    f"CLIC RECHAZADO: {exc.text} Terminá el paso diciendo que "
+                    "no se pudo por una verificación de humano."
+                ), False
             if ok:
                 return f"Clicked {desc!r}. Current URL: {await d.get_url()}", False
             return f"Click on {desc!r} FAILED — element not found. Read the page and try a different label.", False
@@ -616,6 +693,14 @@ class ClaudeBrowserAgent:
             )
             result.observations.append(obs)
             return f"Observation recorded: {obs.test_id} = {obs.status}", False
+
+        if name == "describe_platform":
+            # El cierre de una exploración (ver agent_driver.EXPLORE_REPORT_TOOL):
+            # lo que el agente vio, estructurado. Termina el bucle como `done`.
+            result.report = dict(args)
+            result.accomplished = True
+            result.summary = result.summary or "plataforma descrita"
+            return "Acknowledged.", True
 
         if name == "done":
             # `accomplished`/`reason` come from the per-step tool schema

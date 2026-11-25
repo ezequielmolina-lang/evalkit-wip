@@ -27,6 +27,10 @@ class PlatformMap:
     def __init__(self) -> None:
         self._surfaces: dict[str, dict[str, Any]] = {}
         self._unavailable: dict[str, str] = {}
+        #: La descripción de la plataforma que hizo el recorrido (ver
+        #: `explore_platform`). None cuando no se exploró: un mapa sin perfil
+        #: es el de antes y todo lo que lo consume sigue funcionando.
+        self.profile: dict[str, Any] | None = None
 
     def found(self, key: str, **spec: Any) -> None:
         """Una superficie que existe, y como se llega a ella."""
@@ -46,6 +50,8 @@ class PlatformMap:
         out: dict[str, Any] = {"surfaces": self._surfaces}
         if self._unavailable:
             out["unavailable"] = self._unavailable
+        if self.profile is not None:
+            out["profile"] = self.profile
         return out
 
     def write(self, path: Path | str) -> Path:
@@ -296,13 +302,235 @@ def _provider_root(root_url: str) -> str:
     return urlunsplit((parts.scheme, host, "", "", ""))
 
 
-async def discover_surfaces(agent: Any, *, root_url: str) -> PlatformMap:
+# --- la descripción de la plataforma -----------------------------------------
+#
+# POR QUÉ EXISTE. El mapa de arriba contesta tres preguntas fijas: ¿hay una
+# lección?, ¿hay un chat del tutor?, ¿hay una política pública? Sirve para una
+# plataforma con esa forma y deja ciego al plan frente a cualquier otra. En la
+# corrida del 2026-11-25 la plataforma no tenía un chat en la esquina: el tutor
+# intervenía después de un error, y el canal para escribirle aparecía recién
+# ahí. El recorrido anotó "tutor encontrado", el plan se redactó para un chat
+# libre que no existe, y se gastaron USD 7,22 antes de que una sola prueba
+# pudiera ejecutarse. Siempre fue el mismo problema: gastar sin haber mirado.
+#
+# Entonces el recorrido INDAGA antes de que nadie piense el plan. Tres
+# exploraciones, cada una con su tope, cada una usando la plataforma como un
+# estudiante (ver `agent_driver.explore_tools`: mira y toca, no escribe):
+#
+#   1. cómo se entra y cómo está organizada;
+#   2. una actividad por dentro, respondiendo bien y mal para ver qué pasa
+#      después de cada cosa;
+#   3. todo lo demás que ofrezca (vista docente, informes, ayuda, privacidad).
+#
+# Lo que devuelven se une en un perfil que el redactor de pruebas recibe (ver
+# `generator._platform_block`). No depende de que exista un documento del
+# proveedor: cuando lo hay, le dice al explorador dónde mirar, y lo que el
+# documento afirma y no se pudo ver queda aparte, como no verificado.
+
+_EXPLORATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "entrada y estructura",
+        "Entendé CÓMO SE ENTRA y CÓMO ESTÁ ORGANIZADA la plataforma. Desde la "
+        "dirección inicial: qué hay que tocar para empezar a usarla, qué opciones "
+        "tiene el menú, cómo se elige qué estudiar (materias, unidades, temas, "
+        "niveles) y qué otras secciones se ven desde ahí. Abrí cada sección del "
+        "menú lo suficiente para saber qué es. No respondas actividades todavía.",
+    ),
+    (
+        "una actividad por dentro",
+        "Entendé QUÉ PASA DENTRO DE UNA ACTIVIDAD. Abrí el primer contenido "
+        "disponible y trabajá como un estudiante: respondé al menos una actividad "
+        "BIEN y al menos una MAL, y seguí cada camino hasta donde llegue. Anotá "
+        "qué muestra la plataforma después de un acierto y después de un error, "
+        "qué ayudas ofrece, si aparece un tutor o asistente de IA y en qué "
+        "momento, y si en algún punto hay un campo para escribirle (a quién le "
+        "llega lo escrito). Anotá también cómo son las preguntas: formato, "
+        "cuántas opciones, y el enunciado textual de las que viste.",
+    ),
+    (
+        "otras partes",
+        "Entendé LAS OTRAS PARTES de la plataforma, las que no son la actividad "
+        "del estudiante: vista o panel docente, informes y seguimiento, repasos, "
+        "cierres de sesión, ayuda, configuración, y dónde se informa sobre los "
+        "datos y la privacidad. Abrí cada una y describí qué muestra y qué "
+        "permite. Mirá sin cambiar nada: no toques controles que afecten a otras "
+        "personas (cerrar una clase, reiniciar, borrar).",
+    ),
+)
+
+#: Cuánto texto de documentos se le pasa al explorador. Es una guía de dónde
+#: mirar, no el documento entero: el resto lo lee la rúbrica, que es su lugar.
+_DOC_HINT_CHARS = 6000
+
+
+def _document_hints(documents: Any) -> str:
+    chunks = []
+    for d in documents or []:
+        text = str((d or {}).get("text") or "").strip()
+        if text:
+            name = str((d or {}).get("name") or "documento").strip()
+            chunks.append(f"[{name}]\n{text}")
+    if not chunks:
+        return ""
+    joined = "\n\n".join(chunks)[:_DOC_HINT_CHARS]
+    return (
+        "\n\nDOCUMENTOS DEL PROVEEDOR (sin verificar). Te dicen dónde mirar; no "
+        "son lo que viste. Buscá las partes que describen. Lo que afirmen y no "
+        "puedas ver en pantalla va en `documentado_sin_verificar`, nunca en "
+        f"`partes`.\n\n{joined}"
+    )
+
+
+def _exploration_task(
+    focus: str, root_url: str, hints: str, already: list[str] | None = None
+) -> str:
+    """El encargo de UNA exploración.
+
+    `already` son las partes que una exploración anterior ya describió. Sin
+    eso, el primer recorrido en vivo que informó (2026-11-25) devolvió 27
+    entradas para unas 14 partes reales -- la pantalla de inicio descrita tres
+    veces -- y, peor, la primera exploración anotó como "no verificado" el
+    camino del error que la segunda sí recorrió. Un perfil que se contradice le
+    hace dudar al redactor de lo que sí se vio.
+    """
+    previo = ""
+    if already:
+        previo = (
+            "\n\nYA DESCRITAS por una exploración anterior (no las repitas; "
+            "describí sólo lo nuevo, o lo que veas distinto): "
+            + "; ".join(already) + "."
+        )
+    return (
+        f"La plataforma bajo evaluación está en {root_url} . Empezá navegando a "
+        f"esa dirección.\n\n{focus}\n\n"
+        "Limitate a este encargo. Lo que queda fuera de él NO lo anotes como no "
+        "encontrado ni como no verificado: otra exploración lo mira."
+        f"{previo}{hints}"
+    )
+
+
+def _merge_profile(profile: dict, report: dict) -> None:
+    """Suma el informe de UNA exploración al perfil. Las partes no se repiten."""
+    if not profile.get("entrada") and str(report.get("entrada") or "").strip():
+        profile["entrada"] = str(report["entrada"]).strip()
+    seen = {str(p.get("nombre", "")).strip().lower() for p in profile["partes"]}
+    for part in report.get("partes") or []:
+        if not isinstance(part, dict):
+            continue
+        name = str(part.get("nombre") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        profile["partes"].append(
+            {k: str(v).strip() for k, v in part.items() if str(v or "").strip()}
+        )
+    for key in ("no_encontrado", "documentado_sin_verificar"):
+        for item in report.get(key) or []:
+            text = str(item or "").strip()
+            if text and text not in profile[key]:
+                profile[key].append(text)
+    note = str(report.get("notas") or "").strip()
+    if note:
+        profile["notas"] = (profile["notas"] + "\n" + note).strip()
+
+
+async def explore_platform(
+    agent: Any,
+    *,
+    root_url: str,
+    documents: Any = None,
+    on_progress: Any = None,
+) -> dict | None:
+    """Describe la plataforma. None si el agente no sabe explorar.
+
+    Una exploración que falla NO tumba las otras: queda anotada en
+    `sin_explorar` con su motivo y el perfil lleva lo que sí se vio. Es la
+    misma regla que el mapa de superficies: no poder ver algo es un hallazgo.
+    """
+    explore = getattr(agent, "explore", None)
+    if explore is None:
+        return None
+    profile: dict[str, Any] = {
+        "direccion": root_url,
+        "entrada": "",
+        "partes": [],
+        "no_encontrado": [],
+        "documentado_sin_verificar": [],
+        "sin_explorar": [],
+        "notas": "",
+    }
+    hints = _document_hints(documents)
+    for index, (label, focus) in enumerate(_EXPLORATIONS, start=1):
+        if on_progress is not None:
+            try:
+                on_progress(index, len(_EXPLORATIONS), label)
+            except Exception:  # noqa: BLE001 -- el aviso no puede tumbar el recorrido
+                logger.debug("no pude avisar el avance del recorrido", exc_info=True)
+        try:
+            already = [str(p.get("nombre", "")) for p in profile["partes"]]
+            report = await explore(
+                _exploration_task(focus, root_url, hints, already)
+            )
+        except Exception as exc:  # noqa: BLE001 -- una exploración fallida es un hallazgo
+            profile["sin_explorar"].append(f"{label}: {exc}")
+            continue
+        _merge_profile(profile, report if isinstance(report, dict) else {})
+    return profile
+
+
+def render_profile(profile: dict) -> str:
+    """El perfil como texto, para quien redacta y juzga las pruebas."""
+    lines = [f"Dirección: {profile.get('direccion') or '(no registrada)'}"]
+    if profile.get("entrada"):
+        lines.append(f"Cómo se entra: {profile['entrada']}")
+    parts = profile.get("partes") or []
+    if parts:
+        lines.append("Partes que se vieron:")
+        for n, part in enumerate(parts, start=1):
+            lines.append(f"{n}. {part.get('nombre', '(sin nombre)')}")
+            for key, human in (
+                ("como_llegar", "cómo se llega"),
+                ("que_muestra", "qué muestra"),
+                ("que_permite", "qué permite"),
+                ("url", "dirección"),
+            ):
+                if part.get(key):
+                    lines.append(f"   - {human}: {part[key]}")
+    else:
+        lines.append("Partes que se vieron: ninguna.")
+    for key, human in (
+        ("no_encontrado", "Se buscó y NO se encontró"),
+        ("documentado_sin_verificar",
+         "Lo afirma un documento del proveedor y NO se verificó en pantalla"),
+        ("sin_explorar", "No se pudo explorar"),
+    ):
+        items = profile.get(key) or []
+        if items:
+            lines.append(f"{human}:")
+            lines.extend(f"   - {item}" for item in items)
+    if profile.get("notas"):
+        lines.append(f"Notas del recorrido: {profile['notas']}")
+    return "\n".join(lines)
+
+
+async def discover_surfaces(
+    agent: Any,
+    *,
+    root_url: str,
+    documents: Any = None,
+    on_progress: Any = None,
+) -> PlatformMap:
     """Recorre la plataforma logueada y devuelve su mapa de superficies.
 
     El `agent` es un `AgentDriver` (interfaz async: assert_session_alive /
     is_logged_out / url / do(paso en prosa) / read_page / screenshot). Se recorre
     en profundidad MEDIA -- sesión, cursos, UNA lección por dentro, ubicar el
     tutor, la política pública -- y se ANOTA lo que no aparece.
+
+    Después, si el agente sabe explorar, se describe la plataforma entera (ver
+    `explore_platform`) y esa descripción viaja en el mapa como `profile`. Va
+    al final porque cada exploración arranca navegando a la dirección inicial,
+    así que no depende de dónde haya quedado el navegador.
     """
     m = PlatformMap()
 
@@ -438,6 +666,11 @@ async def discover_surfaces(agent: Any, *, root_url: str) -> PlatformMap:
             f"No se pudo llegar a la politica de privacidad publica desde {root}: "
             f"{exc}",
         )
+
+    # 6. Describir la plataforma entera, para que el plan se escriba mirándola.
+    m.profile = await explore_platform(
+        agent, root_url=root_url, documents=documents, on_progress=on_progress
+    )
 
     return m
 

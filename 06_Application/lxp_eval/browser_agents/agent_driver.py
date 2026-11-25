@@ -119,8 +119,132 @@ STEP_SYSTEM = (
     "Decir que no pudiste NO es un error tuyo: la captura de pantalla que se "
     "toma después de este paso se guarda como evidencia de este paso, así que un "
     "accomplished=true sobre un paso que no pasó convierte la evaluación en una "
-    "conclusión falsa sobre la plataforma."
+    "conclusión falsa sobre la plataforma.\n\n"
+    # Agregado tras el 2026-11-25: un paso decía "abrir la plataforma" sin
+    # dirección y el agente inventó una. El navegador ya se niega a salir (ver
+    # playwright_driver.host_allowed); esto evita gastar turnos en el intento.
+    "Trabajás SÓLO dentro de la plataforma bajo evaluación. Nunca inventes una "
+    "dirección: si el paso pide abrir algo y no dice dónde, usá la dirección de "
+    "la plataforma que figura en la tarea o lo que ya está en pantalla; si no "
+    "alcanza, terminá con accomplished=false. No uses buscadores ni sitios de "
+    "terceros. Si aparece una verificación de humano (captcha, 'no soy un "
+    "robot', control de seguridad), no intentes resolverla: terminá con "
+    "accomplished=false y decí que esa verificación lo impidió."
 )
+
+
+#: Topes de UNA exploración del recorrido. Mucho más que un paso (20 turnos, 2
+#: USD) porque explorar ES recorrer: entrar, abrir secciones, responder una
+#: actividad, volver. Son 40 turnos y no 30: en vivo (2026-11-25), 30 alcanzaron
+#: para ver el camino del error y el del acierto de una actividad y no para
+#: informarlos. Siguen siendo un freno, no un presupuesto.
+DEFAULT_MAX_ITERATIONS_PER_EXPLORATION = int(os.getenv("LXP_RECON_MAX_ITERS", "40"))
+DEFAULT_COST_CAP_USD_PER_EXPLORATION = float(os.getenv("LXP_RECON_COST_CAP", "2.00"))
+#: Salida por turno durante una exploración. El informe describe cada parte de
+#: la plataforma con el texto de sus botones; en vivo no entró en 2048.
+EXPLORE_MAX_OUTPUT_TOKENS = int(os.getenv("LXP_RECON_MAX_OUTPUT_TOKENS", "8192"))
+
+#: Con qué cierra una exploración: lo que VIO, estructurado, para que el plan de
+#: pruebas se escriba con esto y no con una etiqueta ("tutor").
+EXPLORE_REPORT_TOOL: dict[str, Any] = {
+    "name": "describe_platform",
+    "description": (
+        "Llamala UNA vez, al terminar de explorar, para informar lo que viste. "
+        "Describí sólo lo que estuvo en pantalla. Lo que no encontraste va en "
+        "`no_encontrado`; lo que un documento dice y no pudiste ver va en "
+        "`documentado_sin_verificar`."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entrada": {
+                "type": "string",
+                "description": (
+                    "Cómo se entra, desde la dirección inicial hasta poder usar "
+                    "la plataforma (qué se toca, en qué orden)."
+                ),
+            },
+            "partes": {
+                "type": "array",
+                "description": "Cada pantalla, sección o momento distinto que viste.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "nombre": {"type": "string"},
+                        "como_llegar": {
+                            "type": "string",
+                            "description": "Los toques, en orden, desde el inicio.",
+                        },
+                        "que_muestra": {"type": "string"},
+                        "que_permite": {
+                            "type": "string",
+                            "description": (
+                                "Qué puede hacer ahí un estudiante: botones, "
+                                "opciones, si hay un campo para escribir y a quién "
+                                "le llega lo escrito."
+                            ),
+                        },
+                        "url": {"type": "string"},
+                    },
+                    "required": ["nombre", "como_llegar", "que_muestra"],
+                },
+            },
+            "no_encontrado": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Lo que buscaste y no está, con lo que viste en su lugar.",
+            },
+            "documentado_sin_verificar": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Lo que un documento afirma y no pudiste ver.",
+            },
+            "notas": {"type": "string"},
+        },
+        "required": ["partes"],
+    },
+}
+
+EXPLORE_SYSTEM = (
+    "Sos quien recorre una plataforma educativa ANTES de que se escriba el plan "
+    "de pruebas. Tu trabajo es entenderla: qué partes tiene, cómo se llega a cada "
+    "una y qué deja hacer. Otra persona va a escribir las pruebas con lo que "
+    "informes, así que lo que no veas no va a existir para el plan.\n\n"
+    "Usala como la usaría un estudiante. Podés abrir secciones y RESPONDER "
+    "actividades de práctica, bien y mal, para ver qué pasa después de cada cosa: "
+    "ahí suele estar lo importante (la corrección, las ayudas, el tutor).\n\n"
+    "Límites:\n"
+    "- No podés escribir texto: no tenés esa herramienta. Si aparece un campo de "
+    "texto, anotá que existe, cómo se llega y a quién le llega lo escrito.\n"
+    "- No cambies configuraciones, no borres nada, no cierres la sesión.\n"
+    "- No salgas de la plataforma ni inventes direcciones.\n"
+    "- Si aparece una verificación de humano, no intentes resolverla: anotala.\n"
+    "- Describí sólo lo que estuvo en pantalla. No completes con lo que una "
+    "plataforma así 'suele tener'.\n\n"
+    "Sé concreto: nombrá los botones y las opciones con el texto que tienen. "
+    "Cuando termines, llamá a `describe_platform`."
+)
+
+
+def explore_tools() -> list[dict[str, Any]]:
+    """Las herramientas de una exploración: mira y toca, no escribe.
+
+    Sin `type_text` por la misma razón que `read_only_tools`: se recorre una
+    plataforma que puede estar en uso, y un mensaje escrito ahí es un mensaje
+    real. Sin `done` ni `record_observation`: una exploración no ejecuta un paso
+    ni emite un veredicto; termina informando con `describe_platform`.
+
+    LO QUE ESTO NO GARANTIZA, dicho en vez de sugerido: tocar una opción de una
+    actividad es responderla, y eso se le permite a propósito -- sin responder
+    no se ve qué hace la plataforma después de un error, que en la corrida del
+    2026-11-25 era exactamente donde vivía el tutor. Lo demás (no cambiar
+    configuración, no borrar) se le pide en el prompt y nada más.
+    """
+    try:
+        from .claude_browser_agent import BROWSER_TOOLS
+    except Exception:  # noqa: BLE001 - missing SDK, config, etc.
+        logger.debug("no pude importar BROWSER_TOOLS; exploro sólo con el informe")
+        return [EXPLORE_REPORT_TOOL]
+    fuera = {"type_text", "done", "record_observation"}
+    return [t for t in BROWSER_TOOLS if t.get("name") not in fuera] + [EXPLORE_REPORT_TOOL]
 
 
 def _step_tools() -> list[dict[str, Any]]:
@@ -140,9 +264,29 @@ def _step_tools() -> list[dict[str, Any]]:
 STEP_TOOLS: list[dict[str, Any]] = _step_tools()
 
 
-def _step_task(step: str) -> str:
+def _step_task(step: str, platform_url: str = "") -> str:
+    # La dirección va en CADA paso: un paso que dice "abrir la plataforma" o
+    # "volver al inicio" tiene que poder cumplirse sin adivinar.
+    #
+    # PERO NO COMO INVITACIÓN. La primera redacción decía "la plataforma está en
+    # <dirección>, es la única a la que podés navegar", y en la reprueba del
+    # 2026-11-25 el agente abrió esa dirección al empezar CADA paso: 15 pasos,
+    # 15 veces de vuelta a la pantalla de ingreso. En una plataforma que no
+    # guarda el lugar en la dirección eso borra dónde estaba, y el paso "tocar
+    # una opción de la pregunta en pantalla" pasó a ser "volver a entrar, volver
+    # a elegir el tema y encontrar la pregunta", que no entra en sus turnos.
+    # Fue la causa de casi todos los pasos cortados del piloto de ese día.
+    where = (
+        "Ya estás dentro de la plataforma, en la pantalla donde te dejó el paso "
+        "anterior. Empezá leyendo la página actual y ejecutá el paso desde ahí. "
+        "NO vuelvas a cargar la dirección de inicio: eso te saca de donde estás "
+        "y el paso deja de poder hacerse. Sólo si el paso pide expresamente "
+        f"abrir la plataforma o volver al inicio, la dirección es {platform_url} "
+        "(ninguna otra).\n\n"
+        if platform_url else ""
+    )
     return (
-        f"Ejecutá este paso en la página actual:\n\n{step}\n\n"
+        f"{where}Ejecutá este paso en la página actual:\n\n{step}\n\n"
         "Cuando termines, llamá a `done` con accomplished=true si el paso "
         "ocurrió, o accomplished=false y el motivo si no."
     )
@@ -162,9 +306,12 @@ class AgentDriver:
         *,
         max_iterations_per_step: int = DEFAULT_MAX_ITERATIONS_PER_STEP,
         cost_cap_usd_per_step: float = DEFAULT_COST_CAP_USD_PER_STEP,
+        platform_url: str = "",
     ) -> None:
         self._agent = agent
         self._driver = driver
+        #: Dónde está la plataforma. Viaja en cada paso (ver `_step_task`).
+        self.platform_url = platform_url
         self.max_iterations_per_step = max_iterations_per_step
         self.cost_cap_usd_per_step = cost_cap_usd_per_step
         # Tighten the agent's whole-task budgets down to per-step budgets. Done
@@ -225,6 +372,18 @@ class AgentDriver:
     async def url(self) -> str:
         return await self._driver.url()
 
+    async def start_over(self) -> bool:
+        """Deja la plataforma como al entrar, antes de la prueba siguiente.
+
+        Reenviado, no reimplementado: el navegador es el que sabe abrir otro
+        contexto (ver PlaywrightDriver.start_over, con el caso que lo motivó).
+        Un doble de prueba o un driver sin esa operación no se toca.
+        """
+        restart = getattr(self._driver, "start_over", None)
+        if restart is None or not self.platform_url:
+            return False
+        return bool(await restart(self.platform_url))
+
     # --- the one method that needs the LLM --------------------------------
 
     async def do(self, step: str) -> None:
@@ -239,7 +398,9 @@ class AgentDriver:
           common case in practice and used to pass silently.
         """
         logger.info("agente ejecutando paso: %s", step)
-        result = await self._agent.run(system=STEP_SYSTEM, user_task=_step_task(step))
+        result = await self._agent.run(
+            system=STEP_SYSTEM, user_task=_step_task(step, self.platform_url)
+        )
 
         step_cost = float(getattr(result, "estimated_cost_usd", 0.0) or 0.0)
         self.spend_usd += step_cost
@@ -274,6 +435,83 @@ class AgentDriver:
             raise self._not_done(step, reason)
 
         logger.debug("paso completado en %s turnos", getattr(result, "turns", "?"))
+
+    async def explore(
+        self,
+        task: str,
+        *,
+        max_iterations: int | None = None,
+        cost_cap_usd: float | None = None,
+    ) -> dict:
+        """Deja que el agente RECORRA la plataforma y devuelve lo que informó.
+
+        Distinto de `do()` en todo lo que importa: no ejecuta un paso de una
+        prueba, no puede escribir, tiene más turnos, y termina con un informe
+        estructurado en lugar de un sí o un no. Es lo que el recorrido usa para
+        entender la plataforma antes de que nadie redacte el plan.
+
+        Las herramientas y los topes de un PASO se devuelven siempre, pase lo
+        que pase: el mismo agente ejecuta después las pruebas, y una prueba que
+        corriera sin `type_text` no podría mandarle nada al tutor.
+
+        Levanta si el agente no informó (se quedó sin turnos, pasó el tope, la
+        API falló). El costo se cuenta igual: una exploración que no informó se
+        pagó.
+        """
+        agent = self._agent
+        before = (agent.tools, agent.max_iterations, agent.cost_cap_usd)
+        agent.tools = explore_tools()
+        # Informar es obligatorio en el último turno (ver ClaudeBrowserAgent.run).
+        agent.closing_tool = EXPLORE_REPORT_TOOL["name"]
+        # ...y necesita lugar para escribirlo: con los 2048 tokens de un paso,
+        # el informe en vivo se cortó antes de llegar a la lista de partes.
+        tokens_before = getattr(agent, "max_tokens", None)
+        agent.max_tokens = EXPLORE_MAX_OUTPUT_TOKENS
+        agent.max_iterations = max_iterations or DEFAULT_MAX_ITERATIONS_PER_EXPLORATION
+        agent.cost_cap_usd = cost_cap_usd or DEFAULT_COST_CAP_USD_PER_EXPLORATION
+        try:
+            result = await agent.run(system=EXPLORE_SYSTEM, user_task=task)
+        finally:
+            agent.tools, agent.max_iterations, agent.cost_cap_usd = before
+            agent.closing_tool = None
+            if tokens_before is None:
+                try:
+                    del agent.max_tokens
+                except AttributeError:
+                    pass
+            else:
+                agent.max_tokens = tokens_before
+
+        cost = float(getattr(result, "estimated_cost_usd", 0.0) or 0.0)
+        self.spend_usd += cost
+        self.cache_read_tokens += int(getattr(result, "cache_read_tokens", 0) or 0)
+        self.cache_write_tokens += int(getattr(result, "cache_write_tokens", 0) or 0)
+        logger.info(
+            "exploración: %.4f USD (acumulado %.4f), %s turnos",
+            cost, self.spend_usd, getattr(result, "turns", "?"),
+        )
+
+        report = getattr(result, "report", None)
+        if not isinstance(report, dict):
+            reason = (
+                getattr(result, "block_reason", None)
+                or "el agente terminó sin informar lo que vio"
+            )
+            raise EvalkitError(
+                f"la exploración de la plataforma no produjo un informe: {reason}",
+                hint="(el plan se escribe sin esa parte; queda anotado en el mapa)",
+            )
+        # UN INFORME VACÍO ES UNA EXPLORACIÓN FALLIDA. Aceptarlo en silencio
+        # deja un perfil que dice "partes: ninguna", y el plan se escribiría
+        # creyendo que la plataforma no tiene nada. Que no se haya visto nada
+        # es posible, pero entonces el explorador lo dice en `no_encontrado`.
+        if not any(report.get(k) for k in ("partes", "no_encontrado")):
+            raise EvalkitError(
+                "la exploración de la plataforma devolvió un informe vacío: sin "
+                "partes vistas y sin nada anotado como no encontrado",
+                hint="(el plan se escribe sin esa parte; queda anotado en el mapa)",
+            )
+        return report
 
     @staticmethod
     def _not_done(step: str, reason: str) -> EvalkitError:

@@ -151,7 +151,7 @@ def _default_driver_factory(record: JobRecord, credentials, artifacts_dir: Path)
         ) from exc
 
     from ..config import CONFIG
-    from ..platform_loader import resolve_platform_dir
+    from ..platform_loader import allowed_hosts_for, resolve_platform_dir
 
     # A FOURTH failure mode, found the way the docstring predicted -- on the
     # first live run. `record.platform` is the ledger's display label, derived
@@ -171,6 +171,15 @@ def _default_driver_factory(record: JobRecord, credentials, artifacts_dir: Path)
     # auto_login fallback either -- the session IS the only way in.
     storage_state = session_state_for(platform_key, "student")
 
+    # A SEVENTH, y la más cara de contar (2026-11-25). Un paso que decía "abrir
+    # la plataforma" sin dirección terminó con el agente en un sitio inventado,
+    # haciéndole clic a la verificación de humano de un tercero. El navegador
+    # recibe acá los hosts que la plataforma declara y se niega a ir a
+    # cualquier otro (ver playwright_driver.host_allowed).
+    allowed_hosts = allowed_hosts_for(
+        platform_key, CONFIG.platforms_dir, platform_url=record.platform_url
+    )
+
     class _Managed:
         async def __aenter__(self):
             self._driver = PlaywrightDriver(
@@ -182,6 +191,7 @@ def _default_driver_factory(record: JobRecord, credentials, artifacts_dir: Path)
                 # arrived at without anyone being told.
                 platform=platform_key,
                 storage_state=storage_state,
+                allowed_hosts=allowed_hosts,
             )
             # --- 1. Chromium missing or unlaunchable ------------------------
             try:
@@ -249,7 +259,20 @@ def _default_driver_factory(record: JobRecord, credentials, artifacts_dir: Path)
             from ..browser_agents.agent_driver import AgentDriver
             from ..browser_agents.claude_browser_agent import ClaudeBrowserAgent
 
-            return AgentDriver(ClaudeBrowserAgent(self._driver), self._driver)
+            # El estado con el que se entró, para volver a él antes de cada
+            # prueba (ver PlaywrightDriver.start_over). Si no se puede leer, las
+            # pruebas comparten contexto como antes: peor, pero no se cae nada.
+            try:
+                await self._driver.remember_start()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("no se pudo guardar el estado de entrada: %s", exc)
+
+            return AgentDriver(
+                ClaudeBrowserAgent(self._driver), self._driver,
+                # La dirección viaja en cada paso: "abrir la plataforma" tiene
+                # que poder cumplirse sin adivinar.
+                platform_url=record.platform_url,
+            )
 
         async def __aexit__(self, *exc):
             # The BROWSER is what has to be closed; the adapter owns nothing.
@@ -483,8 +506,25 @@ class JobRunner:
                 # necesita construido ANTES; por eso `recon` va primera.
                 from ..evalkit.recon import discover_surfaces
 
+                def _exploring(done: int, total: int, label: str) -> None:
+                    # UN LATIDO POR EXPLORACIÓN. El recorrido ahora indaga
+                    # (entrada, una actividad por dentro, las otras partes) y
+                    # dura varios minutos; sin esto el vigilante vería una
+                    # etapa muda y la mataría por colgada.
+                    self._progress(
+                        record, Stage.RECON,
+                        done=done - 1, total=total, current=label,
+                        message=f"Recorriendo la plataforma: {label} "
+                                f"({done} de {total})",
+                    )
+
                 surfaces = await discover_surfaces(
-                    driver, root_url=record.platform_url
+                    driver, root_url=record.platform_url,
+                    # Los documentos del proveedor le dicen al explorador dónde
+                    # mirar. No reemplazan mirar: lo que afirman y no se ve
+                    # queda como no verificado.
+                    documents=record.documents,
+                    on_progress=_exploring,
                 )
                 # El recorrido gasta plata del agente (~$0.37 medidos contra
                 # Plataforma A) y esa cifra no se plegaba: los $8.31 del build medido
@@ -654,6 +694,11 @@ class JobRunner:
                 # Where there is no banked probe, drafting proceeds as before.
                 probe_bank=probe_bank,
                 surfaces=surfaces,
+                # LO QUE EL RECORRIDO VIO. Sin esto el plan se escribe a ciegas:
+                # el 2026-11-25 costó USD 7,22 de pruebas para un chat libre que
+                # la plataforma no tiene. None cuando no hubo recorrido o el
+                # mapa es uno hecho a mano: se redacta como antes.
+                platform_profile=(surfaces or {}).get("profile"),
             )
         except BaseException as exc:  # noqa: BLE001
             self._fail(record, Stage.PROBES, "", exc)
@@ -784,6 +829,23 @@ class JobRunner:
                             message=f"Prueba {i + 1} de {len(groups)}: {lead.goal}{extra}",
                         )
                         try:
+                            # CADA PRUEBA ARRANCA DE CERO. El plan se escribe
+                            # para una plataforma recién abierta; si la prueba
+                            # anterior dejó una pregunta a medias, la siguiente
+                            # ejecuta sus pasos sobre otra pantalla. La primera
+                            # no lo necesita: el navegador acaba de entrar.
+                            start_over = getattr(driver, "start_over", None)
+                            if i > 0 and start_over is not None:
+                                try:
+                                    await start_over()
+                                except Exception as exc:  # noqa: BLE001
+                                    # No es motivo para perder la etapa: la
+                                    # prueba corre donde quedó el navegador y,
+                                    # si eso la rompe, falla ella sola.
+                                    logger.warning(
+                                        "no se pudo volver al inicio antes de %s: %s",
+                                        lead.probe_id, exc,
+                                    )
                             await self.engine.run_probe(
                                 lead, driver, ledger,
                                 platform=record.platform,
@@ -808,7 +870,12 @@ class JobRunner:
                             logger.warning(
                                 "probe %s no se pudo evaluar: %s", lead.probe_id, exc
                             )
-                            record.unevaluated[lead.probe_id] = str(exc)
+                            # A TODAS las del grupo: comparten los pasos, así
+                            # que a todas les faltó lo mismo. Anotar sólo la
+                            # primera dejaba a las demás con evidencia a medias
+                            # y sin motivo.
+                            for cut in group:
+                                record.unevaluated[cut.probe_id] = str(exc)
                             self.store.save(record)
 
                     # INSIDE the scope, while `driver` is certainly bound. Read
@@ -898,6 +965,18 @@ class JobRunner:
         criteria = serialize.criteria_from_plan(criteria_dicts, record.objective)
         tests = list(criteria.all_tests())
         judging = {p.test_id: p.repeat_judging for p in probes}
+        # UNA PRUEBA QUE SE CORTÓ NO SE PUNTÚA. En el piloto del 2026-11-25 una
+        # prueba de distractores se cortó después del primero y el juez, que
+        # sólo ve la evidencia, puso PARCIAL "porque no se probaron los otros":
+        # la plataforma perdió un punto por una falla del evaluador. Otra
+        # recibió NO_CUMPLE sin que se hubiera visitado la pantalla que faltaba.
+        # Lo capturado queda en el ledger; el criterio queda NO_EVALUADO con el
+        # paso que no se pudo ejecutar, que es lo único que se puede sostener.
+        cut_short = {
+            p.test_id: record.unevaluated[p.probe_id]
+            for p in probes
+            if p.probe_id in record.unevaluated
+        }
 
         self._progress(
             record, Stage.SCORE,
@@ -914,6 +993,21 @@ class JobRunner:
                     done=i, total=max(1, len(tests)), current=test.id,
                     message=f"Criterio {i + 1} de {len(tests)}: {test.name}",
                 )
+                if test.id in cut_short:
+                    verdicts.append(scoring_mod.TestVerdict(
+                        test_id=test.id,
+                        platform=record.platform,
+                        status=scoring_mod.NO_EVALUADO,
+                        points_earned=0.0,
+                        points_possible=0.0,
+                        rationale=(
+                            "La prueba no se completó, así que no se puntúa con "
+                            "evidencia a medias. Motivo: " + cut_short[test.id]
+                        ),
+                        evidence=[],
+                        runs=[],
+                    ))
+                    continue
                 # Only THIS run's evidence. The ledger keeps every attempt,
                 # so a re-probed criterion would otherwise be judged partly on
                 # a run that was discarded -- see ledger.rows_since.

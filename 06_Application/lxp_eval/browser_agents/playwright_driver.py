@@ -65,6 +65,99 @@ DEFAULT_TIMEOUT_MS = 30_000
 CLICK_STRATEGY_TIMEOUT_MS = int(os.getenv("LXP_CLICK_STRATEGY_TIMEOUT_MS", "4000"))
 
 
+# --- el navegador no sale de la plataforma -----------------------------------
+#
+# LO QUE PASÓ EL 2026-11-25. Una prueba decía "abrir la plataforma del tutor en
+# el navegador" sin dar la dirección. El agente inventó una (tutor.io), que
+# redirige a un sitio de venta de dominios detrás de una verificación de humano
+# de Cloudflare, y le hizo clic cinco veces a la verificación. Las pruebas
+# siguientes arrancaron paradas en ese sitio. Nada de eso es evaluar la
+# plataforma: es tráfico automatizado contra un tercero que no aceptó nada, con
+# el riesgo de archivar su pantalla como evidencia de otro.
+#
+# Pedirle al agente que no lo haga no alcanza (ver `read_only_tools`: el modelo
+# puede decidir ignorarlo y para cuando se nota ya ocurrió). Así que la salida
+# se cierra en dos lugares: `navigate()` se niega antes de tocar el navegador, y
+# una ruta del contexto aborta cualquier navegación de la página principal hacia
+# un host que la plataforma no declara -- que es el camino de un clic, que
+# `navigate()` nunca ve.
+
+
+class OffPlatformNavigation(EvalkitError):
+    """Se intentó llevar el navegador a un sitio que no es la plataforma."""
+
+
+class HumanVerificationRequired(EvalkitError):
+    """La página pide demostrar que hay una persona. evalkit no lo resuelve."""
+
+
+def normalize_host(host: str | None) -> str:
+    host = (host or "").strip().lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def host_allowed(url: str, allowed: "frozenset[str] | None") -> bool:
+    """¿Esta dirección es de la plataforma bajo evaluación?
+
+    Coincidencia EXACTA de host (sin `www.`), no de dominio padre. Un prototipo
+    en un hosting compartido vive en `algo.vercel.app`, y aceptar el dominio
+    padre sería aceptar todos los sitios de ese hosting. El host de un proveedor
+    de identidad, o cualquier otro que haga falta, se declara en el config de la
+    plataforma (`allowed_hosts:`), no aquí.
+
+    Sin lista no se restringe nada: es el comportamiento de los llamadores que
+    no declaran plataforma. Lo que no es un sitio (about:, data:, blob:) pasa
+    siempre: no lleva a ninguna parte.
+    """
+    if allowed is None:
+        return True
+    from urllib.parse import urlparse
+
+    parts = urlparse(url or "")
+    if parts.scheme not in ("http", "https"):
+        return True
+    return normalize_host(parts.hostname) in allowed
+
+
+#: Títulos de las páginas intermedias que frenan a un navegador automatizado.
+_CHALLENGE_TITLE = re.compile(
+    r"^\s*(just a moment|un momento|attention required|security check"
+    r"|verificaci[oó]n de seguridad|verifying you are human"
+    r"|vercel security checkpoint)",
+    re.IGNORECASE,
+)
+#: Frases del cuerpo de esas páginas. Sólo cuentan en una página CORTA: una
+#: lección que explica qué es un captcha tiene estas palabras y no es un desafío,
+#: y un falso positivo aquí frena una evaluación entera por nada.
+_CHALLENGE_TEXT = re.compile(
+    r"verify (that )?you are human|verifique que es un ser humano"
+    r"|verifica que eres humano|checking your browser"
+    r"|comprobando (su|tu) navegador|verificaci[oó]n de seguridad en curso",
+    re.IGNORECASE,
+)
+_CHALLENGE_MAX_CHARS = 2000
+
+#: Lo que un agente escribiría para apuntarle a la casilla de una verificación.
+_CHALLENGE_CLICK = re.compile(
+    r"captcha|no soy un robot|not a robot|(ser|eres|soy) humano"
+    r"|(you are|i am|i'm) human|verif\w+.{0,20}human",
+    re.IGNORECASE,
+)
+
+
+def looks_like_human_challenge(*, title: str, text: str) -> bool:
+    """¿La página entera es una verificación de humano?"""
+    if _CHALLENGE_TITLE.search(title or ""):
+        return True
+    body = text or ""
+    return len(body) < _CHALLENGE_MAX_CHARS and bool(_CHALLENGE_TEXT.search(body))
+
+
+def names_a_human_challenge(description: str) -> bool:
+    """¿Este clic apunta a la casilla de una verificación de humano?"""
+    return bool(_CHALLENGE_CLICK.search(description or ""))
+
+
 @dataclass
 class DriverState:
     """Bookkeeping for the current browser session."""
@@ -96,7 +189,16 @@ class PlaywrightDriver:
         locale: str = "es-SV",
         platform: str | None = None,
         platform_auth: PlatformAuth | None = None,
+        allowed_hosts: "Any | None" = None,
     ) -> None:
+        # Los hosts de la plataforma bajo evaluación. Con lista, el navegador no
+        # puede salir de ellos (ver `host_allowed`); sin lista no se restringe.
+        self.allowed_hosts = (
+            None if allowed_hosts is None
+            else frozenset(h for h in (normalize_host(x) for x in allowed_hosts) if h)
+        )
+        #: Las salidas que se frenaron, para que el informe las pueda citar.
+        self.blocked_navigations: list[str] = []
         self.screenshots_dir = Path(screenshots_dir)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         # Headless by default: the product is an automated run, not a human
@@ -154,18 +256,11 @@ class PlaywrightDriver:
                     "--no-default-browser-check",
                 ],
             )
-            context_kwargs: dict[str, Any] = dict(
-                viewport=self.viewport,
-                locale=self.locale,
-            )
-            if self.user_agent:
-                context_kwargs["user_agent"] = self.user_agent
             if self.storage_state is not None:
-                context_kwargs["storage_state"] = str(self.storage_state)
                 logger.info("reusando sesión guardada: %s", self.storage_state.name)
-            self._context = await self._browser.new_context(**context_kwargs)
-            self.page = await self._context.new_page()
-            self.page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+            self._context, self.page = await self._open_context(
+                str(self.storage_state) if self.storage_state is not None else None
+            )
         except BaseException:
             # Every OTHER way launch can die (a bad context arg, a crashed page)
             # would leak the same way. Tear down whatever got started, then let
@@ -173,6 +268,99 @@ class PlaywrightDriver:
             await self.close()
             raise
         self.state.log("launch", headless=self.headless)
+
+    async def _open_context(self, storage_state: Any | None) -> tuple[Any, Any]:
+        """Un contexto nuevo con su página, con el mismo cerco que el primero.
+
+        Un solo lugar para crearlo, porque `start_over` abre otro a mitad de la
+        corrida y un contexto sin el cerco de hosts sería justo el agujero que
+        el cerco vino a cerrar.
+        """
+        context_kwargs: dict[str, Any] = dict(viewport=self.viewport, locale=self.locale)
+        if self.user_agent:
+            context_kwargs["user_agent"] = self.user_agent
+        if storage_state is not None:
+            context_kwargs["storage_state"] = storage_state
+        context = await self._browser.new_context(**context_kwargs)
+        try:
+            if self.allowed_hosts is not None:
+                # Sólo se interceptan las direcciones AJENAS (el predicado), así
+                # que el tráfico de la propia plataforma no pasa por Python.
+                await context.route(
+                    lambda url: not host_allowed(url, self.allowed_hosts),
+                    self._stop_leaving_the_platform,
+                )
+            page = await context.new_page()
+            page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+        except BaseException:
+            await context.close()
+            raise
+        return context, page
+
+    async def remember_start(self) -> None:
+        """Guarda, en memoria, el estado con el que la corrida ENTRÓ.
+
+        Se llama una vez, ya adentro (después del login si lo hubo). Es lo que
+        `start_over` restaura antes de cada prueba. En memoria y no en disco: es
+        una sesión viva de una cuenta ajena, y el archivo de sesión guardado
+        tiene su propio dueño (evalkit.session).
+        """
+        assert self._context is not None
+        self._start_state = await self._context.storage_state()
+
+    async def start_over(self, url: str) -> bool:
+        """Deja el navegador como al entrar: contexto nuevo, en `url`.
+
+        POR QUÉ EXISTE. En el piloto del 2026-11-25 todas las pruebas de una
+        corrida compartían un contexto, así que cada una arrancaba donde la
+        anterior había dejado la plataforma. La segunda prueba pedía "tocar una
+        opción incorrecta" y encontró la opción ya marcada y los botones
+        deshabilitados; las siguientes tocaban "Temas" y la plataforma respondía
+        "antes de seguir, terminemos la pregunta que quedó pendiente". Trece de
+        catorce pruebas tuvieron un paso que no se pudo ejecutar, con un plan
+        que estaba bien escrito para una plataforma recién abierta.
+
+        Devuelve False si no se pudo y se siguió en el contexto anterior: pasa
+        cuando la sesión vive en algo que el estado guardado no lleva
+        (sessionStorage), y entonces un contexto nuevo es una pantalla de login.
+        En ese caso sólo se vuelve a `url`, que es lo que había antes.
+
+        LO QUE NO HACE: el progreso que la plataforma guarda en su SERVIDOR
+        sigue ahí. Para eso hace falta una cuenta por prueba, no un navegador.
+        """
+        assert self._browser is not None and self.page is not None
+        state = getattr(self, "_start_state", None)
+        if state is None and self.storage_state is not None:
+            state = str(self.storage_state)
+        old_context, old_page = self._context, self.page
+        try:
+            self._context, self.page = await self._open_context(state)
+            await self.navigate(url)
+            lost = await self.is_logged_out()
+        except Exception as exc:  # noqa: BLE001 -- se vuelve al contexto anterior
+            logger.warning("no se pudo abrir un contexto nuevo: %s", exc)
+            lost = True
+        if lost:
+            fresh = self._context
+            self._context, self.page = old_context, old_page
+            if fresh is not None and fresh is not old_context:
+                try:
+                    await fresh.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Error closing context: %s", exc)
+            logger.warning(
+                "el contexto nuevo no quedó con la sesión abierta; la prueba "
+                "arranca en el contexto anterior, vuelta a %s", url,
+            )
+            await self.navigate(url)
+            self.state.log("start_over", fresh_context=False)
+            return False
+        try:
+            await old_context.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Error closing context: %s", exc)
+        self.state.log("start_over", fresh_context=True)
+        return True
 
     async def close(self) -> None:
         if self._context:
@@ -206,12 +394,64 @@ class PlaywrightDriver:
     async def navigate(self, url: str, wait_until: str = "domcontentloaded") -> str:
         """Navigate to a URL. Returns the URL the browser ended up at."""
         assert self.page is not None
+        allowed = getattr(self, "allowed_hosts", None)
+        if not host_allowed(url, allowed):
+            raise OffPlatformNavigation(
+                f'no se navega a "{url}": no es una dirección de la plataforma '
+                f"bajo evaluación ({', '.join(sorted(allowed or ())) or 'sin hosts'})",
+                hint=(
+                    "(si la plataforma usa otro host, por ejemplo un proveedor de "
+                    "identidad, declaralo en allowed_hosts: de su config.yaml)"
+                ),
+            )
         logger.info("navigate -> %s", url)
         await self.page.goto(url, wait_until=wait_until)
         await asyncio.sleep(self.action_delay_s)
         final_url = self.page.url
         self.state.log("navigate", url=url, final_url=final_url)
         return final_url
+
+    async def _stop_leaving_the_platform(self, route: Any) -> None:
+        """Aborta una navegación de la página principal hacia un host ajeno.
+
+        Sólo la navegación de la página: las fuentes, los scripts y las llamadas
+        a servicios de terceros que la plataforma usa para funcionar siguen de
+        largo, porque cortarlas rompería la plataforma que se quiere evaluar.
+        Un iframe ajeno tampoco se corta: no saca al navegador de la plataforma.
+        """
+        request = route.request
+        try:
+            leaving = (
+                request.is_navigation_request()
+                and request.frame.parent_frame is None
+            )
+        except Exception:  # noqa: BLE001 -- un frame ya cerrado no es una salida
+            leaving = False
+        if not leaving:
+            await route.continue_()
+            return
+        self.blocked_navigations.append(request.url)
+        self.state.log("blocked_navigation", url=request.url)
+        logger.warning(
+            "navegación frenada: %s no es un host de la plataforma", request.url
+        )
+        # 204 y no `abort`: un abort deja al navegador en una página de error de
+        # Chromium (lo mostró la prueba con navegador real), y la prueba
+        # siguiente arrancaría desde ahí. Con "sin contenido" la navegación se
+        # cancela y la página de la plataforma queda donde estaba. El sitio
+        # ajeno nunca recibe el pedido en ninguno de los dos casos.
+        await route.fulfill(status=204, body="")
+
+    async def is_human_challenge(self) -> bool:
+        """Si la página actual es una verificación de humano. Nunca levanta."""
+        if getattr(self, "page", None) is None:
+            return False
+        try:
+            title = await self.page.title()
+            text = await self.page.inner_text("body", timeout=2000)
+        except Exception:  # noqa: BLE001 -- no poder leer no es una verificación
+            return False
+        return looks_like_human_challenge(title=title, text=text)
 
     async def screenshot(self, label: str = "snap", *, full_page: bool = True) -> Path:
         """Save a screenshot and return its path."""
@@ -361,7 +601,23 @@ class PlaywrightDriver:
         The runner calls this before capturing anything AND AFTER EVERY STEP: a
         logged-out page must never become evidence, or a verdict gets rendered
         on a login screen and attributed to the vendor.
+
+        Lo mismo vale para una verificación de humano: evalkit no la resuelve,
+        y una captura de esa pantalla no es evidencia de nada sobre la
+        plataforma. Se detiene con su propio error, para que el motivo que queda
+        en el informe diga qué pasó y no "la sesión expiró".
         """
+        if await self.is_human_challenge():
+            current = await self.get_url()
+            raise HumanVerificationRequired(
+                f"la página en {current} pide verificar que hay una persona "
+                "(captcha o control de seguridad): evalkit no la resuelve, así "
+                "que la prueba se detiene acá",
+                hint=(
+                    "(si es la propia plataforma, pedile al proveedor una cuenta "
+                    "o un entorno de prueba sin esa verificación)"
+                ),
+            )
         if await self.is_logged_out():
             current = await self.get_url()
             raise SessionExpired(
@@ -510,7 +766,18 @@ class PlaywrightDriver:
 
         This is the function the Claude tool-use loop calls when Claude says
         "click the Submit button" — we try several strategies in order.
+
+        Se niega ANTES de probar ninguna estrategia si el clic apunta a una
+        verificación de humano. El 2026-11-25 el agente explicó por escrito que
+        resolver un captcha no era algo que debiera hacer, y en el mismo paso le
+        hizo clic cinco veces: la intención del modelo no es la garantía.
         """
+        if names_a_human_challenge(description):
+            raise HumanVerificationRequired(
+                f"no se hace clic en {description!r}: es una verificación de "
+                "humano y evalkit no la resuelve",
+                hint="(terminá el paso diciendo que no se pudo y por qué)",
+            )
         # Strategy 1: text match
         if await self.click_by_text(description, exact=False):
             return True
