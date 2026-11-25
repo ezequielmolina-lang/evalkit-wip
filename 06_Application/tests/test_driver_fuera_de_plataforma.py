@@ -190,10 +190,14 @@ INGRESO = """<!doctype html><html lang="es"><head><meta charset="utf-8"></head><
 <p>Escribe tu nombre de pila para empezar.</p>
 <input id="nombre" aria-label="Tu nombre">
 <button id="empezar" disabled>Empezar</button>
+<p id="estado">afuera</p>
 <script>
   const campo = document.getElementById('nombre');
   campo.addEventListener('input', () => {
     document.getElementById('empezar').disabled = campo.value.trim() === '';
+  });
+  document.getElementById('empezar').addEventListener('click', () => {
+    document.getElementById('estado').textContent = 'adentro como ' + campo.value;
   });
 </script>
 </body></html>"""
@@ -216,3 +220,20 @@ async def test_clicking_a_field_by_its_name_lands_on_the_field_not_on_text_that_
 
     assert await driver.page.input_value("#nombre") == "Evalkit dos"
     assert await driver.page.is_enabled("#empezar"), "el botón se habilita cuando el nombre entra"
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_button_by_its_name_lands_on_the_button(driver):
+    """El paso siguiente del mismo caso: "Empezar" también está dentro del
+    párrafo "...para empezar". El clic cayó en el párrafo cuatro veces, el
+    driver dijo que había hecho clic, y la pantalla no avanzó."""
+    async def _ingreso(route):
+        await route.fulfill(status=200, content_type="text/html", body=INGRESO)
+
+    await driver._context.route("http://plataforma.test/ingreso", _ingreso)
+    await driver.navigate(PERMITIDA + "ingreso")
+    await driver.click_element_description("Tu nombre")
+    await driver.type_into_focused("Evalkit dos", delay_ms=0)
+
+    assert await driver.click_element_description("Empezar") is True
+    assert await driver.page.inner_text("#estado") == "adentro como Evalkit dos"

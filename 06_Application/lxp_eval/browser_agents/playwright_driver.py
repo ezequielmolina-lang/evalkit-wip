@@ -812,6 +812,15 @@ class PlaywrightDriver:
         # un campo cuyo nombre es exactamente lo pedido, eso es lo que se pidió.
         if await self._click_textbox_named(description):
             return True
+        # Strategy 0b: un control que se llama EXACTAMENTE así (botón, enlace,
+        # pestaña). Mismo caso, un paso después: con el nombre ya escrito, la
+        # prueba pidió tocar "Empezar"; el párrafo "...de pila para empezar"
+        # volvió a ganar la coincidencia de texto, el clic cayó en el párrafo,
+        # el driver informó "Clicked 'Empezar'" y la pantalla no avanzó en
+        # cuatro intentos. El agente terminó entrando por otro botón, con lo que
+        # la prueba dejó de probar lo que decía probar.
+        if await self._click_control_named(description):
+            return True
         # Strategy 1: text match
         if await self.click_by_text(description, exact=False):
             return True
@@ -854,6 +863,26 @@ class PlaywrightDriver:
                 await locator.first.click(timeout=CLICK_STRATEGY_TIMEOUT_MS)
                 await asyncio.sleep(self.action_delay_s)
                 self.state.log("click_textbox_named", name=name)
+                return True
+            except Exception:  # noqa: BLE001 -- una de varias estrategias
+                continue
+        return False
+
+    async def _click_control_named(self, name: str) -> bool:
+        """Clic en el botón, enlace, pestaña o ítem cuyo nombre accesible es `name`.
+
+        Exacto y sin esperar, como `_click_textbox_named`: si no hay ninguno, las
+        estrategias de siempre siguen sin haber pagado nada.
+        """
+        assert self.page is not None
+        for role in ("button", "link", "tab", "menuitem"):
+            locator = self.page.get_by_role(role, name=name, exact=True)
+            try:
+                if await locator.count() < 1:
+                    continue
+                await locator.first.click(timeout=CLICK_STRATEGY_TIMEOUT_MS)
+                await asyncio.sleep(self.action_delay_s)
+                self.state.log("click_control_named", role=role, name=name)
                 return True
             except Exception:  # noqa: BLE001 -- una de varias estrategias
                 continue
