@@ -133,6 +133,16 @@ class JobRecord:
     #: applies` exists to stop -- and would erase the divergence itself, which
     #: is the finding. So both are carried, and a reader can see the gap.
     executed_steps: dict[str, list[str]] = field(default_factory=dict)
+    #: EL PLAN QUE UNA PERSONA APRUEBA ANTES DE QUE SE REDACTE UNA PRUEBA.
+    #: `strategy` es la decisión del planificador por criterio, ya cerrada con el
+    #: muestreo; `sampling_matrix`, la matriz tal como la propuso el muestreo;
+    #: `plan_document`, dónde quedó el documento (versión, archivos, conteos); y
+    #: `plan_corrections`, lo que la persona corrigió ("eso existe, está acá"),
+    #: como datos que el replaneo consume. Ver evalkit/planner.py.
+    strategy: list[dict] = field(default_factory=list)
+    sampling_matrix: dict = field(default_factory=dict)
+    plan_document: dict = field(default_factory=dict)
+    plan_corrections: list[dict] = field(default_factory=list)
     #: The reviewed plan exactly as the human approved it.
     approved_plan: dict | None = None
     approved_at: str = ""

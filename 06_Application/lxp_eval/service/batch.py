@@ -356,6 +356,9 @@ class JobOutcome:
     no_evaluado: int
     scored: int
     error: str
+    #: Dónde quedó el documento del plan, cuando el trabajo era "sólo el plan".
+    plan_path: str = ""
+    plan_line: str = ""
 
 
 @dataclass
@@ -386,6 +389,12 @@ def _outcome(store: JobStore, job_id: str) -> JobOutcome:
         no_evaluado=no_evaluado,
         scored=scored,
         error=(record.error or {}).get("message", "") if record.error else "",
+        plan_path=(
+            str(store.dir_of(record.job_id) / record.plan_document["html"])
+            if (record.plan_document or {}).get("html") else ""
+        ),
+        plan_line=(record.progress or {}).get("message", "")
+        if record.stage == Stage.PLAN_READY else "",
     )
 
 
@@ -433,6 +442,10 @@ def job_failed(outcome: JobOutcome) -> bool:
         return False
     if outcome.stage == Stage.AWAITING_APPROVAL and outcome.approval_policy == "human":
         return False
+    # El final PEDIDO de un trabajo "sólo el plan": el documento está listo y
+    # espera a una persona. Sólo cuenta si de verdad hay un documento.
+    if outcome.stage == Stage.PLAN_READY and outcome.plan_path:
+        return False
     return True
 
 
@@ -464,6 +477,8 @@ async def run_batch(
     default_approval_policy: str = "human",
     runner_factory: RunnerFactory | None = None,
     supervisor: Supervisor | None = None,
+    plan_only: bool = False,
+    corrections: list[dict] | None = None,
 ) -> BatchSummary:
     """Recorre el manifiesto y maneja cada trabajo, acotado y supervisado.
 
@@ -522,6 +537,12 @@ async def run_batch(
         job_engine = replace(engine, risk_policy=entry.risk_policy)
         runner = runner_factory(store, job_engine, box, clock)
         try:
+            if plan_only:
+                # SÓLO EL PLAN: recorrido, estrategia, muestreo y el documento
+                # con capturas. No se redacta ni se corre ninguna prueba, con
+                # cualquier política: aprobar ese documento es de una persona.
+                await runner.build_plan_document(record)
+                return store.get(record.job_id) or record
             await runner.build_plan(record)
             fresh = store.get(record.job_id) or record
             # Sólo un plan que llegó a la compuerta de aprobación se aprueba:
@@ -600,6 +621,7 @@ async def run_batch(
                     platform_kind=entry.platform_kind,
                     documents=documents,
                     approval_policy=policy,
+                    plan_corrections=list(corrections or []),
                 )
                 if blob is not None:
                     store.put_credentials(record.job_id, blob)
@@ -716,6 +738,8 @@ def _print_summary(summary: BatchSummary) -> None:
         )
         if o.stage == Stage.DONE:
             linea += f"  puntuados={o.scored}  NO_EVALUADO={o.no_evaluado}"
+        if o.plan_path:
+            linea += f"\n      {o.plan_line}\n      Documento del plan: {o.plan_path}"
         if o.error:
             linea += f"  error: {o.error}"
         print(linea)
@@ -766,6 +790,17 @@ def _cli_run(args: argparse.Namespace) -> int:
     max_parallel = args.max_parallel if args.max_parallel is not None else manifest.max_parallel
     default_policy = args.approval_policy or manifest.approval_policy or "human"
 
+    corrections = None
+    if getattr(args, "correcciones", None):
+        import yaml
+
+        try:
+            loaded = yaml.safe_load(Path(args.correcciones).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            print(f"no se pudieron leer las correcciones: {exc}", file=sys.stderr)
+            return EXIT_BAD_MANIFEST
+        corrections = [c for c in (loaded or []) if isinstance(c, dict)]
+
     summary = asyncio.run(
         run_batch(
             manifest.entries,
@@ -775,6 +810,8 @@ def _cli_run(args: argparse.Namespace) -> int:
             max_parallel=max_parallel,
             max_spend_usd=max_spend,
             default_approval_policy=default_policy,
+            plan_only=getattr(args, "command", "run") == "plan",
+            corrections=corrections,
         )
     )
     _print_summary(summary)
@@ -815,8 +852,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--approval-policy", choices=list(VALID_APPROVAL_POLICIES), default=None,
         help="política por defecto para entradas que no la fijan (default: human)",
     )
+    planp = sub.add_parser(
+        "plan",
+        help=(
+            "recorrer la plataforma y dejar el documento del plan con capturas, "
+            "sin redactar ni correr ninguna prueba"
+        ),
+    )
+    planp.add_argument("manifest", help="ruta al manifiesto YAML")
+    planp.add_argument("--root", default=None, help="directorio de trabajos")
+    planp.add_argument("--max-parallel", type=int, default=None)
+    planp.add_argument("--max-spend-usd", type=float, default=None)
+    planp.add_argument(
+        "--correcciones", default=None,
+        help=(
+            "YAML con las correcciones de una persona al plan anterior: una lista "
+            "de {tipo: existe|falta, superficie, url, nota}"
+        ),
+    )
+    planp.set_defaults(approval_policy=None)
     args = parser.parse_args(argv)
-    if args.command == "run":
+    if args.command in ("run", "plan"):
         return _cli_run(args)
     parser.print_help(sys.stderr)  # pragma: no cover
     return EXIT_BAD_MANIFEST  # pragma: no cover

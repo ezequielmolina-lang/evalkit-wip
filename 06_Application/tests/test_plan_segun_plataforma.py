@@ -305,10 +305,15 @@ async def test_the_walk_asks_about_the_whole_platform_not_only_the_chat(tmp_path
     mapa = await discover_surfaces(agente, root_url="https://practica.ejemplo.test/")
     perfil = mapa.as_dict()["profile"]
 
-    assert len(agente.encargos) == 3, "entrada, una actividad por dentro, el resto"
-    juntos = " ".join(agente.encargos).lower()
-    assert "respond" in juntos, "tiene que usar una actividad para ver qué pasa después"
-    assert "docente" in juntos or "otras partes" in juntos
+    # Entrada e inventario, una actividad por dentro, y después los
+    # experimentos. (Con este doble no hay frontera que vaciar: sus partes no
+    # traen el árbol de la pantalla. El bucle de la frontera se prueba en
+    # test_recorrido_frontera.py.)
+    assert len(agente.encargos) >= 3
+    assert "inventario" in agente.encargos[0].lower()
+    assert "respond" in agente.encargos[1].lower(), \
+        "tiene que usar una actividad para ver qué pasa después"
+    assert any("EXPERIMENTO" in e for e in agente.encargos[2:])
     assert [p["nombre"] for p in perfil["partes"]] == [
         "Temas", "Después de un error", "Vista docente",
     ]
@@ -725,8 +730,8 @@ async def test_each_exploration_is_told_what_is_already_described(tmp_path):
     ])
     await discover_surfaces(agente, root_url="https://practica.ejemplo.test/")
 
-    primero, segundo, tercero = agente.encargos
-    assert "YA DESCRITAS" not in primero
+    primero, segundo, tercero, *_ = agente.encargos
+    assert "YA REGISTRADAS" not in primero
     assert "Pantalla de inicio" in segundo
     assert "Pantalla de inicio" in tercero and "Después de un error" in tercero
     assert all("otra exploración lo mira" in e for e in agente.encargos)

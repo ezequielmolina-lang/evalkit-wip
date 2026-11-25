@@ -51,6 +51,10 @@ class Stage:
     FRAMEWORK = "framework"
     PROBES = "probes"
     AWAITING_APPROVAL = "awaiting_approval"
+    #: El documento del plan está listo y espera a una persona. Todavía no se
+    #: redactó ninguna prueba. Como `awaiting_approval`, NO es una etapa activa:
+    #: una persona leyendo un plan no está colgada.
+    PLAN_READY = "plan_ready"
     RUN = "run"
     SCORE = "score"
     DONE = "done"
@@ -59,7 +63,7 @@ class Stage:
 
 ALL_STAGES = (
     Stage.RECON, Stage.FRAMEWORK, Stage.PROBES, Stage.AWAITING_APPROVAL,
-    Stage.RUN, Stage.SCORE, Stage.DONE, Stage.ERROR,
+    Stage.PLAN_READY, Stage.RUN, Stage.SCORE, Stage.DONE, Stage.ERROR,
 )
 
 #: Nothing is running; a heartbeat here means nothing and must never be judged.

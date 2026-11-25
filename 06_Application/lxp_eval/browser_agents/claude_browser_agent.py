@@ -22,6 +22,7 @@ million tokens).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -85,6 +86,12 @@ class AgentRunResult:
     #: Lo que el agente informó con una herramienta de cierre propia (hoy,
     #: `describe_platform` del recorrido). None = no informó nada.
     report: dict[str, Any] | None = None
+    #: Las partes y los comportamientos que el explorador registró MIENTRAS
+    #: recorría (`record_part`, `record_behavior`), cada uno con la captura que
+    #: el código tomó en ese momento. Sobreviven aunque la exploración termine
+    #: sin informe: lo visto y capturado no se pierde por quedarse sin turnos.
+    parts: list[dict[str, Any]] = field(default_factory=list)
+    behaviors: list[dict[str, Any]] = field(default_factory=list)
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -693,6 +700,58 @@ class ClaudeBrowserAgent:
             )
             result.observations.append(obs)
             return f"Observation recorded: {obs.test_id} = {obs.status}", False
+
+        if name in ("record_part", "record_behavior"):
+            # LA CAPTURA LA TOMA EL CÓDIGO, en el momento del registro. Si la
+            # pidiera el modelo por separado habría partes sin captura y capturas
+            # de otra pantalla; así, una parte registrada ES una pantalla que
+            # estuvo abierta, con sus bytes hasheados. Es lo que el documento del
+            # plan le muestra a quien lo aprueba.
+            kind = "parte" if name == "record_part" else "comportamiento"
+            bucket = result.parts if name == "record_part" else result.behaviors
+            entry = {
+                k: str(v).strip() for k, v in args.items() if str(v or "").strip()
+            }
+            if not entry.get("nombre"):
+                return f"REGISTRO RECHAZADO: falta `nombre` de {kind}.", False
+            n = len(result.parts) + len(result.behaviors) + 1
+            try:
+                path = await d.screenshot(f"recon_{kind}_{n:02d}")
+            except Exception as exc:  # noqa: BLE001 -- sin captura no hay registro
+                return (
+                    f"REGISTRO RECHAZADO: no se pudo capturar la pantalla ({exc}). "
+                    "Volvé a intentarlo con la pantalla abierta."
+                ), False
+            entry["captura"] = Path(path).name
+            try:
+                entry["sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except OSError:
+                entry["sha256"] = ""
+            try:
+                entry["url"] = str(await d.get_url())
+            except Exception:  # noqa: BLE001 -- la dirección es un extra
+                pass
+            # EL ÁRBOL DE LA PANTALLA, ENTERO. De acá sale la frontera del
+            # recorrido (qué entradas hay en esta pantalla, las haya mencionado
+            # el modelo o no) y la firma del estado. Se guarda al lado de la
+            # captura: es la otra mitad de la evidencia de esta parte.
+            try:
+                from ..evalkit.frontier import enumerate_entries, state_signature
+
+                tree = await d.read_page(max_chars=None)
+                text_path = Path(path).with_suffix(".txt")
+                text_path.write_text(tree or "", encoding="utf-8")
+                entry["texto"] = text_path.name
+                entry["firma"] = state_signature(tree or "", entry.get("url", ""))
+                if name == "record_part":
+                    entry["entradas_en_pantalla"] = enumerate_entries(tree or "")
+            except Exception:  # noqa: BLE001 -- sin árbol hay parte, sin frontera
+                logger.debug("no pude leer el árbol de la parte registrada", exc_info=True)
+            bucket.append(entry)
+            return [
+                _image_block_for_api(path),
+                {"type": "text", "text": f"Registrado ({kind} {len(bucket)}): {entry['nombre']}"},
+            ], False
 
         if name == "describe_platform":
             # El cierre de una exploración (ver agent_driver.EXPLORE_REPORT_TOOL):

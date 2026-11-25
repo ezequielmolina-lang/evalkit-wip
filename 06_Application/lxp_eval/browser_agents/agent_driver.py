@@ -144,6 +144,88 @@ DEFAULT_COST_CAP_USD_PER_EXPLORATION = float(os.getenv("LXP_RECON_COST_CAP", "2.
 #: la plataforma con el texto de sus botones; en vivo no entró en 2048.
 EXPLORE_MAX_OUTPUT_TOKENS = int(os.getenv("LXP_RECON_MAX_OUTPUT_TOKENS", "8192"))
 
+#: Los roles con los que el recorrido etiqueta cada parte. `otro` existe para
+#: no forzar una plataforma rara a una de las cuatro cajas.
+ROLES = ("estudiante", "docente", "administrador", "publico", "otro")
+
+#: Registrar una PARTE mientras se la tiene en pantalla. La captura la toma el
+#: código (ver ClaudeBrowserAgent._dispatch_tool), así que no puede existir una
+#: parte sin su pantalla: es lo que el documento del plan muestra.
+RECORD_PART_TOOL: dict[str, Any] = {
+    "name": "record_part",
+    "description": (
+        "Registrá una pantalla, sección o momento de la plataforma MIENTRAS lo "
+        "tenés en pantalla: se guarda con una captura tomada en este instante. "
+        "Llamala cada vez que llegues a algo distinto (una sección del menú, lo "
+        "que aparece después de un error, el panel de otro rol). Lo que no "
+        "registres con esta herramienta no figura en el plan."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "nombre": {"type": "string"},
+            "rol": {
+                "type": "string", "enum": list(ROLES),
+                "description": "Para quién es esta pantalla.",
+            },
+            "entrada": {
+                "type": "string",
+                "description": (
+                    "El texto EXACTO del ítem de menú, botón de ingreso o cambio "
+                    "de rol por el que se llega a esta parte (por ejemplo "
+                    "'Vista docente'). Vacío si se llega por dentro de otra parte."
+                ),
+            },
+            "como_llegar": {
+                "type": "string",
+                "description": "Los toques, en orden, desde el inicio.",
+            },
+            "que_muestra": {"type": "string"},
+            "que_permite": {
+                "type": "string",
+                "description": (
+                    "Qué se puede hacer ahí: botones, opciones, si hay un campo "
+                    "para escribir y a quién le llega lo escrito."
+                ),
+            },
+        },
+        "required": ["nombre", "rol", "como_llegar", "que_muestra"],
+    },
+}
+
+#: Registrar un COMPORTAMIENTO que se averiguó haciendo, no leyendo: qué se
+#: hizo, qué pasó, qué se concluye. También lleva su captura.
+RECORD_BEHAVIOR_TOOL: dict[str, Any] = {
+    "name": "record_behavior",
+    "description": (
+        "Registrá algo que averiguaste HACIENDO (no leyendo un texto de ayuda): "
+        "qué hiciste, qué pasó en pantalla y qué se concluye. Se guarda con una "
+        "captura de este instante, así que llamala con el resultado a la vista."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "nombre": {
+                "type": "string",
+                "description": "Qué se averiguó, en pocas palabras.",
+            },
+            "que_hice": {"type": "string"},
+            "que_observe": {
+                "type": "string",
+                "description": "Lo que apareció, con el texto que tenía.",
+            },
+            "conclusion": {
+                "type": "string",
+                "description": (
+                    "Qué regla o comportamiento muestra. Si no alcanza para "
+                    "concluir, decilo: 'no concluyente' es una respuesta válida."
+                ),
+            },
+        },
+        "required": ["nombre", "que_hice", "que_observe", "conclusion"],
+    },
+}
+
 #: Con qué cierra una exploración: lo que VIO, estructurado, para que el plan de
 #: pruebas se escriba con esto y no con una etiqueta ("tutor").
 EXPLORE_REPORT_TOOL: dict[str, Any] = {
@@ -189,6 +271,37 @@ EXPLORE_REPORT_TOOL: dict[str, Any] = {
                     "required": ["nombre", "como_llegar", "que_muestra"],
                 },
             },
+            "entradas_vistas": {
+                "type": "array",
+                "description": (
+                    "TODOS los ítems de menú, botones de ingreso y cambios de rol "
+                    "que viste, uno por uno, los hayas abierto o no."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "texto": {
+                            "type": "string",
+                            "description": "El texto exacto que tiene en pantalla.",
+                        },
+                        "tipo": {
+                            "type": "string",
+                            "enum": ["menu", "rol", "ingreso", "otro"],
+                        },
+                        "estado": {
+                            "type": "string",
+                            "enum": ["recorrida", "pendiente", "no_disponible"],
+                            "description": (
+                                "recorrida: entraste y la registraste con "
+                                "record_part. pendiente: la viste y no entraste. "
+                                "no_disponible: no se puede entrar (decí por qué)."
+                            ),
+                        },
+                        "motivo": {"type": "string"},
+                    },
+                    "required": ["texto", "tipo", "estado"],
+                },
+            },
             "no_encontrado": {
                 "type": "array", "items": {"type": "string"},
                 "description": "Lo que buscaste y no está, con lo que viste en su lugar.",
@@ -219,8 +332,15 @@ EXPLORE_SYSTEM = (
     "- Si aparece una verificación de humano, no intentes resolverla: anotala.\n"
     "- Describí sólo lo que estuvo en pantalla. No completes con lo que una "
     "plataforma así 'suele tener'.\n\n"
+    "REGISTRÁ AL PASAR. Cada vez que llegues a una pantalla, sección o momento "
+    "distinto, llamá a `record_part` con eso en pantalla: guarda la captura. "
+    "Cuando averigües algo haciendo (qué pasa al errar varias veces, qué se "
+    "conserva al volver), llamá a `record_behavior` con el resultado a la vista. "
+    "No lo dejes para el final: lo que registraste queda aunque te quedes sin "
+    "turnos; lo que sólo pensabas contar al cierre, no.\n\n"
     "Sé concreto: nombrá los botones y las opciones con el texto que tienen. "
-    "Cuando termines, llamá a `describe_platform`."
+    "Cuando termines, llamá a `describe_platform` con el inventario de entradas "
+    "que viste y lo que no encontraste."
 )
 
 
@@ -242,9 +362,11 @@ def explore_tools() -> list[dict[str, Any]]:
         from .claude_browser_agent import BROWSER_TOOLS
     except Exception:  # noqa: BLE001 - missing SDK, config, etc.
         logger.debug("no pude importar BROWSER_TOOLS; exploro sólo con el informe")
-        return [EXPLORE_REPORT_TOOL]
+        return [RECORD_PART_TOOL, RECORD_BEHAVIOR_TOOL, EXPLORE_REPORT_TOOL]
     fuera = {"type_text", "done", "record_observation"}
-    return [t for t in BROWSER_TOOLS if t.get("name") not in fuera] + [EXPLORE_REPORT_TOOL]
+    return [t for t in BROWSER_TOOLS if t.get("name") not in fuera] + [
+        RECORD_PART_TOOL, RECORD_BEHAVIOR_TOOL, EXPLORE_REPORT_TOOL,
+    ]
 
 
 def _step_tools() -> list[dict[str, Any]]:
@@ -384,6 +506,18 @@ class AgentDriver:
             return False
         return bool(await restart(self.platform_url))
 
+    async def new_session(self) -> bool:
+        """El estudiante vuelve otro día: página nueva, MISMO contexto.
+
+        Distinto de `start_over`, que borra lo que la plataforma guardó. Acá se
+        conserva, porque la pregunta es justamente qué recuerda la plataforma
+        cuando alguien vuelve (ver PlaywrightDriver.new_session).
+        """
+        reopen = getattr(self._driver, "new_session", None)
+        if reopen is None or not self.platform_url:
+            return False
+        return bool(await reopen(self.platform_url))
+
     # --- the one method that needs the LLM --------------------------------
 
     async def do(self, step: str) -> None:
@@ -492,6 +626,18 @@ class AgentDriver:
         )
 
         report = getattr(result, "report", None)
+        recorded_parts = [dict(p) for p in (getattr(result, "parts", None) or [])]
+        recorded_behaviors = [dict(b) for b in (getattr(result, "behaviors", None) or [])]
+        if not isinstance(report, dict) and (recorded_parts or recorded_behaviors):
+            # LO REGISTRADO NO SE PIERDE. Antes, una exploración que se quedaba
+            # sin turnos tiraba todo lo que había visto (2026-11-25: tres
+            # exploraciones de 30 turnos, cero partes). Ahora cada parte se
+            # guarda al pasar; si falta el cierre, el informe lo dice.
+            reason = (
+                getattr(result, "block_reason", None)
+                or "el agente terminó sin el informe de cierre"
+            )
+            report = {"incompleto": str(reason)}
         if not isinstance(report, dict):
             reason = (
                 getattr(result, "block_reason", None)
@@ -505,7 +651,21 @@ class AgentDriver:
         # deja un perfil que dice "partes: ninguna", y el plan se escribiría
         # creyendo que la plataforma no tiene nada. Que no se haya visto nada
         # es posible, pero entonces el explorador lo dice en `no_encontrado`.
-        if not any(report.get(k) for k in ("partes", "no_encontrado")):
+        # Las partes registradas al pasar van PRIMERO: son las que tienen
+        # captura. Las que el modelo sólo describió en el cierre se conservan
+        # (un explorador viejo, un doble de prueba), marcadas sin captura.
+        if recorded_parts or recorded_behaviors:
+            report = dict(report)
+            report["partes"] = recorded_parts + [
+                p for p in (report.get("partes") or []) if isinstance(p, dict)
+            ]
+            report["comportamientos"] = recorded_behaviors + [
+                b for b in (report.get("comportamientos") or []) if isinstance(b, dict)
+            ]
+        if not any(
+            report.get(k)
+            for k in ("partes", "no_encontrado", "comportamientos", "entradas_vistas")
+        ):
             raise EvalkitError(
                 "la exploración de la plataforma devolvió un informe vacío: sin "
                 "partes vistas y sin nada anotado como no encontrado",

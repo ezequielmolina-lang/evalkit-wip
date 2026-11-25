@@ -12,7 +12,7 @@
 // would happily talk to llama.cpp and report its 404s as engine failures.
 export const ENGINE_URL = process.env.ENGINE_URL ?? "http://127.0.0.1:8811";
 
-export type Stage = "recon" | "framework" | "probes" | "awaiting_approval" | "run" | "score" | "done" | "error";
+export type Stage = "recon" | "framework" | "probes" | "awaiting_approval" | "plan_ready" | "run" | "score" | "done" | "error";
 
 export interface JobProgress {
   stage: Stage;
@@ -153,6 +153,7 @@ export const STAGE_LABEL: Record<Stage, string> = {
   framework: "Armando la rúbrica",
   probes: "Generando pruebas y revisándolas",
   awaiting_approval: "Esperando tu revisión",
+  plan_ready: "Plan listo para tu revisión",
   run: "Recorriendo la plataforma",
   score: "Puntuando la evidencia",
   done: "Listo",

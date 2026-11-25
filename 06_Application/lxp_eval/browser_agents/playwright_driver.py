@@ -362,6 +362,29 @@ class PlaywrightDriver:
         self.state.log("start_over", fresh_context=True)
         return True
 
+    async def new_session(self, url: str) -> bool:
+        """El mismo estudiante vuelve otro día: página nueva en el MISMO contexto.
+
+        Lo contrario de `start_over`. Allá se tira lo que la plataforma guardó,
+        para que una prueba no herede a la anterior; acá se conserva, porque la
+        pregunta del recorrido es qué recuerda la plataforma cuando alguien
+        vuelve. Cerrar la página y abrir otra es lo más parecido a "cerré la
+        pestaña y volví mañana" que se puede hacer sin esperar a mañana: se va
+        el estado en memoria de la página y queda lo que la plataforma persistió
+        (cookies, almacenamiento local, y lo que tenga en su servidor).
+        """
+        assert self._context is not None and self.page is not None
+        old = self.page
+        self.page = await self._context.new_page()
+        self.page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+        try:
+            await old.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Error closing page: %s", exc)
+        await self.navigate(url)
+        self.state.log("new_session")
+        return True
+
     async def close(self) -> None:
         if self._context:
             try:

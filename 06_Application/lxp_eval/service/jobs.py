@@ -43,6 +43,8 @@ from urllib.parse import urlparse
 
 from ..evalkit import framework as framework_mod
 from ..evalkit import generator as generator_mod
+from ..evalkit import planner as planner_mod
+from ..evalkit import sampling as sampling_mod
 from ..evalkit import report as report_mod
 from ..evalkit import runner as runner_mod
 from ..evalkit import scoring as scoring_mod
@@ -299,6 +301,9 @@ class Engine:
     run_probe: Callable[..., Any] = staticmethod(runner_mod.run_probe)
     score_test: Callable[..., Any] = staticmethod(scoring_mod.score_test)
     render_markdown: Callable[..., Any] = staticmethod(report_mod.render_markdown)
+    #: El planificador y el muestreo (ver `JobRunner.build_plan_document`).
+    plan_strategy: Callable[..., Any] = staticmethod(planner_mod.evaluate_strategy)
+    plan_sampling: Callable[..., Any] = staticmethod(sampling_mod.propose_sampling)
 
     bank: Any = None
     model: str | None = None
@@ -525,6 +530,12 @@ class JobRunner:
                     # queda como no verificado.
                     documents=record.documents,
                     on_progress=_exploring,
+                    # "Eso sí existe, está acá": lo que la persona corrigió en
+                    # el plan anterior entra a la frontera como entrada
+                    # obligatoria.
+                    must_visit=planner_mod.corrections_as_entries(
+                        record.plan_corrections
+                    ),
                 )
                 # El recorrido gasta plata del agente (~$0.37 medidos contra
                 # Plataforma A) y esa cifra no se plegaba: los $8.31 del build medido
@@ -588,7 +599,13 @@ class JobRunner:
 
         client = self._client()
 
-        # --- framework -----------------------------------------------------
+        result = await self._framework(record, client)
+        if result is None:
+            return record
+        return await self._probes(record, client, result)
+
+    async def _framework(self, record: JobRecord, client: Any) -> Any:
+        """Selecciona los criterios y clasifica su observabilidad. None = murió acá."""
         self._progress(
             record, Stage.FRAMEWORK,
             done=0, total=1,
@@ -613,7 +630,7 @@ class JobRunner:
             )
         except BaseException as exc:  # noqa: BLE001 -- the message is the product
             self._fail(record, Stage.FRAMEWORK, "", exc)
-            return record
+            return None
 
         built = serialize.framework_to_record(result)
         record.criteria = built["criteria"]
@@ -622,7 +639,126 @@ class JobRunner:
             record, Stage.FRAMEWORK,
             done=1, total=1, message=result.coverage.summary_line(),
         )
+        return result
 
+    async def build_plan_document(self, record: JobRecord) -> JobRecord:
+        """Recorre, decide y deja el DOCUMENTO DEL PLAN. No redacta ni corre nada.
+
+        POR QUÉ ES UN CAMINO APARTE DE `build_plan`. `build_plan` termina con
+        las pruebas ya redactadas y revisadas por el consejo, que es lo caro
+        (unos USD 0,25 por criterio) y lo que una persona no puede leer para
+        decidir si se miró todo. El 2026-11-25 se pagó ese plan, se aprobó en
+        automático y el informe dejó 20 de 28 criterios sin evaluar. Este camino
+        se detiene antes: recorrido, marco, planificador, muestreo, cierre
+        conjunto y el documento con las capturas. Lo que la persona corrige ahí
+        ("eso sí existe") cuesta un replaneo, no una corrida.
+
+        El trabajo queda en `plan_ready`. Redactar las pruebas a partir del plan
+        aprobado es el paso siguiente y todavía no existe: hasta entonces, un
+        trabajo en `plan_ready` no se puede aprobar ni ejecutar.
+        """
+        if not await self._recon(record):
+            return record
+        client = self._client()
+        if await self._framework(record, client) is None:
+            return record
+
+        from ..evalkit.recon import render_profile
+
+        _, surfaces = self._probe_bank_for(record)
+        profile = (surfaces or {}).get("profile")
+        profile_text = (
+            render_profile(profile) if profile
+            else "(el recorrido no produjo una descripción de la plataforma)"
+        )
+        doc_names = [str(d.get("name")) for d in record.documents if d.get("name")]
+        model = self.engine.model or _configured_model()
+
+        self._progress(
+            record, Stage.FRAMEWORK, done=0, total=3,
+            message="El planificador decide qué se prueba y qué no",
+        )
+        try:
+            decisions = await asyncio.to_thread(
+                self.engine.plan_strategy,
+                list(record.criteria),
+                profile=profile, profile_text=profile_text,
+                client=client, model=model, documents=doc_names,
+            )
+            self._progress(
+                record, Stage.FRAMEWORK, done=1, total=3,
+                message="El muestreo propone cuántas pruebas y sobre qué temas",
+            )
+            chosen = [d for d in decisions if d["estado"] == planner_mod.SE_PRUEBA]
+            matrix = await asyncio.to_thread(
+                self.engine.plan_sampling,
+                chosen, profile_text=profile_text, client=client, model=model,
+            )
+            # EL CIERRE CONJUNTO: el planificador integra la matriz y las
+            # objeciones del muestreo cambian el plan (ver planner.reconcile).
+            final = planner_mod.reconcile(decisions, matrix)
+        except BaseException as exc:  # noqa: BLE001 -- the message is the product
+            self._fail(record, Stage.FRAMEWORK, "", exc)
+            return record
+        self._fold_client_spend(record, client)
+
+        record.strategy = final
+        record.sampling_matrix = matrix
+        job_dir = self.store.dir_of(record.job_id)
+        previous = None
+        version = int((record.plan_document or {}).get("version") or 0) + 1
+        try:
+            import json
+
+            old_path = job_dir / "plan.json"
+            if old_path.exists():
+                previous = json.loads(old_path.read_text(encoding="utf-8"))
+            plan = planner_mod.build_plan(
+                platform=record.platform, url=record.platform_url,
+                objective=record.objective, profile=profile, decisions=final,
+                documents=doc_names, spend_usd=record.spend_usd,
+                version=version, corrections=record.plan_corrections,
+            )
+            plan["cambios"] = planner_mod.diff_plans(previous, plan)
+            (job_dir / "plan.json").write_text(
+                json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (job_dir / "plan.html").write_text(
+                planner_mod.render_plan_html(plan, self.store.artifacts_dir(record.job_id)),
+                encoding="utf-8",
+            )
+        except BaseException as exc:  # noqa: BLE001
+            self._fail(record, Stage.FRAMEWORK, "", exc)
+            return record
+
+        cover = (profile or {}).get("cobertura") or {}
+        counts = plan["conteos"]
+        record.plan_document = {
+            "version": version,
+            "json": "plan.json",
+            "html": "plan.html",
+            "conteos": counts,
+            "recorrido_completo": bool(cover.get("completo")),
+            "sin_cubrir": list(cover.get("sin_cubrir") or []),
+        }
+        gaps = (
+            f" ATENCIÓN: el recorrido dejó sin cubrir {len(cover.get('sin_cubrir') or [])} "
+            "entrada(s)."
+            if cover.get("sin_cubrir") else ""
+        )
+        self._progress(
+            record, Stage.PLAN_READY, done=1, total=1,
+            message=(
+                f"Plan listo para tu revisión: {counts['se_prueba']} criterios se "
+                f"prueban ({counts['pruebas']} pruebas), {counts['no_se_puede']} no se "
+                f"pueden evaluar, {counts['indefinido']} quedaron indefinidos y hacen "
+                f"falta {counts['documentos']} documento(s).{gaps}"
+            ),
+        )
+        return record
+
+    async def _probes(self, record: JobRecord, client: Any, result: Any) -> JobRecord:
+        """Redacta las pruebas y las pasa por el consejo. Termina en la compuerta."""
         # --- probes: OBSERVABLE CRITERIA ONLY -------------------------------
         # `result.criteria()` already excludes everything a walkthrough cannot
         # settle. A probe for a REQUIERE_ESTUDIO criterion is an evaluator sent
