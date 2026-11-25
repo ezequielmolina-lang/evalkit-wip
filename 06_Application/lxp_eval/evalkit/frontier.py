@@ -144,9 +144,17 @@ def state_signature(page_text: str, url: str = "") -> str:
 
 
 def _path_of(url: str) -> str:
-    path = urlparse(url or "").path if "//" in (url or "") else (url or "")
-    path = (path or "").rstrip("/")
-    return path if path and path != "#" and not path.startswith("#") else ""
+    """La ruta de una dirección, comparable. La raíz es "/" y un ancla no es nada.
+
+    La raíz cuenta: en la primera corrida en vivo el menú del docente tenía un
+    enlace "Práctica" a "/", el explorador ya había registrado la pantalla
+    principal en "/", y el enlace figuró como no recorrido.
+    """
+    url = (url or "").strip()
+    if not url or url.startswith("#"):
+        return ""
+    path = urlparse(url).path if "//" in url else url.split("#", 1)[0].split("?", 1)[0]
+    return (path or "/").rstrip("/") or "/"
 
 
 def build_frontier(
@@ -163,17 +171,22 @@ def build_frontier(
     parts = [p for p in parts if isinstance(p, dict)]
     frontier: dict[str, dict] = {}
 
-    def add(text: str, kind: str = "menu", url: str = "", source: str = "arbol") -> dict | None:
+    def add(text: str, kind: str = "menu", url: str = "", source: str = "arbol",
+            state: str = "sin_cubrir") -> dict | None:
         key = normalize(text)
         if not key:
             return None
         item = frontier.get(key)
         if item is None:
+            # La pista de "otro rol" vale para lo que salió del árbol de
+            # navegación. Un botón que el explorador mencionó y dice "docente"
+            # ("Pedir ayuda al docente") no es un cambio de rol.
+            hinted = source == "arbol" and _ROLE_HINT.search(str(text))
             item = frontier[key] = {
                 "texto": str(text).strip(),
-                "tipo": "rol" if _ROLE_HINT.search(str(text)) else (kind or "menu"),
+                "tipo": "rol" if hinted else (kind or "menu"),
                 "url": url or "",
-                "estado": "sin_cubrir",
+                "estado": state,
                 "motivo": "",
                 "partes": [],
                 "origen": source,
@@ -188,11 +201,26 @@ def build_frontier(
                 add(entry.get("texto", ""), entry.get("tipo", "menu"), entry.get("url", ""))
             else:
                 add(str(entry))
+    tree_seen = bool(frontier)
 
     for entry in declared or []:
         if not isinstance(entry, dict):
             continue
-        item = add(entry.get("texto", ""), entry.get("tipo", "menu"), source="explorador")
+        kind = str(entry.get("tipo") or "menu")
+        mandatory = bool(entry.get("obligatoria")) or kind in ("rol", "ingreso")
+        # LO QUE EL EXPLORADOR MENCIONA NO ES, POR ESO, NAVEGACIÓN. En la
+        # primera corrida en vivo declaró como entradas "Siguiente pregunta",
+        # "Sí, hice eso", "Cerrar" y "Marcar como atendido": 16 falsas alarmas
+        # de "sin recorrer" que tapaban el dato cierto, que las entradas leídas
+        # del árbol estaban todas cubiertas. Cuando hay árbol, lo declarado que
+        # el árbol no muestra queda como `mencionada` (a la vista, sin
+        # bloquear), salvo que sea un rol, un ingreso o algo que una persona
+        # dijo que existe. Sin árbol no hay con qué contrastar y cuenta todo.
+        state = "sin_cubrir" if (mandatory or not tree_seen) else "mencionada"
+        item = add(
+            entry.get("texto", ""), kind, str(entry.get("url") or ""),
+            source="persona" if entry.get("obligatoria") else "explorador", state=state,
+        )
         if item is None:
             continue
         if entry.get("estado") == "no_disponible" and str(entry.get("motivo") or "").strip():
@@ -210,6 +238,8 @@ def build_frontier(
         for key, item in frontier.items():
             entry_path = _path_of(item["url"])
             if (via and via == key) or (entry_path and entry_path == part_path):
+                if item["estado"] == "no_disponible" and item["origen"] != "arbol":
+                    continue
                 item["estado"] = "recorrida"
                 item["motivo"] = ""
                 pid = part.get("id")
@@ -259,13 +289,18 @@ def coverage(frontier: Iterable[dict], parts: Iterable[dict], *, tree_seen: bool
             "justamente lo que este chequeo no debería tener que creer."
         )
     return {
-        "entradas": len(frontier),
+        # Las de navegación. Lo que el explorador sólo mencionó no es una
+        # entrada y no infla la cuenta.
+        "entradas": sum(1 for e in frontier if e["estado"] != "mencionada"),
         "recorridas": sum(1 for e in frontier if e["estado"] == "recorrida"),
         "no_disponibles": unavailable,
         "sin_cubrir": uncovered,
         "roles_vistos": roles_seen,
         "roles_recorridos": roles_entered,
         "por_confirmar": [u["texto"] for u in unavailable if u["tipo"] == "rol"],
+        # Controles que el explorador nombró y que no son navegación según el
+        # árbol. No bloquean; se listan para que nadie tenga que creerle.
+        "mencionadas": [e["texto"] for e in frontier if e["estado"] == "mencionada"],
         "partes_sin_captura": [n for n in without_shot if n],
         "estados_distintos": len({p.get("firma") for p in parts if p.get("firma")}),
         "notas": notes,

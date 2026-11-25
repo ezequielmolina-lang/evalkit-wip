@@ -246,36 +246,20 @@ EXPLORE_REPORT_TOOL: dict[str, Any] = {
                     "la plataforma (qué se toca, en qué orden)."
                 ),
             },
-            "partes": {
-                "type": "array",
-                "description": "Cada pantalla, sección o momento distinto que viste.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "nombre": {"type": "string"},
-                        "como_llegar": {
-                            "type": "string",
-                            "description": "Los toques, en orden, desde el inicio.",
-                        },
-                        "que_muestra": {"type": "string"},
-                        "que_permite": {
-                            "type": "string",
-                            "description": (
-                                "Qué puede hacer ahí un estudiante: botones, "
-                                "opciones, si hay un campo para escribir y a quién "
-                                "le llega lo escrito."
-                            ),
-                        },
-                        "url": {"type": "string"},
-                    },
-                    "required": ["nombre", "como_llegar", "que_muestra"],
-                },
-            },
+            # SIN `partes`. Las partes se registran al pasar con `record_part`,
+            # que es lo que les pone la captura. En la primera corrida en vivo
+            # (2026-11-25) el cierre todavía las aceptaba y el explorador las
+            # volvió a listar ahí: 50 partes para 30 pantallas, veinte de ellas
+            # duplicados sin captura con las comillas cambiadas, y el
+            # planificador apoyó pruebas en esos duplicados.
             "entradas_vistas": {
                 "type": "array",
                 "description": (
-                    "TODOS los ítems de menú, botones de ingreso y cambios de rol "
-                    "que viste, uno por uno, los hayas abierto o no."
+                    "TODOS los ítems de menú, pestañas de navegación, botones de "
+                    "ingreso y cambios de rol que viste, uno por uno, los hayas "
+                    "abierto o no. Sólo NAVEGACIÓN: los controles de una actividad "
+                    "(opciones de respuesta, 'Siguiente', 'Enviar', 'Cerrar') no "
+                    "van acá."
                 ),
                 "items": {
                     "type": "object",
@@ -312,7 +296,7 @@ EXPLORE_REPORT_TOOL: dict[str, Any] = {
             },
             "notas": {"type": "string"},
         },
-        "required": ["partes"],
+        "required": [],
     },
 }
 
@@ -655,13 +639,12 @@ class AgentDriver:
         # captura. Las que el modelo sólo describió en el cierre se conservan
         # (un explorador viejo, un doble de prueba), marcadas sin captura.
         if recorded_parts or recorded_behaviors:
+            # Lo registrado al pasar REEMPLAZA lo que el cierre quiera listar:
+            # es lo único que tiene captura. (Un explorador viejo o un doble que
+            # no registra nada conserva su lista: ver la rama de arriba.)
             report = dict(report)
-            report["partes"] = recorded_parts + [
-                p for p in (report.get("partes") or []) if isinstance(p, dict)
-            ]
-            report["comportamientos"] = recorded_behaviors + [
-                b for b in (report.get("comportamientos") or []) if isinstance(b, dict)
-            ]
+            report["partes"] = recorded_parts
+            report["comportamientos"] = recorded_behaviors
         if not any(
             report.get(k)
             for k in ("partes", "no_encontrado", "comportamientos", "entradas_vistas")

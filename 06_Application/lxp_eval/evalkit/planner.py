@@ -518,6 +518,9 @@ def corrections_as_entries(corrections: list[dict] | None) -> list[dict]:
                 "texto": text, "tipo": "menu", "estado": "pendiente",
                 "url": str(c.get("url") or "").strip(),
                 "nota": str(c.get("nota") or "").strip(),
+                # Lo dijo una persona: no se degrada a "mencionada" aunque el
+                # árbol no lo muestre (ver frontier.build_frontier).
+                "obligatoria": True,
             })
     return out
 
@@ -554,11 +557,15 @@ def diff_plans(old: dict | None, new: dict) -> dict:
 
 # --- el documento -------------------------------------------------------------
 
-_THUMB_WIDTH = 900
+_FULL = (900, 1600, 70)
+#: La miniatura de la tabla de alcance. Chica a propósito: es para reconocer la
+#: pantalla, no para leerla; la captura entera está una sola vez, en el anexo.
+_THUMB = (240, 420, 60)
 
 
-def _image_data_uri(path: Path) -> str:
+def _image_data_uri(path: Path, size: tuple[int, int, int] = _FULL) -> str:
     """La captura embebida. Reducida si se puede: el documento viaja por correo."""
+    width, max_height, quality = size
     try:
         raw = path.read_bytes()
     except OSError:
@@ -568,14 +575,14 @@ def _image_data_uri(path: Path) -> str:
 
         with Image.open(io.BytesIO(raw)) as im:
             im = im.convert("RGB")
-            if im.width > _THUMB_WIDTH:
-                im = im.resize((_THUMB_WIDTH, int(im.height * _THUMB_WIDTH / im.width)))
+            if im.width > width:
+                im = im.resize((width, int(im.height * width / im.width)))
             # Una captura de página entera puede ser muy larga: se muestra el
             # comienzo, que es donde está el menú y lo que la identifica.
-            if im.height > 1600:
-                im = im.crop((0, 0, im.width, 1600))
+            if im.height > max_height:
+                im = im.crop((0, 0, im.width, max_height))
             buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=70)
+            im.save(buf, format="JPEG", quality=quality)
             return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:  # noqa: BLE001 -- sin Pillow va el PNG tal cual
         return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
@@ -657,20 +664,28 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
     criteria = plan.get("criterios") or []
     by_id = {c["id"]: c for c in criteria}
     surfaces = plan.get("superficies") or []
+    # CADA CAPTURA ENTRA UNA VEZ. El primer documento generado en vivo pesó
+    # 9 MB porque repetía la captura de una pantalla en cada criterio que la
+    # citaba (unas 150 imágenes para 30 pantallas). Ahora: una miniatura en la
+    # tabla de alcance y la captura entera una sola vez en el anexo; los
+    # criterios la enlazan.
     images: dict[str, str] = {}
+    thumbs: dict[str, str] = {}
     if artifacts is not None:
         for s in surfaces:
             if s.get("captura") and s["captura"] not in images:
                 images[s["captura"]] = _image_data_uri(artifacts / s["captura"])
+                thumbs[s["captura"]] = _image_data_uri(artifacts / s["captura"], _THUMB)
         for b in recon.get("comportamientos") or []:
             if b.get("captura") and b["captura"] not in images:
                 images[b["captura"]] = _image_data_uri(artifacts / b["captura"])
 
-    def shot(name: str, cls: str = "thumb") -> str:
-        uri = images.get(name or "")
+    def shot(name: str, cls: str = "thumb", anchor: str = "") -> str:
+        uri = (thumbs if cls == "thumb" else images).get(name or "")
         if not uri:
             return '<div class="noshot">sin captura</div>'
-        return f'<img class="{cls}" src="{uri}" alt="captura">'
+        img = f'<img class="{cls}" src="{uri}" alt="captura">'
+        return f'<a href="#cap-{_e(anchor)}">{img}</a>' if anchor else img
 
     o: list[str] = []
     w = o.append
@@ -727,6 +742,8 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
     w("<table><tr><th>Entrada vista en un menú</th><th>Tipo</th><th>Estado</th><th>Pantallas o motivo</th></tr>")
     for entry in recon.get("entradas") or []:
         st = entry.get("estado")
+        if st == "mencionada":
+            continue   # no es navegación: va en la lista de abajo
         tag = {"recorrida": "t-ok", "no_disponible": "t-no", "sin_cubrir": "t-un"}.get(st, "t-un")
         label = {"recorrida": "Recorrida", "no_disponible": "No disponible", "sin_cubrir": "Sin recorrer"}.get(st, st)
         w(
@@ -740,6 +757,11 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         f"<p class='small'>Roles recorridos: {_e(', '.join(recon.get('roles') or []) or 'ninguno')}. "
         f"Estados distintos registrados: {cover.get('estados_distintos', 0)}.</p>"
     )
+    if cover.get("mencionadas"):
+        w(
+            "<p class='small'>Controles que el explorador nombró y que no son navegación según el árbol "
+            "de las páginas (no cuentan como entradas): " + _e("; ".join(cover["mencionadas"])) + ".</p>"
+        )
     for item in recon.get("sin_explorar") or []:
         w(f"<div class='alert'>No se pudo explorar: {_e(item)}</div>")
 
@@ -752,7 +774,7 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         tag = {"se_prueba": ("t-ok", "Se prueba"), "indefinido": ("t-un", "Indefinida"),
                "sin_captura": ("t-no", "Sin captura"), "sin_criterios": ("t-un", "Sin criterios")}[state]
         w(
-            f"<tr><td>{shot(s.get('captura'))}</td>"
+            f"<tr><td>{shot(s.get('captura'), anchor=s.get('id') or '')}</td>"
             f"<td><b>{_e(s.get('id'))} {_e(s.get('nombre'))}</b><br><span class='small'>{_e(s.get('que_muestra'))}</span></td>"
             f"<td><span class='tag t-role'>{_e(_ROLE_LABEL.get(s.get('rol'), s.get('rol') or 'sin dato'))}</span></td>"
             f"<td>{_e(', '.join(s.get('criterios') or []) or 'ninguno')}</td>"
@@ -783,9 +805,11 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
             s = next((x for x in surfaces if x.get("id") == pid), None)
             if s is None:
                 continue
-            w(f"<p><b>{_e(pid)} {_e(s.get('nombre'))}</b>: {_e(s.get('como_llegar'))}</p>")
-            w(shot(s.get("captura"), "full"))
-            w(f"<p class='small'>{_e(s.get('url'))} · sha256 {_e(s.get('sha256'))} · árbol de la página: {_e(s.get('texto'))}</p>")
+            link = (
+                f"<a href='#cap-{_e(pid)}'>ver la captura</a>" if s.get("captura")
+                else "<span class='tag t-no'>sin captura</span>"
+            )
+            w(f"<p><b>{_e(pid)} {_e(s.get('nombre'))}</b> ({link}): {_e(s.get('como_llegar'))}</p>")
         w("</details>")
 
     # --- 3. no se puede evaluar ---
@@ -851,6 +875,17 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         w(f"<li>{_e(rule)}</li>")
     w(f"<li>Costo y tiempo estimados: USD {rules.get('costo_estimado_usd', 0):.2f} y unos {rules.get('tiempo_estimado_min', 0)} minutos. {_e(rules.get('base_de_la_estimacion'))}.</li>")
     w(f"<li>Compuertas: {_e(rules.get('con_compuerta'))}</li></ul>")
+
+    # --- anexo: las capturas, una vez cada una ---
+    shown = [s for s in surfaces if s.get("id") and s.get("captura")]
+    w(f"<h2>Anexo. Capturas del recorrido<small>{len(shown)} pantallas, a tamaño de lectura</small></h2>")
+    for s in shown:
+        w(f"<details id='cap-{_e(s['id'])}' open><summary>{_e(s['id'])} · {_e(s.get('nombre'))} · "
+          f"{_e(_ROLE_LABEL.get(s.get('rol'), s.get('rol') or 'sin dato'))}</summary>")
+        w(f"<p><b>Cómo se llega:</b> {_e(s.get('como_llegar'))}<br><b>Qué permite:</b> {_e(s.get('que_permite'))}</p>")
+        w(shot(s.get("captura"), "full"))
+        w(f"<p class='small'>{_e(s.get('url'))} · sha256 {_e(s.get('sha256'))} · "
+          f"archivo {_e(s.get('captura'))} · árbol de la página: {_e(s.get('texto'))}</p></details>")
 
     # --- cómo corregir ---
     w("<h2>Cómo corregir este plan</h2><div class='how'>")

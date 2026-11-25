@@ -160,12 +160,15 @@ def test_the_explorer_can_add_entries_and_reasons_but_never_remove_one():
     assert frontera["Vista docente"]["estado"] == "no_disponible"
     assert frontera["Cómo funciona"]["estado"] == "sin_cubrir", \
         "que el explorador diga 'recorrida' no alcanza: hace falta la parte"
-    assert frontera["Ayuda"]["estado"] == "sin_cubrir"
+    # "Ayuda" no está en el árbol de ninguna pantalla: queda a la vista como
+    # mencionada, sin contar como entrada sin recorrer (ver la prueba de abajo).
+    assert frontera["Ayuda"]["estado"] == "mencionada"
     assert frontera["Temas"]["estado"] == "sin_cubrir"
 
     chequeo = fr.coverage(frontera.values(), partes, tree_seen=True)
     assert chequeo["completo"] is False
-    assert set(chequeo["sin_cubrir"]) == {"Temas", "Cómo funciona", "Ayuda"}
+    assert set(chequeo["sin_cubrir"]) == {"Temas", "Cómo funciona"}
+    assert chequeo["mencionadas"] == ["Ayuda"]
     assert chequeo["por_confirmar"] == ["Vista docente"], \
         "un rol dado por no disponible lo tiene que ver una persona"
 
@@ -444,3 +447,96 @@ async def test_an_exploration_with_nothing_recorded_and_no_report_still_fails():
     adaptador = AgentDriver(_AgenteQueNoCierra(partes=[]), SimpleNamespace())
     with pytest.raises(EvalkitError):
         await adaptador.explore("x")
+
+
+# --- 6. lo que mostró la primera corrida en vivo del plan (2026-11-25) --------
+#
+# USD 7,92, trabajo 59e8217a9b5e425b. El recorrido entró a la vista docente y
+# registró 30 pantallas con captura, pero el perfil salió con 50 partes y el
+# autochequeo con 16 entradas "sin recorrer". Las dos cifras estaban mal por
+# culpa del propio recorrido, no de la plataforma.
+
+
+def test_controls_the_explorer_names_are_not_navigation():
+    """Declaró "Siguiente pregunta", "Sí, hice eso" y "Cerrar" como entradas.
+    El árbol decía otra cosa, y el árbol es el que manda."""
+    partes = [
+        _parte("P1", "Pantalla principal", arbol=ARBOL_ESTUDIANTE),
+        _parte("P2", "Temas", entrada="Temas"),
+        _parte("P3", "Explicación", entrada="Cómo funciona"),
+        _parte("P4", "Docente", entrada="Vista docente", rol="docente"),
+    ]
+    declarado = [
+        {"texto": "Siguiente pregunta", "tipo": "otro", "estado": "pendiente"},
+        {"texto": "Sí, hice eso", "tipo": "otro", "estado": "pendiente"},
+        {"texto": "Todos (5) / Se equivocó (1)", "tipo": "menu", "estado": "pendiente"},
+        {"texto": "Pedir ayuda al docente", "tipo": "otro", "estado": "pendiente"},
+    ]
+    frontera = fr.build_frontier(partes, declarado)
+    chequeo = fr.coverage(frontera, partes, tree_seen=True)
+
+    assert chequeo["sin_cubrir"] == []
+    assert chequeo["completo"] is True
+    assert len(chequeo["mencionadas"]) == 4, "se listan, para que nadie tenga que creerle"
+    assert chequeo["entradas"] == 4, "lo mencionado no infla la cuenta de entradas"
+    # Un botón que dice "docente" no es un cambio de rol.
+    assert chequeo["roles_vistos"] == ["Vista docente"]
+
+
+def test_a_role_or_something_a_person_pointed_at_is_always_mandatory():
+    partes = [_parte("P1", "Pantalla principal", arbol=ARBOL_ESTUDIANTE)]
+    declarado = [
+        {"texto": "Entrar como administrador", "tipo": "rol", "estado": "pendiente"},
+        {"texto": "Informes", "tipo": "menu", "estado": "pendiente", "obligatoria": True,
+         "url": "/informes"},
+    ]
+    frontera = {e["texto"]: e for e in fr.build_frontier(partes, declarado)}
+    assert frontera["Entrar como administrador"]["estado"] == "sin_cubrir"
+    assert frontera["Informes"]["estado"] == "sin_cubrir"
+    assert frontera["Informes"]["origen"] == "persona"
+
+
+def test_a_link_to_the_root_is_covered_by_the_main_screen():
+    """El menú del docente tenía "Práctica" -> "/", y la pantalla principal ya
+    estaba registrada en "/"."""
+    partes = [
+        _parte("P1", "Pantalla principal", url=RAIZ),
+        _parte("P2", "Vista docente", arbol=ARBOL_DOCENTE, entrada="Vista docente",
+               url=RAIZ + "docente", rol="docente"),
+    ]
+    frontera = {e["texto"]: e for e in fr.build_frontier(partes)}
+    assert frontera["Práctica"]["estado"] == "recorrida"
+    assert frontera["Resumen"]["estado"] == "recorrida"
+    assert frontera["Clase en vivo"]["estado"] == "sin_cubrir"
+
+
+class _AgenteQueRepite:
+    """Registra al pasar y, además, vuelve a listar las partes en el cierre."""
+
+    def __init__(self):
+        self.tools, self.max_iterations, self.cost_cap_usd = [], 0, 0.0
+
+    async def run(self, *, system, user_task):
+        return SimpleNamespace(
+            report={"partes": [{"nombre": "Página 'Cómo funciona'", "como_llegar": "menú",
+                                "que_muestra": "la explicación"}],
+                    "entradas_vistas": []},
+            parts=[{"nombre": 'Página "Cómo funciona"', "captura": "a.png"}],
+            behaviors=[], blocked=False, block_reason=None, estimated_cost_usd=0.1,
+            cache_read_tokens=0, cache_write_tokens=0, turns=9,
+        )
+
+
+@pytest.mark.asyncio
+async def test_what_was_recorded_replaces_what_the_closing_report_lists():
+    """50 partes para 30 pantallas: veinte eran la misma pantalla, sin captura
+    y con las comillas cambiadas, y el planificador apoyó pruebas en ellas."""
+    informe = await AgentDriver(_AgenteQueRepite(), SimpleNamespace()).explore("x")
+    assert [p["nombre"] for p in informe["partes"]] == ['Página "Cómo funciona"']
+    assert all(p.get("captura") for p in informe["partes"])
+
+
+def test_the_closing_report_no_longer_asks_for_parts():
+    from lxp_eval.browser_agents.agent_driver import EXPLORE_REPORT_TOOL
+
+    assert "partes" not in EXPLORE_REPORT_TOOL["input_schema"]["properties"]

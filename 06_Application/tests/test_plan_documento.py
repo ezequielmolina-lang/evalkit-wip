@@ -343,6 +343,11 @@ def test_the_document_shows_the_captures_and_never_a_score(tmp_path):
     doc = pl.render_plan_html(_plan(), tmp_path)
 
     assert doc.count("data:image/") >= 3, "las capturas del recorrido van adentro del documento"
+    # Cada captura UNA vez a tamaño de lectura, por más criterios que la citen:
+    # el primer documento en vivo pesó 9 MB por repetirlas.
+    assert doc.count("class=\"full\"") == 3, "p1, p2 y la del comportamiento, una vez cada una"
+    assert "href='#cap-P2'" in doc, "el criterio enlaza la captura en vez de repetirla"
+    assert "id='cap-P2'" in doc
     assert "sin captura" in doc, "una pantalla sin captura se ve como tal, no se esconde"
     assert "El recorrido NO está completo" in doc and "Informes" in doc
     assert "Nada se ha ejecutado todavía" in doc
@@ -392,4 +397,5 @@ def test_a_correction_becomes_a_place_the_walk_must_visit():
     assert entradas == [{
         "texto": "Informes", "tipo": "menu", "estado": "pendiente",
         "url": "/informes", "nota": "está en el menú del docente",
+        "obligatoria": True,
     }]
