@@ -65,7 +65,10 @@ def test_each_cell_becomes_a_probe_with_its_own_id_and_steps():
     assert [i["probeId"] for i in instancias] == ["PB-D4-02-c1", "PB-D4-02-c2"]
     assert all(i["criterionId"] == "D4-02" for i in instancias), "mismo criterio: se juntan en x de n"
     assert instancias[1]["steps"][1]["action"] == "Tocar el subtema Potencias"
-    assert instancias[1]["steps"][2]["action"].endswith("orden de operaciones")
+    assert "orden de operaciones" in instancias[1]["steps"][2]["action"]
+    # La variante orienta, no exige: el paso lleva la salida dicha (ver abajo).
+    assert "orientación" in instancias[1]["steps"][2]["action"]
+    assert "orientación" not in instancias[1]["steps"][1]["action"], "sólo en el paso de la variante"
     assert instancias[0]["goal"] == "Ver si nombra el error en Monomios"
     assert instancias[1]["celda"] == {"n": 2, "tema": "Potencias", "variante": "orden de operaciones"}
     assert not any("[TEMA]" in s["action"] or "[VARIANTE]" in s["action"]
@@ -294,3 +297,72 @@ def test_a_job_without_a_plan_cannot_be_run_from_a_plan(tmp_path, env):  # noqa:
     resultado = _desde_plan(store, engine, registro.job_id)
     assert resultado.stage == Stage.ERROR
     assert "plan" in resultado.error
+
+
+# --- 3. lo que mostró el piloto en vivo (2026-11-25, USD 4,18) ----------------
+#
+# Siete pruebas de tres criterios: tres corrieron, tres se cortaron y una quedó
+# en compuerta. Las tres cortadas eran del mismo origen: la celda pedía una
+# situación que la plataforma no ofreció en ese momento.
+
+
+def test_a_variant_is_a_direction_not_a_demand():
+    """La celda pedía "el error de signo de potencia" y la plataforma mostró una
+    resta. El agente dijo que no podía, con razón, y la prueba se cortó."""
+    instancias = pl.instantiate(_redactada(), [{"tema": "Potencias", "variante": "error de signo de potencia"}])
+    paso = instancias[0]["steps"][2]["action"]
+    assert "error de signo de potencia" in paso
+    assert "la más parecida que sí permita" in paso
+    assert "No lo des por no hecho" in paso
+
+
+def test_the_drafter_is_told_a_variant_step_is_still_one_action():
+    guia = pl.guidance_for({"que_se_prueba": "x", "partes": [], "celdas": []})
+    assert "pasos separados" in guia
+
+
+def test_sampling_is_told_the_platform_picks_the_question():
+    from lxp_eval.evalkit import sampling as sm
+
+    assert "elige qué pregunta muestra" in sm.SAMPLING_SYSTEM
+
+
+class _DriverQueRevienta(_DriverQueRegistra):
+    async def do(self, step):
+        if "Potencias" in step:
+            raise TimeoutError("Locator.click: Timeout 4000ms exceeded")
+        await super().do(step)
+
+
+def test_a_probe_that_blows_up_does_not_take_the_whole_run_with_it(tmp_path, env):  # noqa: F811
+    """Un timeout del navegador no es un EvalkitError. Salía por arriba y
+    marcaba la etapa entera como fallida: con más de cien pruebas, perderlo
+    todo por una."""
+    engine = make_engine(
+        tmp_path, client=_cliente(), plan_strategy=_estrategia_dos, plan_sampling=_muestreo,
+    )
+
+    def factory(job, credentials, artifacts_dir):
+        clase = _DriverQueRevienta if engine.test_drivers else _DriverQueRegistra
+        d = clase(artifacts_dir, credentials=credentials)
+        engine.test_drivers.append(d)
+        return d
+
+    engine.driver_factory = factory
+    store = JobStore(tmp_path / "runs")
+    entrada = ManifestEntry(
+        platform_url="https://plataforma.test",
+        objective="Un tutor de IA de matemática para 1.º a 6.º grado.",
+        areas=["D9", "D1", "PRIV"],
+    )
+    resumen = asyncio.run(run_batch([entrada], store=store, engine=engine, box=None, plan_only=True))
+    job_id = resumen.jobs[0].job_id
+    resultado = _desde_plan(store, engine, job_id)
+    registro = store.get(job_id)
+
+    assert resultado.stage == Stage.DONE, registro.error
+    reventadas = [m for m in registro.unevaluated.values() if "error inesperado" in m]
+    assert len(reventadas) == 2, "las dos celdas de Potencias, una por criterio"
+    assert "TimeoutError" in reventadas[0]
+    probados = [d["id"] for d in registro.strategy if d["estado"] == "se_prueba"]
+    assert _filas(store, job_id)[probados[0]]["rationale"].startswith("CUMPLE en 2 de 2")

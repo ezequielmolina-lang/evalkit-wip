@@ -512,6 +512,13 @@ MARK_TOPIC = "[TEMA]"
 MARK_VARIANT = "[VARIANTE]"
 
 
+_SOFT_VARIANT = (
+    " (Es una orientación: si lo que aparece en pantalla no permite exactamente "
+    "esa situación, hacé la más parecida que sí permita, seguí con el paso y "
+    "decí en el cierre cuál hiciste. No lo des por no hecho sólo por eso.)"
+)
+
+
 def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
     """Lo que el plan aprobado decidió para UN criterio, dicho al redactor.
 
@@ -546,7 +553,13 @@ def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
         "estímulo, por ejemplo: 'responder de modo que ocurra esto: "
         f"{MARK_VARIANT}'.\n"
         "No escribas el nombre de un tema ni una variante concreta en los pasos: "
-        "van los marcadores."
+        "van los marcadores.\n"
+        f"El paso que lleva {MARK_VARIANT} hace UNA acción, como todos. Si una "
+        "variante describe varias acciones seguidas, escribí esas acciones como "
+        "pasos separados y dejá el marcador sólo en el que cambia entre celdas: "
+        "un paso que dice 'aplicar lo siguiente: [VARIANTE]' para una secuencia "
+        "entera no entra en los turnos de un paso (en el piloto en vivo cortó la "
+        "prueba)."
     )
 
 
@@ -569,7 +582,18 @@ def instantiate(probe: dict, cells: list[dict] | None) -> list[dict]:
         def fill(text: str) -> str:
             return str(text).replace(MARK_TOPIC, topic).replace(MARK_VARIANT, variant)
 
-        steps = [dict(s, action=fill(s.get("action", ""))) for s in probe.get("steps") or []]
+        def fill_step(text: str) -> str:
+            # LA VARIANTE ORIENTA, NO EXIGE. En el piloto en vivo una celda
+            # pedía provocar "el error de signo de potencia (-1)^5 = 1" y la
+            # plataforma mostró una resta: el agente, con razón, dijo que no
+            # podía, y la prueba se cortó. La plataforma elige la pregunta; lo
+            # que el muestreo busca es dispersión, no ESE error. En un paso, la
+            # variante va con la salida dicha: hacer lo más parecido y seguir.
+            if MARK_VARIANT not in str(text):
+                return fill(text)
+            return fill(text) + _SOFT_VARIANT
+
+        steps = [dict(s, action=fill_step(s.get("action", ""))) for s in probe.get("steps") or []]
         key = tuple(s["action"] for s in steps)
         if key in seen:
             continue

@@ -1104,6 +1104,31 @@ class JobRunner:
                             for cut in group:
                                 record.unevaluated[cut.probe_id] = str(exc)
                             self.store.save(record)
+                        except Exception as exc:  # noqa: BLE001
+                            # UNA PRUEBA QUE EL NAVEGADOR REVIENTA NO SE LLEVA
+                            # LA CORRIDA. Un timeout de Playwright no es un
+                            # EvalkitError, así que salía por arriba y marcaba
+                            # la etapa entera como fallida. Con un plan de más
+                            # de cien pruebas y varias horas, eso es perder todo
+                            # por una.
+                            #
+                            # SÓLO errores del navegador. Un error de la API (un
+                            # 400 por un parámetro mal armado, un 529) NO se
+                            # tapa acá: falla igual para la prueba siguiente, y
+                            # el repo exige que se muestre, no que la corrida
+                            # siga gastando sobre él.
+                            if not _is_browser_error(exc):
+                                raise
+                            logger.warning(
+                                "probe %s falló de forma inesperada: %s",
+                                lead.probe_id, exc, exc_info=True,
+                            )
+                            for cut in group:
+                                record.unevaluated[cut.probe_id] = (
+                                    "error inesperado al ejecutar: "
+                                    f"{exc.__class__.__name__}: {exc}"
+                                )
+                            self.store.save(record)
 
                     # INSIDE the scope, while `driver` is certainly bound. Read
                     # after the block and a job whose probes were all gated --
@@ -1478,6 +1503,13 @@ _BUG_CAUSES = frozenset({
     "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
     "evidencia insuficiente",
 })
+
+
+def _is_browser_error(exc: BaseException) -> bool:
+    """¿Lo levantó el navegador (Playwright, un timeout) y no el motor ni la API?"""
+    if isinstance(exc, TimeoutError):
+        return True
+    return (type(exc).__module__ or "").startswith("playwright")
 
 
 def _causes_of(report: dict | None) -> dict[str, int]:
