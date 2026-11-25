@@ -764,6 +764,51 @@ def _print_summary(summary: BatchSummary) -> None:
         print(f"RESULTADO: OK. El comando termina con código {code}.")
 
 
+async def run_from_plan(
+    store: JobStore,
+    job_id: str,
+    *,
+    engine: Engine | None = None,
+    box: "SecretBox | None" = None,
+    approved_by: str,
+    only: list[str] | None = None,
+    runner_factory: RunnerFactory | None = None,
+) -> JobOutcome:
+    """Del plan aprobado al informe: redacta por celda, ejecuta y puntúa.
+
+    Es el paso que le faltaba al camino "sólo el plan". `approved_by` va tal
+    cual al ledger: quién aprobó el documento del plan. Las compuertas no se
+    mueven: lo que requiera firma queda sin correr y el informe dice cuántas.
+    """
+    from .ledger_decisions import approve_from_plan
+
+    record = store.get(job_id)
+    if record is None:
+        return JobOutcome(job_id, "", "missing", "", 0.0, 0, 0, "el trabajo no existe")
+    runner = (runner_factory or _default_runner_factory)(store, engine or Engine(), box, Clock())
+    await runner.draft_from_plan(record, only=only)
+    fresh = store.get(job_id) or record
+    if fresh.stage == Stage.AWAITING_APPROVAL:
+        approve_from_plan(store, fresh, approved_by=approved_by)
+        await runner.execute(fresh)
+    return _outcome(store, job_id)
+
+
+def _cli_from_plan(args: argparse.Namespace) -> int:
+    store = JobStore(args.root or DEFAULT_ROOT)
+    try:
+        box: SecretBox | None = SecretBox.from_env()
+    except ServiceError:
+        box = None
+    only = [x.strip() for x in (args.solo or "").split(",") if x.strip()] or None
+    outcome = asyncio.run(run_from_plan(
+        store, args.job_id, box=box, approved_by=args.aprobado_por, only=only,
+    ))
+    summary = BatchSummary(jobs=[outcome], total_spend_usd=outcome.spend_usd)
+    _print_summary(summary)
+    return exit_code_for(summary)
+
+
 def _cli_run(args: argparse.Namespace) -> int:
     try:
         manifest = load_manifest(args.manifest)
@@ -871,7 +916,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     planp.set_defaults(approval_policy=None)
+    fromp = sub.add_parser(
+        "desde-plan",
+        help=(
+            "redactar las pruebas de un plan ya aprobado por una persona, "
+            "ejecutarlas (una por celda del muestreo) y dejar el informe"
+        ),
+    )
+    fromp.add_argument("job_id", help="el trabajo que está en la etapa plan_ready")
+    fromp.add_argument("--root", default=None, help="directorio de trabajos")
+    fromp.add_argument(
+        "--aprobado-por", required=True,
+        help="quién aprobó el documento del plan; queda escrito en el ledger",
+    )
+    fromp.add_argument(
+        "--solo", default=None,
+        help="ids de criterios separados por coma, para un piloto",
+    )
     args = parser.parse_args(argv)
+    if args.command == "desde-plan":
+        return _cli_from_plan(args)
     if args.command in ("run", "plan"):
         return _cli_run(args)
     parser.print_help(sys.stderr)  # pragma: no cover

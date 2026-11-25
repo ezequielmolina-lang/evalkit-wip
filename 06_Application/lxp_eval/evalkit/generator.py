@@ -1555,7 +1555,9 @@ _PROFILE_RULES_JUDGE = (
     "construida. Objetá, sí, un paso que use una parte o una interacción que no "
     "figura acá, que pida abrir la plataforma o iniciar sesión, que ocurra "
     "fuera del navegador, que sea condicional ('si aparece...') o que repita "
-    "una acción varias veces: ese paso no se puede ejecutar."
+    "una acción varias veces: ese paso no se puede ejecutar. Los marcadores "
+    "[TEMA] y [VARIANTE] dentro de un paso NO son una ambigüedad: la prueba se "
+    "ejecuta una vez por celda del muestreo aprobado y ahí se reemplazan."
 )
 
 
@@ -1656,6 +1658,7 @@ def _draft(
     platform_kind: str | None,
     objections: Sequence[JudgeVerdict],
     platform_profile: dict | None = None,
+    guidance: str | None = None,
 ) -> Probe:
     blocks = []
     # PRIMERO la plataforma: es igual para todos los criterios de la corrida,
@@ -1664,6 +1667,12 @@ def _draft(
     if seen is not None:
         blocks.append(seen)
     blocks.append(_criterion_block(test, platform_kind))
+    if guidance:
+        # LO QUE YA SE DECIDIÓ. Cuando hay un plan aprobado, el redactor no
+        # elige dónde ni cuántas veces se prueba: eso lo decidieron el
+        # planificador y el muestreo y lo aprobó una persona. Acá sólo se
+        # escriben los pasos (ver planner.guidance_for).
+        blocks.append({"type": "text", "text": guidance})
     if objections:
         lines = [
             "El consejo revisó tu borrador anterior y objetó lo siguiente. "
@@ -2527,6 +2536,7 @@ def generate_probes(
     platform_profile: dict | None = None,
     on_probe_done: Callable[[int, int], None] | None = None,
     max_workers: int = DEFAULT_PROBE_WORKERS,
+    plan_guidance: dict[str, str] | None = None,
 ) -> ProbeSet:
     """Draft and review one probe per criteria test.
 
@@ -2599,6 +2609,7 @@ def generate_probes(
             else:
                 probe = _draft(
                     client, model, test, platform_kind, objections, platform_profile,
+                    (plan_guidance or {}).get(test.id),
                 )
             panel = _review(
                 client, council, model, test, probe, platform_kind, index,

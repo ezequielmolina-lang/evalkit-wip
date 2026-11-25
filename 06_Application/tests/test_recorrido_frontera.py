@@ -130,9 +130,9 @@ def test_an_entry_is_walked_only_if_a_captured_part_is_reached_through_it():
     assert frontera["Temas"]["partes"] == ["P2"]
     assert frontera["Cómo funciona"]["estado"] == "recorrida"
     assert frontera["Vista docente"]["estado"] == "sin_cubrir"
-    # No se recorre, pero no se olvida: queda con su motivo.
-    assert frontera["Cambiar estudiante"]["estado"] == "no_disponible"
-    assert "a propósito" in frontera["Cambiar estudiante"]["motivo"]
+    # "Cambiar estudiante" es una función de la plataforma, no un cierre de
+    # sesión: hay que recorrerla (ver la prueba de más abajo).
+    assert frontera["Cambiar estudiante"]["estado"] == "sin_cubrir"
 
 
 def test_a_part_without_a_capture_does_not_count_as_walked():
@@ -167,7 +167,7 @@ def test_the_explorer_can_add_entries_and_reasons_but_never_remove_one():
 
     chequeo = fr.coverage(frontera.values(), partes, tree_seen=True)
     assert chequeo["completo"] is False
-    assert set(chequeo["sin_cubrir"]) == {"Temas", "Cómo funciona"}
+    assert set(chequeo["sin_cubrir"]) == {"Temas", "Cómo funciona", "Cambiar estudiante"}
     assert chequeo["mencionadas"] == ["Ayuda"]
     assert chequeo["por_confirmar"] == ["Vista docente"], \
         "un rol dado por no disponible lo tiene que ver una persona"
@@ -227,7 +227,7 @@ class _Explorador:
             ]}
         if "RECORRÉ ESTAS ENTRADAS" in task:
             partes = []
-            for texto in ("Temas", "Cómo funciona", "Práctica"):
+            for texto in ("Temas", "Cómo funciona", "Práctica", "Cambiar estudiante"):
                 if f"«{texto}»" in task:
                     partes.append(
                         _sin_id(_parte("", f"Sección {texto}", entrada=texto))
@@ -265,8 +265,8 @@ async def test_the_teacher_view_is_entered_because_the_list_demands_it():
     assert chequeo["roles_recorridos"] == ["Vista docente"]
     # Lo que apareció DENTRO del rol (su propio menú) también entró en la lista.
     assert {e["texto"] for e in perfil["entradas"]} >= {"Resumen", "Clase en vivo", "Práctica"}
-    # Y lo que no se recorre a propósito quedó anotado, no olvidado.
-    assert any(u["texto"] == "Cambiar estudiante" for u in chequeo["no_disponibles"])
+    # "Cambiar estudiante" también se recorrió: es una función, no una salida.
+    assert next(e for e in perfil["entradas"] if e["texto"] == "Cambiar estudiante")["estado"] == "recorrida"
     # Cada parte tiene un id con el que el plan la puede citar.
     assert [p["id"] for p in perfil["partes"]] == [f"P{i}" for i in range(1, len(perfil["partes"]) + 1)]
 
@@ -465,6 +465,7 @@ def test_controls_the_explorer_names_are_not_navigation():
         _parte("P2", "Temas", entrada="Temas"),
         _parte("P3", "Explicación", entrada="Cómo funciona"),
         _parte("P4", "Docente", entrada="Vista docente", rol="docente"),
+        _parte("P5", "Ingreso de otro estudiante", entrada="Cambiar estudiante"),
     ]
     declarado = [
         {"texto": "Siguiente pregunta", "tipo": "otro", "estado": "pendiente"},
@@ -481,6 +482,22 @@ def test_controls_the_explorer_names_are_not_navigation():
     assert chequeo["entradas"] == 4, "lo mencionado no infla la cuenta de entradas"
     # Un botón que dice "docente" no es un cambio de rol.
     assert chequeo["roles_vistos"] == ["Vista docente"]
+
+
+def test_switching_student_is_a_feature_to_walk_and_logging_out_is_not():
+    """La corrección de quien revisó el primer plan: el recorrido había dado
+    "Cambiar estudiante" por no disponible "porque cierra la sesión". Es una
+    función (entra otro estudiante, con otra memoria) y hay que ejercitarla."""
+    arbol = (
+        '- navigation:\n'
+        '  - link "Cambiar estudiante":\n    - /url: "#"\n'
+        '  - link "Cerrar sesión":\n    - /url: /logout\n'
+        '  - button "Borrar datos"\n'
+    )
+    frontera = {e["texto"]: e for e in fr.build_frontier([_parte("P1", "Principal", arbol=arbol)])}
+    assert frontera["Cambiar estudiante"]["estado"] == "sin_cubrir"
+    assert frontera["Cerrar sesión"]["estado"] == "no_disponible"
+    assert frontera["Borrar datos"]["estado"] == "no_disponible"
 
 
 def test_a_role_or_something_a_person_pointed_at_is_always_mandatory():

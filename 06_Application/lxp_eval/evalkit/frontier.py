@@ -58,8 +58,16 @@ _ROLE_HINT = re.compile(
 #: Entradas que NO se recorren a propósito: cierran la sesión o destruyen algo.
 #: No se ignoran: quedan en la lista como "no disponible" con este motivo, que
 #: es la diferencia entre un salto anotado y un olvido.
+#:
+#: "CAMBIAR ESTUDIANTE" NO ESTÁ ACÁ, y estuvo. En el primer plan en vivo
+#: (2026-11-25) el recorrido la dio por no disponible "porque cierra la sesión o
+#: cambia datos", y quien revisó el plan corrigió: es una función de la
+#: plataforma (entra otro estudiante, que no debe heredar la memoria del
+#: anterior) y hay que ejercitarla. Si falla, es un hallazgo sobre la
+#: plataforma, no un salto del recorrido. La lista queda para lo que de verdad
+#: termina la sesión del evaluador o destruye datos.
 _SKIP = re.compile(
-    r"cerrar sesi[oó]n|\bsalir\b|log ?out|sign ?out|cambiar (de )?(estudiante|usuario|cuenta)"
+    r"cerrar sesi[oó]n|\bsalir\b|log ?out|sign ?out"
     r"|borrar|eliminar|reiniciar|delete|reset",
     re.IGNORECASE,
 )

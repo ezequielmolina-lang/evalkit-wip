@@ -506,6 +506,90 @@ def build_plan(
     }
 
 
+#: Los marcadores que el redactor deja en los pasos y que se reemplazan por
+#: los valores de cada celda del muestreo.
+MARK_TOPIC = "[TEMA]"
+MARK_VARIANT = "[VARIANTE]"
+
+
+def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
+    """Lo que el plan aprobado decidió para UN criterio, dicho al redactor.
+
+    El redactor escribe los pasos una sola vez; las celdas del muestreo los
+    instancian (ver `instantiate`). Así el consejo revisa una prueba por
+    criterio y no una por celda, que es lo que mantiene el costo del plan.
+    """
+    by_id = {s.get("id"): s for s in surfaces or []}
+    where = "; ".join(
+        f"{pid} ({by_id.get(pid, {}).get('nombre', '')}: {by_id.get(pid, {}).get('como_llegar', '')})"
+        for pid in decision.get("partes") or []
+    ) or "(el plan no citó pantallas)"
+    cells = decision.get("celdas") or []
+    listing = "\n".join(
+        f"  {i}. tema: {c.get('tema') or '(no depende del tema)'} · variante: {c.get('variante')}"
+        for i, c in enumerate(cells, start=1)
+    )
+    return (
+        "EL PLAN APROBADO PARA ESTE CRITERIO (lo decidió el planificador, lo "
+        "dimensionó el muestreo y lo aprobó una persona; no lo cambies).\n"
+        f"Qué se prueba: {decision.get('que_se_prueba') or '(no dice)'}\n"
+        f"En qué pantallas del recorrido: {where}\n"
+        f"Esta prueba se va a ejecutar {len(cells) or 1} vez/veces, una por celda:\n"
+        f"{listing or '  1. única'}\n\n"
+        "Escribí los pasos UNA sola vez, de modo que sirvan para todas las celdas, "
+        "usando dos marcadores literales que el ejecutor reemplaza:\n"
+        f"- {MARK_TOPIC}: donde se elige el tema o subtema. Escribí el camino "
+        f"completo hasta ahí y, en el paso que elige, 'el subtema {MARK_TOPIC}'. "
+        "Si el criterio no depende del tema, no lo uses.\n"
+        f"- {MARK_VARIANT}: lo que distingue a la celda (qué error provocar, qué "
+        "mensaje escribir, qué momento mirar). Ponelo en el paso que produce el "
+        "estímulo, por ejemplo: 'responder de modo que ocurra esto: "
+        f"{MARK_VARIANT}'.\n"
+        "No escribas el nombre de un tema ni una variante concreta en los pasos: "
+        "van los marcadores."
+    )
+
+
+def instantiate(probe: dict, cells: list[dict] | None) -> list[dict]:
+    """Una prueba redactada con marcadores -> una instancia por celda.
+
+    Cada instancia tiene su propio id (`<id>-c1`, `<id>-c2`...) y el mismo
+    criterio: la evidencia se junta por criterio y el informe dice "en x de n".
+    Dos celdas que dejan los pasos idénticos (el redactor no usó los
+    marcadores) son la misma prueba: se ejecuta una sola vez y se dice, en vez
+    de correr dos veces lo mismo y contarlo como dos.
+    """
+    cells = [c for c in (cells or []) if isinstance(c, dict)] or [{"tema": "", "variante": ""}]
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for k, cell in enumerate(cells, start=1):
+        topic = str(cell.get("tema") or "").strip() or "el primer tema disponible"
+        variant = str(cell.get("variante") or "").strip() or "la situación habitual"
+
+        def fill(text: str) -> str:
+            return str(text).replace(MARK_TOPIC, topic).replace(MARK_VARIANT, variant)
+
+        steps = [dict(s, action=fill(s.get("action", ""))) for s in probe.get("steps") or []]
+        key = tuple(s["action"] for s in steps)
+        if key in seen:
+            continue
+        seen.add(key)
+        inst = dict(probe)
+        inst.update({
+            "probeId": f"{probe['probeId']}-c{k}",
+            "templateId": probe["probeId"],
+            "steps": steps,
+            "goal": fill(probe.get("goal", "")),
+            "verdictRule": fill(probe.get("verdictRule", "")),
+            "celda": {"n": k, "tema": cell.get("tema", ""), "variante": cell.get("variante", "")},
+        })
+        out.append(inst)
+    if len(out) < len(cells):
+        for inst in out:
+            inst["celdasFundidas"] = len(cells) - len(out)
+    return out
+
+
 def corrections_as_entries(corrections: list[dict] | None) -> list[dict]:
     """Las correcciones "eso existe, está acá" como entradas obligatorias del recorrido."""
     out = []

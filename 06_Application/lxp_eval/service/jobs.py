@@ -602,7 +602,7 @@ class JobRunner:
         result = await self._framework(record, client)
         if result is None:
             return record
-        return await self._probes(record, client, result)
+        return await self._probes(record, client, result.criteria())
 
     async def _framework(self, record: JobRecord, client: Any) -> Any:
         """Selecciona los criterios y clasifica su observabilidad. None = murió acá."""
@@ -757,13 +757,91 @@ class JobRunner:
         )
         return record
 
-    async def _probes(self, record: JobRecord, client: Any, result: Any) -> JobRecord:
+    async def draft_from_plan(
+        self, record: JobRecord, *, only: list[str] | None = None
+    ) -> JobRecord:
+        """Redacta las pruebas de un plan que una persona ya aprobó.
+
+        Entra un trabajo en `plan_ready` y sale en `awaiting_approval`, con una
+        prueba por CELDA del muestreo. El redactor escribe los pasos una vez por
+        criterio, con marcadores, y el consejo revisa esa prueba; después se
+        instancia por celda (ver planner.instantiate).
+
+        LA DECISIÓN DEL PLAN MANDA SOBRE LA CLASIFICACIÓN PREVIA. El marco
+        clasificó cada criterio sin haber visto la plataforma; el planificador
+        decidió con el recorrido delante y una persona lo aprobó. Acá esa
+        decisión se escribe en el criterio (con la clase anterior guardada al
+        lado), y con eso todo lo de aguas abajo -- qué se redacta, qué se
+        puntúa, qué muestra el informe -- lee una sola verdad.
+
+        `only` limita la redacción a unos criterios (un piloto): los demás
+        quedan en el plan, sin prueba, y el informe lo dice.
+        """
+        if record.stage != Stage.PLAN_READY or not record.strategy:
+            self._fail(
+                record, record.stage, "",
+                ServiceError(
+                    "este trabajo no tiene un plan listo para redactar: hace "
+                    "falta el documento del plan (etapa plan_ready)"
+                ),
+            )
+            return record
+        decisions = {d["id"]: d for d in record.strategy}
+        chosen = [
+            d for d in record.strategy
+            if d["estado"] == planner_mod.SE_PRUEBA and (not only or d["id"] in only)
+        ]
+        for c in record.criteria:
+            d = decisions.get(c.get("id"))
+            if d is None:
+                continue
+            c.setdefault("observabilityOriginal", c.get("observability", ""))
+            c["observability"] = _OBSERVABILITY_OF[d["estado"]]
+            if d["estado"] != planner_mod.SE_PRUEBA:
+                c["observabilityReason"] = (
+                    f"[causa: {_CAUSE_OF[d['estado']]}] {d.get('motivo', '')}".strip()
+                )
+                if d.get("documento"):
+                    c["evidenciaRequerida"] = d["documento"]
+        self.store.save(record)
+
+        from ..evalkit.criteria import Criteria, CriterionDomain, CriterionTest
+
+        wanted = {d["id"] for d in chosen}
+        by_area: dict[str, list] = {}
+        for c in record.criteria:
+            if c.get("id") in wanted:
+                by_area.setdefault(c.get("area", ""), []).append(CriterionTest(
+                    id=c["id"], name=c.get("name", ""),
+                    points=float(c.get("points", 0) or 0),
+                    verification=c.get("verification", "") or c.get("name", ""),
+                    pass_criteria=c.get("passCriteria", ""),
+                    fail_criteria=c.get("failCriteria", ""),
+                ))
+        criteria = Criteria(
+            name=record.objective,
+            domains=[
+                CriterionDomain(code=a, name=a, points=sum(t.points for t in ts), tests=ts)
+                for a, ts in by_area.items()
+            ],
+        )
+        _, surfaces = self._probe_bank_for(record)
+        parts = ((surfaces or {}).get("profile") or {}).get("partes") or []
+        guidance = {d["id"]: planner_mod.guidance_for(d, parts) for d in chosen}
+        cells = {d["id"]: d.get("celdas") or [] for d in chosen}
+        return await self._probes(
+            record, self._client(), criteria, guidance=guidance, cells=cells
+        )
+
+    async def _probes(
+        self, record: JobRecord, client: Any, criteria: Any,
+        *, guidance: dict | None = None, cells: dict | None = None,
+    ) -> JobRecord:
         """Redacta las pruebas y las pasa por el consejo. Termina en la compuerta."""
         # --- probes: OBSERVABLE CRITERIA ONLY -------------------------------
         # `result.criteria()` already excludes everything a walkthrough cannot
         # settle. A probe for a REQUIERE_ESTUDIO criterion is an evaluator sent
         # to look for something that is not on any screen.
-        criteria = result.criteria()
         total = len(list(criteria.all_tests()))
         self._progress(
             record, Stage.PROBES,
@@ -828,8 +906,12 @@ class JobRunner:
                 # Hand-authored, live-validated probes replace the DRAFT for the
                 # criteria that have them; the council still reviews every one.
                 # Where there is no banked probe, drafting proceeds as before.
-                probe_bank=probe_bank,
+                # Con un plan aprobado NO se usa el banco de pruebas escritas a
+                # mano: fueron hechas para otra forma de plataforma, y acá el
+                # dónde y el cuánto ya los decidió el plan.
+                probe_bank=None if guidance else probe_bank,
                 surfaces=surfaces,
+                plan_guidance=guidance,
                 # LO QUE EL RECORRIDO VIO. Sin esto el plan se escribe a ciegas:
                 # el 2026-11-25 costó USD 7,22 de pruebas para un chat libre que
                 # la plataforma no tiene. None cuando no hubo recorrido o el
@@ -841,6 +923,15 @@ class JobRunner:
             return record
 
         record.probes = [serialize.probe_to_dict(g) for g in probeset]
+        if cells is not None:
+            # UNA PRUEBA POR CELDA del muestreo aprobado.
+            record.probes = [
+                inst
+                for drafted in record.probes
+                for inst in planner_mod.instantiate(
+                    drafted, cells.get(drafted["criterionId"])
+                )
+            ]
         record.sampling = dict(serialize.DEFAULT_SAMPLING)
         # KEEP THE NOTICE. It is rendered here and needed at signoff, which is
         # a different moment and a different screen; dropping it meant the
@@ -1122,6 +1213,9 @@ class JobRunner:
 
         client = self._client()
         verdicts = []
+        by_test: dict[str, list] = {}
+        for p in probes:
+            by_test.setdefault(p.test_id, []).append(p)
         try:
             for i, test in enumerate(tests):
                 self._progress(
@@ -1129,6 +1223,18 @@ class JobRunner:
                     done=i, total=max(1, len(tests)), current=test.id,
                     message=f"Criterio {i + 1} de {len(tests)}: {test.name}",
                 )
+                if record.strategy:
+                    # CON PLAN: una prueba por celda, un juicio por celda, y el
+                    # criterio dice "en x de n" (ver `_score_cells`).
+                    verdicts.append(await self._score_cells(
+                        record, test, by_test.get(test.id, []),
+                        rows_since(
+                            ledger.for_platform_test(record.platform, test.id),
+                            record.approved_at,
+                        ),
+                        client,
+                    ))
+                    continue
                 if test.id in cut_short:
                     verdicts.append(scoring_mod.TestVerdict(
                         test_id=test.id,
@@ -1226,12 +1332,166 @@ class JobRunner:
                 ),
             },
         )
+        if record.strategy:
+            causes = _causes_of(record.report)
+            bugs = {k: v for k, v in causes.items() if k in _BUG_CAUSES}
+            record.report.setdefault("meta", {})["causasNoEvaluado"] = causes
+            # EL AUTOCHEQUEO DE LA CORRIDA. Que un criterio quede sin evaluar
+            # porque hace falta un documento o un estudio es un resultado. Que
+            # quede así porque el recorrido no llegó, la prueba se cortó o no
+            # se redactó es una falla NUESTRA, y el informe la nombra arriba.
+            record.report["meta"]["autochequeo"] = {
+                "ok": not bugs,
+                "fallasDelEvaluador": bugs,
+            }
         self._progress(
             record, Stage.DONE,
             done=len(tests), total=max(1, len(tests)),
             message="Informe listo",
         )
         return record
+
+    async def _score_cells(
+        self, record: JobRecord, test: Any, cells: list, rows: list[dict], client: Any
+    ) -> Any:
+        """El veredicto de UN criterio a partir de sus celdas: "en x de n".
+
+        Cada celda se juzga sola, con su propia evidencia: mezclar en un juicio
+        la evidencia de tres temas deja al juez promediando y al informe sin
+        poder decir en cuál falló. Una celda que se cortó no se juzga (ver la
+        regla de las pruebas cortadas en `_score`) y una que no corrió por
+        compuerta se cuenta aparte: ninguna de las dos cuenta en contra.
+
+        Un criterio sin ninguna celda juzgada queda NO_EVALUADO con su CAUSA
+        escrita, porque "no evaluado" a secas no dice si falta un documento o
+        si nos equivocamos nosotros.
+        """
+        NV = scoring_mod.NO_EVALUADO
+        stored = [p for p in record.probes if p.get("criterionId") == test.id]
+        by_id = {p["probeId"]: p for p in stored}
+        gated = [
+            p for p in stored
+            if p.get("requiresSignoff") and p["probeId"] not in record.signoffs
+        ]
+
+        def unscored(cause: str, text: str) -> Any:
+            return scoring_mod.TestVerdict(
+                test_id=test.id, platform=record.platform, status=NV,
+                points_earned=0.0, points_possible=0.0,
+                rationale=f"[causa: {cause}] {text}", evidence=[], runs=[],
+            )
+
+        if not cells:
+            if gated:
+                return unscored(
+                    "compuerta sin firma",
+                    f"{len(gated)} prueba(s) redactada(s) que necesitan una firma "
+                    "por prueba antes de correr: "
+                    + str(gated[0].get("signoffReason") or "")[:300],
+                )
+            if not stored:
+                return unscored(
+                    "sin redactar",
+                    "el plan incluye este criterio pero en esta corrida no se "
+                    "redactó su prueba",
+                )
+            return unscored("sin ejecutar", "la prueba se redactó y no se ejecutó")
+
+        results: list[tuple[str, str, str, list]] = []
+        for p in cells:
+            cell = (by_id.get(p.probe_id) or {}).get("celda") or {}
+            label = " · ".join(
+                x for x in (str(cell.get("tema") or ""), str(cell.get("variante") or "")) if x
+            ) or p.probe_id
+            if p.probe_id in record.unevaluated:
+                results.append((label, "CORTADA", record.unevaluated[p.probe_id], []))
+                continue
+            own = [r for r in rows if r.get("probe_id") == p.probe_id]
+            v = await asyncio.to_thread(
+                self.engine.score_test, test, own, client,
+                platform=record.platform, repeats=p.repeat_judging,
+                model=self.engine.model,
+            )
+            results.append((label, v.status, v.rationale, list(v.evidence)))
+
+        judged = [r for r in results if r[1] in scoring_mod.SCORED]
+        cut = sum(1 for r in results if r[1] == "CORTADA")
+        thin = sum(1 for r in results if r[1] == NV)
+        lines = [
+            f"[{i}] {label}: {status}. {str(reason)[:600]}"
+            for i, (label, status, reason, _) in enumerate(results, start=1)
+        ]
+        extras = []
+        if cut:
+            extras.append(f"{cut} cortada(s)")
+        if thin:
+            extras.append(f"{thin} sin evidencia suficiente")
+        if gated:
+            extras.append(f"{len(gated)} sin correr por compuerta")
+        tail = (
+            f" De {len(stored)} planeada(s): " + ", ".join(extras) + "." if extras else ""
+        )
+        if not judged:
+            cause = "ejecución fallida" if cut and not thin else "evidencia insuficiente"
+            return unscored(cause, f"ninguna prueba se pudo juzgar.{tail} " + " ".join(lines))
+
+        worth = {scoring_mod.CUMPLE: 1.0, scoring_mod.PARCIAL: 0.5, scoring_mod.NO_CUMPLE: 0.0}
+        met = sum(1 for r in judged if r[1] == scoring_mod.CUMPLE)
+        statuses = {r[1] for r in judged}
+        status = statuses.pop() if len(statuses) == 1 else scoring_mod.PARCIAL
+        earned = float(test.points) * sum(worth[r[1]] for r in judged) / len(judged)
+        evidence: list[str] = []
+        for r in judged:
+            for path in r[3]:
+                if path not in evidence:
+                    evidence.append(path)
+        return scoring_mod.TestVerdict(
+            test_id=test.id, platform=record.platform, status=status,
+            points_earned=round(earned, 4), points_possible=float(test.points),
+            rationale=(
+                f"CUMPLE en {met} de {len(judged)} prueba(s) evaluada(s).{tail} "
+                + " ".join(lines)
+            ),
+            evidence=evidence, runs=[r[1] for r in judged],
+        )
+
+
+#: Cómo se escribe en el criterio lo que decidió el plan (ver
+#: `JobRunner.draft_from_plan`).
+_OBSERVABILITY_OF = {
+    planner_mod.SE_PRUEBA: "OBSERVABLE_EN_PLATAFORMA",
+    planner_mod.NECESITA_DOCUMENTO: "REQUIERE_DOCUMENTACION",
+    planner_mod.NECESITA_ESTUDIO: "REQUIERE_ESTUDIO",
+    planner_mod.NO_SE_PUEDE_MEDIR: "NO_DECIDIBLE_EN_EVALUACION",
+    planner_mod.FALTA_RECORRER: "NO_DECIDIBLE_EN_EVALUACION",
+}
+
+#: La causa de un NO_EVALUADO, en palabras. Las tres primeras son resultados
+#: legítimos de una evaluación; el resto son fallas del evaluador.
+_CAUSE_OF = {
+    planner_mod.NECESITA_DOCUMENTO: "necesita documento",
+    planner_mod.NECESITA_ESTUDIO: "necesita estudio",
+    planner_mod.NO_SE_PUEDE_MEDIR: "no se puede medir",
+    planner_mod.FALTA_RECORRER: "falta recorrer",
+}
+_BUG_CAUSES = frozenset({
+    "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
+    "evidencia insuficiente",
+})
+
+
+def _causes_of(report: dict | None) -> dict[str, int]:
+    """Cuántos NO_EVALUADO hay por causa, leído de las filas del informe."""
+    import re
+
+    out: dict[str, int] = {}
+    for row in (report or {}).get("rows") or []:
+        if row.get("verdict") != scoring_mod.NO_EVALUADO:
+            continue
+        m = re.match(r"\[causa: ([^\]]+)\]", str(row.get("rationale") or ""))
+        cause = m.group(1) if m else "sin causa registrada"
+        out[cause] = out.get(cause, 0) + 1
+    return out
 
 
 def _configured_model() -> str:
