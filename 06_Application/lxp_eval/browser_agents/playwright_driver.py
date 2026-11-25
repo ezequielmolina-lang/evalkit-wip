@@ -801,6 +801,17 @@ class PlaywrightDriver:
                 "humano y evalkit no la resuelve",
                 hint="(terminá el paso diciendo que no se pudo y por qué)",
             )
+        # Strategy 0: un campo de texto que se llama EXACTAMENTE así.
+        #
+        # Va primero por un caso real (2026-11-25): la pantalla de ingreso decía
+        # "Escribe tu nombre de pila para empezar" y debajo tenía el campo "Tu
+        # nombre". El agente pidió hacer clic en "Tu nombre", la estrategia de
+        # texto encontró el párrafo (que contiene "tu nombre"), el clic cayó ahí
+        # y lo que se escribió después no entró en ningún lado. Tres intentos,
+        # el botón "Empezar" siempre deshabilitado, y la prueba cortada. Si hay
+        # un campo cuyo nombre es exactamente lo pedido, eso es lo que se pidió.
+        if await self._click_textbox_named(description):
+            return True
         # Strategy 1: text match
         if await self.click_by_text(description, exact=False):
             return True
@@ -824,6 +835,28 @@ class PlaywrightDriver:
         # Strategy 6: accessible name via aria-label, same blind spot.
         if await self.click_by_role("textbox", name=description):
             return True
+        return False
+
+    async def _click_textbox_named(self, name: str) -> bool:
+        """Clic en el campo de texto cuyo nombre accesible o placeholder es `name`.
+
+        Exacto, y sin esperar: `count()` contesta con lo que hay ahora, así que
+        un clic sobre un botón común no paga un timeout por esta estrategia.
+        """
+        assert self.page is not None
+        for locator in (
+            self.page.get_by_role("textbox", name=name, exact=True),
+            self.page.get_by_placeholder(name, exact=True),
+        ):
+            try:
+                if await locator.count() < 1:
+                    continue
+                await locator.first.click(timeout=CLICK_STRATEGY_TIMEOUT_MS)
+                await asyncio.sleep(self.action_delay_s)
+                self.state.log("click_textbox_named", name=name)
+                return True
+            except Exception:  # noqa: BLE001 -- una de varias estrategias
+                continue
         return False
 
     async def click_by_placeholder(self, placeholder: str) -> bool:

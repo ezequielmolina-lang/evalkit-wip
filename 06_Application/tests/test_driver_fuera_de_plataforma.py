@@ -181,3 +181,38 @@ async def test_a_new_context_without_the_session_is_not_kept(driver_que_vuelve):
     assert d.context is anterior, "se cambió a un contexto que no tiene la sesión"
     assert d.page.url == PERMITIDA
     assert await _guardado(d, "pendiente") == "pregunta 3"
+
+
+# --- escribir en el campo que se pidió ----------------------------------------
+
+INGRESO = """<!doctype html><html lang="es"><head><meta charset="utf-8"></head><body>
+<h1>Hola</h1>
+<p>Escribe tu nombre de pila para empezar.</p>
+<input id="nombre" aria-label="Tu nombre">
+<button id="empezar" disabled>Empezar</button>
+<script>
+  const campo = document.getElementById('nombre');
+  campo.addEventListener('input', () => {
+    document.getElementById('empezar').disabled = campo.value.trim() === '';
+  });
+</script>
+</body></html>"""
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_field_by_its_name_lands_on_the_field_not_on_text_that_mentions_it(driver):
+    """El 2026-11-25 una prueba pidió hacer clic en "Tu nombre". El párrafo de
+    arriba decía "Escribe tu nombre de pila", la estrategia de texto lo encontró
+    primero, y lo escrito después no entró en ningún campo: tres intentos y la
+    prueba cortada. Con un doble no se ve: hay que ver dónde cae el clic."""
+    async def _ingreso(route):
+        await route.fulfill(status=200, content_type="text/html", body=INGRESO)
+
+    await driver._context.route("http://plataforma.test/ingreso", _ingreso)
+    await driver.navigate(PERMITIDA + "ingreso")
+
+    assert await driver.click_element_description("Tu nombre") is True
+    assert await driver.type_into_focused("Evalkit dos", delay_ms=0) is True
+
+    assert await driver.page.input_value("#nombre") == "Evalkit dos"
+    assert await driver.page.is_enabled("#empezar"), "el botón se habilita cuando el nombre entra"
