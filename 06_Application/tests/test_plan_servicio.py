@@ -70,7 +70,11 @@ def _muestreo(chosen, **kw):
 
 
 def _motor(tmp_path):
-    engine = make_engine(tmp_path, plan_strategy=_estrategia, plan_sampling=_muestreo)
+    engine = make_engine(
+        tmp_path, plan_strategy=_estrategia, plan_sampling=_muestreo,
+        # El recorrido dirigido tiene sus propias pruebas.
+        plan_revisit=False,
+    )
 
     def factory(job, credentials, artifacts_dir):
         d = _DriverQueRegistra(artifacts_dir, credentials=credentials)

@@ -133,6 +133,13 @@ class JobRecord:
     #: applies` exists to stop -- and would erase the divergence itself, which
     #: is the finding. So both are carried, and a reader can see the gap.
     executed_steps: dict[str, list[str]] = field(default_factory=dict)
+    #: probe_id -> {run_index, motivo, reparacion}: las pruebas que se cortaron
+    #: en el primer intento y llegaron al final en el segundo (ver
+    #: JobRunner._retry_cut). `run_index` es el del intento que vale: la
+    #: evidencia del intento cortado queda en el ledger, para auditar, y deja
+    #: de ser base de un veredicto. `reparacion` dice qué se corrigió en los
+    #: pasos; vacío si se corrió de nuevo con los mismos.
+    retried: dict[str, dict] = field(default_factory=dict)
     #: EL PLAN QUE UNA PERSONA APRUEBA ANTES DE QUE SE REDACTE UNA PRUEBA.
     #: `strategy` es la decisión del planificador por criterio, ya cerrada con el
     #: muestreo; `sampling_matrix`, la matriz tal como la propuso el muestreo;

@@ -41,8 +41,9 @@ import os
 from typing import Any
 
 from ..config import CONFIG
-from ..evalkit.steps import DIRECT, NOT_FOUND, is_observation, split_marks
+from ..evalkit.steps import DEVIATION, DIRECT, NOT_FOUND, is_observation, split_marks
 from ..evalkit.errors import EvalkitError
+from ..evalkit.repair import StepNotDone
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,21 @@ STEP_DONE_TOOL: dict[str, Any] = {
                     "accomplished=false y contá en `reason` qué había en pantalla."
                 ),
             },
+            # Agregado tras la corrida completa del 2026-11-26. Cuando el paso se
+            # cumple por otro camino que el escrito (responder una pregunta para
+            # poder avanzar, encontrar ya hecho lo que el paso pedía), eso tiene
+            # que llegar a la nota de la captura: el juez lee el nombre del paso
+            # y, sin esto, creería que se hizo al pie de la letra.
+            "desvio": {
+                "type": "string",
+                "description": (
+                    "Sólo con accomplished=true: si llegaste al objetivo del paso "
+                    "haciendo algo distinto de lo que dice al pie de la letra "
+                    "(otro control, una pregunta respondida para poder avanzar, "
+                    "algo que ya estaba hecho), contalo acá en una frase. Vacío "
+                    "si lo hiciste tal como está escrito."
+                ),
+            },
         },
         "required": ["accomplished", "reason"],
     },
@@ -173,7 +189,41 @@ STEP_SYSTEM = (
     "primero en qué paso está el error y después qué error es), respondé "
     "también esa parte, en el mismo sentido que pide el paso (acertar o "
     "errar). El paso termina cuando la plataforma muestra su devolución o "
-    "deja avanzar. Eso no es pasar a otro paso: es terminar este."
+    "deja avanzar. Eso no es pasar a otro paso: es terminar este.\n\n"
+    # Lo que sigue se agregó tras la corrida completa del 2026-11-26 (trabajo
+    # 91b35f78a25749c9): 32 de 86 pruebas cortadas, ninguna por algo que la
+    # plataforma hiciera mal. Cada regla responde a una familia de cortes.
+    #
+    # 8 cortes: "Guardar la solución paso a paso que aparece". El agente buscó
+    # un botón de guardar o exportar, no lo encontró y dijo que no pudo, con la
+    # solución en pantalla. (El código ya trata estos pasos sin modelo, ver
+    # steps.is_observation; la regla queda para los que igual lleguen acá.)
+    "GUARDAR ES MIRAR. Si el paso dice guardar, capturar, registrar o anotar "
+    "algo que la plataforma muestra, NO busques un botón de guardar, exportar "
+    "ni descargar: la captura y el texto los guarda el evaluador en cuanto "
+    "termines. Tu parte es que eso quede a la vista.\n\n"
+    # 11 cortes: "Avanzar a la siguiente pregunta" con una pregunta sin
+    # responder en pantalla y ningún botón para saltarla. El agente lo vio y
+    # escribió "no la respondí porque el paso no lo pedía".
+    "AVANZAR ES LLEGAR A LO SIGUIENTE. Si el paso pide avanzar a la pregunta o "
+    "actividad siguiente y en pantalla hay una pregunta sin responder y ningún "
+    "control para saltarla, la plataforma no deja saltar: respondela con "
+    "cualquier opción (la primera), hacé lo mínimo que la plataforma pida para "
+    "darla por cerrada y avanzá. Contalo en `desvio`.\n\n"
+    # 5 cortes: el paso pedía algo que ya había pasado (elegir un perfil en una
+    # pantalla de ingreso que ya no estaba, enviar un mensaje ya enviado y
+    # respondido, responder una pregunta ya respondida).
+    "LO QUE YA ESTÁ HECHO NO SE REPITE. Si el estado al que el paso quiere "
+    "llegar YA está en pantalla (ya estás adentro, el mensaje ya figura enviado "
+    "y respondido, la pregunta ya quedó respondida en el sentido que pide el "
+    "paso), el paso está cumplido: accomplished=true, y contalo en `desvio`.\n\n"
+    # 1 criterio sin veredicto (PT-D9-H1): la captura se tomó con "Gallito está
+    # pensando…" en pantalla, antes de la respuesta del tutor.
+    "ESPERÁ LA RESPUESTA. Si después de tu acción la plataforma muestra que "
+    "todavía está trabajando (pensando, escribiendo, cargando, generando, "
+    "preparando), esperá con `wait` y volvé a leer hasta que la respuesta esté "
+    "completa. La captura se toma apenas llamás a `done`: si llamás antes, se "
+    "guarda la espera y no la respuesta."
 )
 
 
@@ -585,6 +635,18 @@ class AgentDriver:
     async def url(self) -> str:
         return await self._driver.url()
 
+    async def settle(self) -> str:
+        """Espera a que la plataforma termine de responder antes de capturar.
+
+        Reenviado al navegador (ver PlaywrightDriver.settle, con el caso). Un
+        doble de prueba o un driver sin esa operación no espera nada.
+        """
+        wait = getattr(self._driver, "settle", None)
+        if wait is None:
+            return ""
+        out = await wait()
+        return out if isinstance(out, str) else ""
+
     async def start_over(self) -> bool:
         """Deja la plataforma como al entrar, antes de la prueba siguiente.
 
@@ -744,6 +806,12 @@ class AgentDriver:
             raise self._not_done(step, reason)
 
         logger.debug("paso completado en %s turnos", getattr(result, "turns", "?"))
+        # El paso ocurrió, pero por otro camino que el escrito: se devuelve para
+        # que el runner lo deje en la nota de la captura (ver STEP_DONE_TOOL).
+        deviation = getattr(result, "deviation", "")
+        if isinstance(deviation, str) and deviation.strip():
+            logger.info("paso cumplido con desvío: %s", deviation[:200])
+            return DEVIATION + deviation.strip()
         return None
 
     async def explore(
@@ -850,8 +918,11 @@ class AgentDriver:
 
     @staticmethod
     def _not_done(step: str, reason: str) -> EvalkitError:
-        return EvalkitError(
+        # Con el paso y el motivo como DATOS, no sólo dentro del mensaje: es lo
+        # que deja reparar los pasos y reintentar (ver evalkit/repair.py).
+        return StepNotDone(
             f"el agente no pudo completar el paso: {step!r} — {reason}",
+            step=step, reason=str(reason),
             hint=(
                 "(un paso no ejecutado deja la página en otro estado y la "
                 "captura siguiente sería evidencia falsa, así que no se "

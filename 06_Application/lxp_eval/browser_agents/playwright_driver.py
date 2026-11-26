@@ -64,6 +64,24 @@ DEFAULT_TIMEOUT_MS = 30_000
 #: "new conversation" control burned minutes per attempt at 30s a strategy.
 CLICK_STRATEGY_TIMEOUT_MS = int(os.getenv("LXP_CLICK_STRATEGY_TIMEOUT_MS", "4000"))
 
+#: Un aviso de que la plataforma todavía está respondiendo: un verbo de espera
+#: seguido de puntos suspensivos ("Gallito está pensando…", "Cargando...",
+#: "Typing…"). Los puntos son obligatorios para no tomar por espera un texto
+#: fijo ("Generando hábitos de estudio"). Ver `PlaywrightDriver.settle`. No
+#: nombra a ningún proveedor; una plataforma que avise de otro modo lo declara
+#: con `LXP_BUSY_PATTERN`.
+BUSY_PATTERN = re.compile(
+    os.getenv("LXP_BUSY_PATTERN")
+    or (
+        r"\b(pensando|escribiendo|cargando|generando|preparando|procesando|"
+        r"analizando|buscando|redactando|thinking|typing|loading|generating|"
+        r"processing|working)\b[^\n]{0,40}?(\.{3}|…)"
+    ),
+    re.IGNORECASE,
+)
+#: Cuánto se espera, como mucho, a que ese aviso desaparezca antes de capturar.
+SETTLE_TIMEOUT_S = float(os.getenv("LXP_SETTLE_TIMEOUT_S", "45"))
+
 
 # --- el navegador no sale de la plataforma -----------------------------------
 #
@@ -707,6 +725,48 @@ class PlaywrightDriver:
     async def wait(self, seconds: float) -> None:
         await asyncio.sleep(max(0.0, seconds))
         self.state.log("wait", seconds=seconds)
+
+    async def settle(self, *, timeout_s: float | None = None) -> str:
+        """Espera a que la plataforma termine de responder. Devuelve "" si terminó.
+
+        POR QUÉ. En la corrida completa del 2026-11-26 un criterio de seguridad
+        del tutor (PT-D9-H1) quedó sin veredicto por "evidencia insuficiente":
+        la captura decía "Gallito está pensando…" y nada más. Quien ejecuta
+        envió el mensaje, cerró el paso, y el runner capturó en ese instante: la
+        respuesta del tutor, que era lo único que el criterio preguntaba, llegó
+        después de la foto. Que el agente espere es una regla de su prompt; que
+        la captura no se tome con la plataforma a medio responder lo garantiza
+        esto, que corre en el runner justo antes de guardar.
+
+        Barato a propósito: una lectura de la página. Sólo si esa lectura
+        muestra un aviso de espera (`BUSY_PATTERN`) se sigue mirando, una vez
+        por segundo, hasta que desaparezca o se cumpla el plazo.
+
+        Si el plazo se cumple devuelve el aviso que seguía en pantalla, para que
+        la nota de la captura lo diga: una captura tomada durante la espera no
+        se presenta como la respuesta.
+        """
+        deadline = float(SETTLE_TIMEOUT_S if timeout_s is None else timeout_s)
+        waited = 0.0
+        still = ""
+        while True:
+            try:
+                text = await self._page_text()
+            except Exception as exc:  # noqa: BLE001 -- no poder mirar no frena la captura
+                logger.debug("settle: no pude leer la página (%s)", exc)
+                return ""
+            found = BUSY_PATTERN.search(text or "")
+            if not found:
+                if waited:
+                    self.state.log("settle", waited_s=waited)
+                return ""
+            still = found.group(0).strip()
+            if waited >= deadline:
+                self.state.log("settle_timeout", waited_s=waited, busy=still)
+                logger.warning("la plataforma seguía respondiendo tras %.0f s: %r", waited, still)
+                return still
+            await asyncio.sleep(1.0)
+            waited += 1.0
 
     # ------------------------------------------------------------------
     # Click strategies — multi-strategy fallback for fragile SPAs

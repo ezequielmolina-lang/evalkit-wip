@@ -809,6 +809,9 @@ def test_a_probe_cut_short_is_not_scored_on_half_its_evidence(
     llegara al juez con su primera captura, saldría CUMPLE; en vivo salió
     PARCIAL "porque no se probaron los otros distractores"."""
     engine, c = _servicio_con(tmp_path, client_factory, _DriverQueSeCorta)
+    # El doble se corta UNA vez; con el reintento (ver JobRunner._retry_cut) la
+    # prueba llegaría al final. Acá se mira la regla de la que quedó cortada.
+    engine.probe_retries = 0
     job_id = start(c)
     plan = c.get(f"/jobs/{job_id}").json()["plan"]
     c.post(f"/jobs/{job_id}/approve", json={"plan": plan})

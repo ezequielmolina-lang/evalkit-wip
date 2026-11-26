@@ -3622,7 +3622,9 @@ def test_one_unevaluable_probe_does_not_destroy_the_whole_run(tmp_path, client_f
 
     async def run_probe(probe, driver, ledger, **kw):
         attempted.append(probe.probe_id)
-        if len(attempted) == 1:
+        # La primera prueba no se puede evaluar NUNCA: tampoco en el segundo
+        # intento que el motor hace antes de darla por cortada.
+        if probe.probe_id == attempted[0]:
             raise EvalkitError("no existe un curso de 9.o grado en esta cuenta")
         return None
 
@@ -3634,7 +3636,7 @@ def test_one_unevaluable_probe_does_not_destroy_the_whole_run(tmp_path, client_f
     assert r.status_code == 200
     body = r.json()
     assert body["stage"] != "error", "one refused probe must not fail the job"
-    assert len(attempted) > 1, "the probes after the refusal must still be attempted"
+    assert len(set(attempted)) > 1, "the probes after the refusal must still be attempted"
     # and the reason survives, attached to the probe that could not be evaluated
     state = c.get(f"/jobs/{job_id}").json()
     unevaluated = state.get("unevaluated") or {}

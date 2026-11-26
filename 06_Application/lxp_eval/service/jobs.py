@@ -46,6 +46,7 @@ from ..evalkit import framework as framework_mod
 from ..evalkit import generator as generator_mod
 from ..evalkit import inventory as inventory_mod
 from ..evalkit import planner as planner_mod
+from ..evalkit import repair as repair_mod
 from ..evalkit import sampling as sampling_mod
 from ..evalkit import report as report_mod
 from ..evalkit import runner as runner_mod
@@ -311,6 +312,18 @@ class Engine:
     #: criterio (ver scoring.check_consistency).
     plan_inventory: Callable[..., Any] = staticmethod(inventory_mod.build_inventory)
     check_verdicts: Callable[..., Any] = staticmethod(scoring_mod.check_consistency)
+    #: Cuántas veces se vuelve a correr una prueba que se cortó, y quién propone
+    #: los pasos corregidos para ese reintento (ver evalkit/repair.py). 0 deja
+    #: el comportamiento anterior: la prueba cortada queda cortada.
+    probe_retries: int = int(os.getenv("EVALKIT_REINTENTOS", "1") or 0)
+    #: ¿Se vuelve a la plataforma a buscar lo que el plan dejó en "falta
+    #: recorrer"? (ver JobRunner.revisit_pending). Abre el navegador otra vez y
+    #: gasta exploraciones; se puede apagar con EVALKIT_RECORRIDO_DIRIGIDO=0.
+    plan_revisit: bool = os.getenv("EVALKIT_RECORRIDO_DIRIGIDO", "1") != "0"
+    #: La lectura de la regla, una por criterio, que reciben todas sus pruebas
+    #: (ver scoring.read_rule). None = se juzga sin ella, como antes.
+    read_rule: Callable[..., Any] | None = staticmethod(scoring_mod.read_rule)
+    repair_probe: Callable[..., Any] = staticmethod(repair_mod.propose_repair)
     #: Qué consejo revisa las pruebas que salen de un plan aprobado: "reducido"
     #: (tres asientos, y los otros cuatro sólo si hay objeción o riesgo) o
     #: "completo". Ver generator.REDUCED_COUNCIL para el porqué y los números.
@@ -701,6 +714,13 @@ class JobRunner:
                 profile=profile, profile_text=profile_text,
                 client=client, model=model, documents=doc_names,
             )
+            # LO QUE EL PLANIFICADOR PIDIÓ MIRAR, SE MIRA (ver `revisit_pending`).
+            record.strategy = decisions
+            if await self.revisit_pending(record, client):
+                decisions = record.strategy
+                _, surfaces = self._probe_bank_for(record)
+                profile = (surfaces or {}).get("profile") or profile
+                profile_text = render_profile(profile) if profile else profile_text
             self._progress(
                 record, Stage.FRAMEWORK, done=1, total=3,
                 message="El muestreo propone cuántas pruebas y sobre qué temas",
@@ -776,6 +796,124 @@ class JobRunner:
             ),
         )
         return record
+
+    async def revisit_pending(self, record: JobRecord, client: Any) -> list[str]:
+        """Recorre de forma dirigida lo que el plan dejó en "falta recorrer".
+
+        Devuelve los ids de los criterios que cambiaron de estado. Deja
+        `record.strategy` y el perfil del trabajo actualizados.
+
+        POR QUÉ. Siete criterios de la corrida completa del 2026-11-26 quedaron
+        sin evaluar por "falta recorrer" con la indicación de dónde mirar
+        escrita en el plan y nadie que fuera a mirar (ver recon.revisit, con el
+        caso). Acá se abre el navegador otra vez, se deja la plataforma lista
+        con la preparación de cada prueba (un estudiante nuevo, si el
+        manifiesto la trae), se manda al explorador a esos lugares, y el
+        planificador vuelve a decidir SÓLO esos criterios con lo que apareció.
+
+        Después de una exploración completa, "falta recorrer" no sobrevive: o
+        se prueba o no se puede medir en esta plataforma (ver
+        planner.settle_revisited). Así la causa "falta recorrer" vuelve a
+        significar lo que el autochequeo dice que significa: que el evaluador
+        no llegó.
+
+        Nada de esto puede tumbar el plan: si el navegador no abre o el
+        explorador falla, la estrategia queda como estaba y se anota. Un error
+        de la API al decidir de nuevo sí sube, como en la primera decisión.
+        """
+        from ..evalkit import recon as recon_mod
+
+        pending = [
+            d for d in (record.strategy or [])
+            if d.get("estado") == planner_mod.FALTA_RECORRER
+        ]
+        if not pending or not self.engine.plan_revisit:
+            return []
+        _, surfaces = self._probe_bank_for(record)
+        profile = (surfaces or {}).get("profile")
+        if not isinstance(profile, dict):
+            return []
+        artifacts_dir = self.store.artifacts_dir(record.job_id)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        before = {str(d.get("id")): d.get("estado") for d in record.strategy}
+
+        def _exploring(done: int, total: int, label: str) -> None:
+            self._progress(
+                record, record.stage or Stage.FRAMEWORK,
+                done=done - 1, total=total, current=label,
+                message=f"Recorrido dirigido: {label} ({done} de {total})",
+            )
+
+        try:
+            credentials = self._credentials(record)
+            async with _driver_scope(
+                self.engine.driver_factory, record, credentials, artifacts_dir
+            ) as driver:
+                if getattr(driver, "explore", None) is None:
+                    return []
+
+                async def prepare(number: int) -> None:
+                    start_over = getattr(driver, "start_over", None)
+                    if number > 1 and start_over is not None:
+                        await start_over()
+                    for prep in record.probe_preamble:
+                        await driver.do(
+                            str(prep).replace("{n}", f"{record.job_id[:4]}d{number}")
+                        )
+
+                outcome = await recon_mod.revisit(
+                    driver, profile, pending, root_url=record.platform_url,
+                    prepare=prepare if record.probe_preamble else None,
+                    on_progress=_exploring,
+                )
+                self._fold_client_spend(record, driver, "recorrido")
+        except SessionExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- el plan sigue con lo que había
+            logger.warning("el recorrido dirigido no se pudo hacer: %s", exc)
+            for d in pending:
+                d.setdefault("advertencias", []).append(
+                    f"el recorrido dirigido no se pudo hacer: {exc}"
+                )
+            return []
+        if not outcome:
+            return []
+
+        # El perfil ampliado, al mismo archivo del trabajo: es lo que leen el
+        # inventario, el muestreo, el redactor y el documento del plan.
+        try:
+            import yaml
+
+            path = self.surfaces_path_for(record.job_id)
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+            data = data if isinstance(data, dict) else {}
+            data["profile"] = profile
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001 -- persistir es un extra, igual que en el recorrido
+            logger.info("no pude guardar el perfil ampliado", exc_info=True)
+
+        ids = set(outcome)
+        subset = [c for c in record.criteria if str(c.get("id")) in ids]
+        doc_names = [str(d.get("name")) for d in record.documents if d.get("name")]
+        again = await asyncio.to_thread(
+            self.engine.plan_strategy,
+            subset,
+            profile=profile, profile_text=recon_mod.render_profile(profile),
+            client=client, model=self.engine.model or _configured_model(),
+            documents=doc_names, revisited=outcome,
+        )
+        again = planner_mod.settle_revisited(list(again or []), outcome)
+        by_id = {str(d.get("id")): d for d in again}
+        record.strategy = [by_id.get(str(d.get("id")), d) for d in record.strategy]
+        changed = [
+            str(d.get("id")) for d in record.strategy
+            if before.get(str(d.get("id"))) != d.get("estado")
+        ]
+        self.store.save(record)
+        return changed
 
     def _inventory(
         self, record: JobRecord, profile: dict | None, profile_text: str, client: Any, model: str,
@@ -1091,6 +1229,10 @@ class JobRunner:
                 return record
 
             in_flight = ""
+            #: El cliente con que se piden las reparaciones de pasos. Se crea
+            #: recién con la primera prueba cortada: una corrida sin cortes no
+            #: construye un cliente que no va a usar.
+            repair: dict[str, Any] = {}
             try:
                 async with _driver_scope(
                     self.engine.driver_factory, record, credentials, artifacts_dir
@@ -1120,48 +1262,11 @@ class JobRunner:
                             done=i, total=len(groups), current=lead.probe_id,
                             message=f"Prueba {i + 1} de {len(groups)}: {lead.goal}{extra}",
                         )
+                        tag = f"{record.job_id[:4]}{i + 1}"
                         try:
-                            # CADA PRUEBA ARRANCA DE CERO. El plan se escribe
-                            # para una plataforma recién abierta; si la prueba
-                            # anterior dejó una pregunta a medias, la siguiente
-                            # ejecuta sus pasos sobre otra pantalla. La primera
-                            # no lo necesita: el navegador acaba de entrar.
-                            start_over = getattr(driver, "start_over", None)
-                            if i > 0 and start_over is not None:
-                                try:
-                                    await start_over()
-                                except Exception as exc:  # noqa: BLE001
-                                    # No es motivo para perder la etapa: la
-                                    # prueba corre donde quedó el navegador y,
-                                    # si eso la rompe, falla ella sola.
-                                    logger.warning(
-                                        "no se pudo volver al inicio antes de %s: %s",
-                                        lead.probe_id, exc,
-                                    )
-                            # LA PREPARACIÓN DE CADA PRUEBA. En la corrida del
-                            # 2026-11-25 las 120 pruebas usaron la misma cuenta
-                            # de estudiante y su historial se acumuló: las
-                            # tardías encontraron otra plataforma que la que
-                            # suponían sus pasos. Los pasos de preparación (por
-                            # ejemplo, crear un estudiante nuevo) vienen del
-                            # manifiesto, no del código: cada plataforma dice
-                            # cómo se deja limpia. `{n}` es distinto en cada
-                            # prueba. No dejan evidencia; si fallan, la prueba
-                            # se corta con ese motivo.
-                            for prep in record.probe_preamble:
-                                tag = f"{record.job_id[:4]}{i + 1}"
-                                try:
-                                    await driver.do(str(prep).replace("{n}", tag))
-                                except EvalkitError as exc:
-                                    raise EvalkitError(
-                                        f"la preparación de la prueba no se pudo hacer: {exc}"
-                                    ) from exc
-                            await self.engine.run_probe(
-                                lead, driver, ledger,
-                                platform=record.platform,
-                                run_index=0,
-                                text_dir=self.store.page_text_dir(record.job_id),
-                                also_credit=group[1:] or None,
+                            await self._attempt(
+                                record, lead, group, driver, ledger,
+                                tag=tag, fresh=i > 0, run_index=0,
                             )
                         except SessionExpired:
                             # The SESSION is gone, so nothing after this point
@@ -1180,13 +1285,20 @@ class JobRunner:
                             logger.warning(
                                 "probe %s no se pudo evaluar: %s", lead.probe_id, exc
                             )
-                            # A TODAS las del grupo: comparten los pasos, así
-                            # que a todas les faltó lo mismo. Anotar sólo la
-                            # primera dejaba a las demás con evidencia a medias
-                            # y sin motivo.
-                            for cut in group:
-                                record.unevaluated[cut.probe_id] = str(exc)
-                            self.store.save(record)
+                            # ANTES DE DARLA POR CORTADA: reparar los pasos y
+                            # correrla de nuevo, una vez (ver `_retry_cut`).
+                            why = await self._retry_cut(
+                                record, lead, group, driver, ledger, exc,
+                                tag=tag, repair=repair,
+                            )
+                            if why is not None:
+                                # A TODAS las del grupo: comparten los pasos,
+                                # así que a todas les faltó lo mismo. Anotar
+                                # sólo la primera dejaba a las demás con
+                                # evidencia a medias y sin motivo.
+                                for cut in group:
+                                    record.unevaluated[cut.probe_id] = why
+                                self.store.save(record)
                         except Exception as exc:  # noqa: BLE001
                             # UNA PRUEBA QUE EL NAVEGADOR REVIENTA NO SE LLEVA
                             # LA CORRIDA. Un timeout de Playwright no es un
@@ -1234,6 +1346,8 @@ class JobRunner:
                     record.cache_write_tokens += int(
                         getattr(driver, "cache_write_tokens", 0) or 0
                     )
+                    if repair.get("client") is not None:
+                        self._fold_client_spend(record, repair["client"], "reparacion")
             except BaseException as exc:  # noqa: BLE001
                 self._fail(record, Stage.RUN, in_flight, exc)
                 return record
@@ -1248,6 +1362,183 @@ class JobRunner:
 
         # --- score ----------------------------------------------------------
         return await self._score(record, probes, ledger)
+
+    async def _attempt(
+        self, record: JobRecord, probe: Any, group: list, driver: Any,
+        ledger: EvidenceLedger, *, tag: str, fresh: bool, run_index: int,
+    ) -> None:
+        """UN intento de una prueba: volver al inicio, preparar y correr."""
+        # CADA PRUEBA ARRANCA DE CERO. El plan se escribe para una plataforma
+        # recién abierta; si la prueba anterior dejó una pregunta a medias, la
+        # siguiente ejecuta sus pasos sobre otra pantalla. La primera no lo
+        # necesita: el navegador acaba de entrar.
+        start_over = getattr(driver, "start_over", None)
+        if fresh and start_over is not None:
+            try:
+                await start_over()
+            except Exception as exc:  # noqa: BLE001
+                # No es motivo para perder la etapa: la prueba corre donde quedó
+                # el navegador y, si eso la rompe, falla ella sola.
+                logger.warning(
+                    "no se pudo volver al inicio antes de %s: %s", probe.probe_id, exc,
+                )
+        # LA PREPARACIÓN DE CADA PRUEBA. En la corrida del 2026-11-25 las 120
+        # pruebas usaron la misma cuenta de estudiante y su historial se
+        # acumuló: las tardías encontraron otra plataforma que la que suponían
+        # sus pasos. Los pasos de preparación (por ejemplo, crear un estudiante
+        # nuevo) vienen del manifiesto, no del código: cada plataforma dice cómo
+        # se deja limpia. `{n}` es distinto en cada prueba y en cada intento. No
+        # dejan evidencia; si fallan, la prueba se corta con ese motivo.
+        for prep in record.probe_preamble:
+            try:
+                await driver.do(str(prep).replace("{n}", tag))
+            except SessionExpired:
+                raise
+            except EvalkitError as exc:
+                raise EvalkitError(
+                    f"la preparación de la prueba no se pudo hacer: {exc}"
+                ) from exc
+        await self.engine.run_probe(
+            probe, driver, ledger,
+            platform=record.platform,
+            run_index=run_index,
+            text_dir=self.store.page_text_dir(record.job_id),
+            also_credit=group[1:] or None,
+        )
+
+    async def _retry_cut(
+        self, record: JobRecord, lead: Any, group: list, driver: Any,
+        ledger: EvidenceLedger, exc: BaseException, *, tag: str, repair: dict,
+    ) -> str | None:
+        """Una prueba se cortó: reparar sus pasos y correrla de nuevo, UNA vez.
+
+        Devuelve None si el segundo intento llegó al final (y entonces la
+        prueba se puntúa sólo con la evidencia de ese intento: ver
+        `_attempt_rows`), o el motivo con que queda cortada.
+
+        POR QUÉ. En la corrida completa del 2026-11-26 se cortaron 32 de 86
+        pruebas y nueve criterios quedaron "sin evaluar por ejecución fallida"
+        sin que la plataforma hubiera hecho nada mal: los pasos suponían un
+        estado que no era el de la pantalla (ver evalkit/repair.py, con los
+        casos). Hasta entonces el corte era definitivo, y un criterio pagaba
+        con su veredicto un supuesto del redactor. Ahora el corte dispara una
+        corrección con lo que se vio en pantalla y un segundo intento desde
+        cero, con un estudiante nuevo.
+
+        Lo que NO cambia: una prueba cortada no se puntúa. Si el reintento
+        también se corta, queda sin evaluar, con los dos motivos escritos.
+        """
+        first = str(exc)
+        if int(self.engine.probe_retries or 0) < 1:
+            return first
+        steps = [str(s) for s in lead.steps]
+        change = ""
+        proposal = None
+        if isinstance(exc, repair_mod.StepNotDone):
+            try:
+                screen = str(await driver.read_page(max_chars=6000) or "")
+            except Exception:  # noqa: BLE001 -- sin pantalla se repara con el motivo
+                screen = ""
+            if repair.get("client") is None:
+                repair["client"] = self._client()
+            # Un error de la API acá SUBE, igual que en el juicio: un 400 es un
+            # pedido mal armado y no se tapa.
+            proposal = await asyncio.to_thread(
+                self.engine.repair_probe,
+                criterion=f"{lead.test_id}: {self._criterion_line(record, lead.test_id)}",
+                goal=lead.goal, verdict_rule=lead.verdict_rule, steps=steps,
+                failed_index=getattr(exc, "step_index", None),
+                reason=getattr(exc, "reason", "") or first,
+                screen=screen, client=repair["client"],
+                model=self.engine.model or _configured_model(),
+                preamble=[str(x) for x in record.probe_preamble],
+            )
+        if isinstance(proposal, dict) and proposal.get("se_puede") is False:
+            # Quien miró el corte dice que la pantalla que la prueba necesita no
+            # está: reintentar sería pagar lo mismo dos veces.
+            return f"{first} | Al revisar el corte: {proposal.get('que_cambio', '')}".strip()
+        if isinstance(proposal, dict) and proposal.get("pasos"):
+            fixed, rejected = repair_mod.accept_repair(
+                steps, list(proposal["pasos"]),
+                test=self._criterion_test(record, lead.test_id), probe=lead,
+                policy=self._risk_policy(),
+            )
+            if fixed:
+                steps, change = fixed, str(proposal.get("que_cambio") or "pasos corregidos")
+            else:
+                logger.info("probe %s: reparación descartada: %s", lead.probe_id, rejected)
+
+        again = replace(lead, steps=steps)
+        # Por encima de cualquier índice que hayan usado las repeticiones del
+        # primer intento: así las filas de un intento y otro no se confunden.
+        index = max(1, int(getattr(lead, "repeats", 1) or 1))
+        # UN LATIDO antes del segundo intento: una prueba que se reintenta tarda
+        # el doble, y el vigilante mide el silencio de la etapa.
+        seen = record.progress or {}
+        self._progress(
+            record, Stage.RUN,
+            done=int(seen.get("done") or 0), total=int(seen.get("total") or 1),
+            current=lead.probe_id,
+            message=f"Segundo intento de {lead.probe_id}"
+                    + (" con pasos corregidos" if change else ""),
+        )
+        logger.info(
+            "probe %s: segundo intento%s", lead.probe_id,
+            f" con pasos corregidos ({change[:160]})" if change else " con los mismos pasos",
+        )
+        try:
+            await self._attempt(
+                record, again, group, driver, ledger,
+                tag=f"{tag}r", fresh=True, run_index=index,
+            )
+        except SessionExpired:
+            raise
+        except EvalkitError as second:
+            return (
+                f"{second} | PRIMER INTENTO: {first}"
+                + (f" | Entre uno y otro se corrigieron los pasos: {change}" if change else "")
+            )
+        except Exception as second:  # noqa: BLE001
+            if not _is_browser_error(second):
+                raise
+            return (
+                "error inesperado al ejecutar el segundo intento: "
+                f"{second.__class__.__name__}: {second} | PRIMER INTENTO: {first}"
+            )
+        for probe in group:
+            record.retried[probe.probe_id] = {
+                "run_index": index,
+                "motivo": first[:800],
+                "reparacion": change,
+            }
+            if change:
+                # Lo que CORRIÓ, al lado de lo aprobado y sin pisarlo (ver
+                # store.JobRecord.executed_steps).
+                record.executed_steps[probe.probe_id] = list(steps)
+        self.store.save(record)
+        return None
+
+    def _criterion_test(self, record: JobRecord, test_id: str) -> Any:
+        plan = record.approved_plan or {}
+        try:
+            dicts = plan.get("criteria") or serialize.criteria_out(record.criteria)
+            criteria = serialize.criteria_from_plan(dicts, record.objective)
+            return next((t for t in criteria.all_tests() if t.id == test_id), None)
+        except Exception:  # noqa: BLE001 -- sin criterio, accept_repair no acepta riesgo
+            return None
+
+    def _criterion_line(self, record: JobRecord, test_id: str) -> str:
+        test = self._criterion_test(record, test_id)
+        if test is None:
+            return ""
+        return f"{test.name}. Cumple si: {test.pass_criteria}"
+
+    @staticmethod
+    def _risk_policy() -> Any:
+        try:
+            return generator_mod.load_risk_markers()
+        except Exception:  # noqa: BLE001
+            return None
 
     def _probe_bank_for(self, record: JobRecord):
         """The hand-authored probe bank + platform surfaces, or (None, None).
@@ -1336,10 +1627,10 @@ class JobRunner:
                     # criterio dice "en x de n" (ver `_score_cells`).
                     verdicts.append(await self._score_cells(
                         record, test, by_test.get(test.id, []),
-                        rows_since(
+                        _attempt_rows(rows_since(
                             ledger.for_platform_test(record.platform, test.id),
                             record.approved_at,
-                        ),
+                        ), record.retried),
                         client,
                     ))
                     continue
@@ -1361,10 +1652,10 @@ class JobRunner:
                 # Only THIS run's evidence. The ledger keeps every attempt,
                 # so a re-probed criterion would otherwise be judged partly on
                 # a run that was discarded -- see ledger.rows_since.
-                rows = rows_since(
+                rows = _attempt_rows(rows_since(
                     ledger.for_platform_test(record.platform, test.id),
                     record.approved_at,
-                )
+                ), record.retried)
                 verdicts.append(await asyncio.to_thread(
                     self.engine.score_test,
                     test, rows, client,
@@ -1506,60 +1797,123 @@ class JobRunner:
                 )
             return unscored("sin ejecutar", "la prueba se redactó y no se ejecutó")
 
-        results: list[tuple[str, str, str, list]] = []
-        for p in cells:
+        # LA LECTURA DE LA REGLA, UNA POR CRITERIO (ver scoring.read_rule): se
+        # fija antes de mirar la evidencia y viaja igual a todas las pruebas,
+        # para que no la lea cada juicio por su cuenta. Sólo si hay algo que
+        # juzgar: un criterio con todas sus pruebas cortadas no la paga.
+        reading = ""
+        to_judge = [p for p in cells if p.probe_id not in record.unevaluated]
+        if to_judge and self.engine.read_rule is not None:
+            decision = next(
+                (d for d in record.strategy if str(d.get("id")) == test.id), {}
+            )
+            reading = str(await asyncio.to_thread(
+                self.engine.read_rule, test, client,
+                model=self.engine.model,
+                context=str(decision.get("que_se_prueba") or ""),
+            ) or "")
+
+        def label_of(p: Any) -> str:
             cell = (by_id.get(p.probe_id) or {}).get("celda") or {}
-            label = " · ".join(
+            return " · ".join(
                 x for x in (str(cell.get("tema") or ""), str(cell.get("variante") or "")) if x
             ) or p.probe_id
-            if p.probe_id in record.unevaluated:
-                results.append((label, "CORTADA", record.unevaluated[p.probe_id], []))
-                continue
-            own = [r for r in rows if r.get("probe_id") == p.probe_id]
-            v = await asyncio.to_thread(
-                self.engine.score_test, test, own, client,
-                platform=record.platform, repeats=p.repeat_judging,
-                model=self.engine.model,
-            )
-            results.append((label, v.status, v.rationale, list(v.evidence)))
 
-        judged = [r for r in results if r[1] in scoring_mod.SCORED]
-        cut = sum(1 for r in results if r[1] == "CORTADA")
-        thin = sum(1 for r in results if r[1] == NV)
-        lines = [
-            f"[{i}] {label}: {status}. {str(reason)[:600]}"
-            for i, (label, status, reason, _) in enumerate(results, start=1)
-        ]
-        extras = []
-        if cut:
-            extras.append(f"{cut} cortada(s)")
-        if thin:
-            extras.append(f"{thin} sin evidencia suficiente")
-        if gated:
-            extras.append(f"{len(gated)} sin correr por compuerta")
-        tail = (
-            f" De {len(stored)} planeada(s): " + ", ".join(extras) + "." if extras else ""
-        )
+        async def judge_all(extra: str = "") -> list[tuple[str, str, str, list]]:
+            out: list[tuple[str, str, str, list]] = []
+            said = "\n".join(x for x in (reading, extra) if x)
+            for p in cells:
+                label = label_of(p)
+                if p.probe_id in record.unevaluated:
+                    out.append((label, "CORTADA", record.unevaluated[p.probe_id], []))
+                    continue
+                own = [r for r in rows if r.get("probe_id") == p.probe_id]
+                v = await asyncio.to_thread(
+                    self.engine.score_test, test, own, client,
+                    platform=record.platform, repeats=p.repeat_judging,
+                    model=self.engine.model,
+                    **({"reading": said} if said else {}),
+                )
+                out.append((label, v.status, v.rationale, list(v.evidence)))
+            return out
+
+        def summarize(results: list) -> tuple[list, list[str], str, int, int]:
+            judged = [r for r in results if r[1] in scoring_mod.SCORED]
+            cut = sum(1 for r in results if r[1] == "CORTADA")
+            thin = sum(1 for r in results if r[1] == NV)
+            lines = [
+                f"[{i}] {label}: {status}. {str(reason)[:600]}"
+                for i, (label, status, reason, _) in enumerate(results, start=1)
+            ]
+            extras = []
+            if cut:
+                extras.append(f"{cut} cortada(s)")
+            if thin:
+                extras.append(f"{thin} sin evidencia suficiente")
+            if gated:
+                extras.append(f"{len(gated)} sin correr por compuerta")
+            tail = (
+                f" De {len(stored)} planeada(s): " + ", ".join(extras) + "." if extras else ""
+            )
+            return judged, lines, tail, cut, thin
+
+        results = await judge_all()
+        judged, lines, tail, cut, thin = summarize(results)
         if not judged:
             cause = "ejecución fallida" if cut and not thin else "evidencia insuficiente"
             return unscored(cause, f"ninguna prueba se pudo juzgar.{tail} " + " ".join(lines))
 
         # UN SEGUNDO PAR DE OJOS, antes de que el veredicto salga en el informe
-        # (ver scoring.check_consistency). Si el chequeo objeta, el criterio NO
-        # se puntúa: queda sin evaluar con la causa "juicio en duda" y los
-        # veredictos por prueba a la vista, para volver a juzgarlo. Es una falla
-        # del evaluador y el autochequeo de la corrida la cuenta como tal.
-        check = await asyncio.to_thread(
-            self.engine.check_verdicts, test,
-            [(label, status, str(reason)) for label, status, reason, _ in judged],
-            client, model=self.engine.model,
-        )
+        # (ver scoring.check_consistency).
+        async def check_of(judged_now: list) -> dict:
+            return await asyncio.to_thread(
+                self.engine.check_verdicts, test,
+                [(label, status, str(reason)) for label, status, reason, _ in judged_now],
+                client, model=self.engine.model,
+            )
+
+        check = await check_of(judged)
+        second_round = ""
         if not check.get("ok", True):
-            return unscored(
-                "juicio en duda",
-                "los veredictos del juez no se sostienen como están: "
-                f"{check.get('motivo', '')} Veredictos por prueba, sin puntuar: "
-                + " ".join(lines) + tail,
+            # SI EL CHEQUEO OBJETA, SE VUELVE A JUZGAR; NO SE ABANDONA EL
+            # CRITERIO. Hasta la corrida completa del 2026-11-26 una objeción
+            # dejaba el criterio sin evaluar ("juicio en duda"): cinco criterios
+            # y 16 pruebas completas sin respuesta, por una falla que era del
+            # juez y no de la plataforma. Ahora cada prueba se juzga de nuevo
+            # con la objeción a la vista y la misma lectura de la regla, y el
+            # chequeo vuelve a mirar. Sólo si la segunda ronda TAMPOCO se
+            # sostiene queda "juicio en duda", con las dos rondas escritas: un
+            # veredicto que no se sostiene sigue sin publicarse.
+            objection = str(check.get("motivo") or "").strip()
+            first_lines = list(lines)
+            results = await judge_all(
+                "OBJECIÓN DE UN REVISOR A LA PRIMERA RONDA DE VEREDICTOS DE ESTE "
+                f"CRITERIO: {objection}\nJuzgá ESTA prueba de nuevo, desde su "
+                "evidencia, corrigiendo eso. Si la evidencia de esta prueba no "
+                "muestra el hecho que la regla pregunta, el veredicto es "
+                "NO_EVALUADO: no fuerces un veredicto para coincidir con otras "
+                "pruebas."
+            )
+            judged, lines, tail, cut, thin = summarize(results)
+            if not judged:
+                return unscored(
+                    "evidencia insuficiente",
+                    "tras una objeción del chequeo se volvió a juzgar y ninguna "
+                    f"prueba alcanzó para decidir.{tail} " + " ".join(lines)
+                    + f" Objeción a la primera ronda: {objection}",
+                )
+            check = await check_of(judged)
+            if not check.get("ok", True):
+                return unscored(
+                    "juicio en duda",
+                    "los veredictos del juez no se sostienen ni tras volver a "
+                    f"juzgar: {check.get('motivo', '')} Segunda ronda, sin puntuar: "
+                    + " ".join(lines) + tail
+                    + f" Primera ronda (objetada: {objection}): " + " ".join(first_lines),
+                )
+            second_round = (
+                " Veredictos de una SEGUNDA ronda de juicio: el chequeo de "
+                f"coherencia objetó la primera ({objection[:400]})."
             )
 
         worth = {scoring_mod.CUMPLE: 1.0, scoring_mod.PARCIAL: 0.5, scoring_mod.NO_CUMPLE: 0.0}
@@ -1576,8 +1930,8 @@ class JobRunner:
             test_id=test.id, platform=record.platform, status=status,
             points_earned=round(earned, 4), points_possible=float(test.points),
             rationale=(
-                f"CUMPLE en {met} de {len(judged)} prueba(s) evaluada(s).{tail} "
-                + " ".join(lines)
+                f"CUMPLE en {met} de {len(judged)} prueba(s) evaluada(s).{tail}"
+                f"{second_round} " + " ".join(lines)
             ),
             evidence=evidence, runs=[r[1] for r in judged],
         )
@@ -1605,6 +1959,30 @@ _BUG_CAUSES = frozenset({
     "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
     "evidencia insuficiente", "juicio en duda",
 })
+
+
+def _attempt_rows(rows: list[dict], retried: dict | None) -> list[dict]:
+    """Las filas del intento que vale, para una prueba que se reintentó.
+
+    El ledger no borra nada: el intento que se cortó dejó sus capturas y siguen
+    ahí, para auditar. Pero juzgar con las dos tandas mezcladas es juzgar en
+    parte con una corrida descartada, el mismo error que `rows_since` evita
+    entre aprobaciones (ver evalkit/ledger.py). `retried` dice desde qué
+    `run_index` cuenta cada prueba reintentada; las demás pasan enteras.
+    """
+    if not retried:
+        return list(rows)
+    out = []
+    for row in rows:
+        kept = retried.get(str(row.get("probe_id")))
+        if kept:
+            try:
+                if int(row.get("run_index") or 0) < int(kept.get("run_index") or 0):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        out.append(row)
+    return out
 
 
 def _is_browser_error(exc: BaseException) -> bool:

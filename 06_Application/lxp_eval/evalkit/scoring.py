@@ -127,8 +127,150 @@ JUDGE_SYSTEM = (
     "prueba no sirve para la regla y el veredicto es NO_EVALUADO. Una nota que "
     "dice [CAPTURA DIRECTA] avisa que la pantalla se guardó tal como estaba, "
     "sin que nadie comprobara que muestra lo que el paso nombra: lo que vale "
-    "es el texto y la imagen guardados, no el nombre del paso."
+    "es el texto y la imagen guardados, no el nombre del paso. Una nota que "
+    "dice [SE HIZO DISTINTO DE LO ESCRITO] cuenta qué hizo de verdad quien "
+    "ejecuta: juzgá con eso y no con el nombre del paso. Una nota que dice [LA "
+    "PLATAFORMA SEGUÍA RESPONDIENDO AL CAPTURAR] avisa que esa captura puede "
+    "no mostrar la respuesta: no deduzcas de ella que la plataforma no "
+    "respondió.\n"
+    # Agregado tras la corrida completa del 2026-11-26: cinco criterios quedaron
+    # sin veredicto porque cada prueba se juzgó con una lectura propia de la
+    # regla (ver `read_rule`).
+    "Si el mensaje trae una LECTURA DE LA REGLA, es la misma para todas las "
+    "pruebas de este criterio y se fijó antes de mirar la evidencia: aplicala "
+    "tal cual, con sus definiciones. No la reinterpretes ni le agregues "
+    "excepciones tuyas. Describí el HECHO observado antes de decidir: dos "
+    "pruebas que observan el mismo hecho reciben el mismo veredicto."
 )
+
+_READING_TOOL_NAME = "emitir_lectura"
+
+READING_TOOL: dict[str, Any] = {
+    "name": _READING_TOOL_NAME,
+    "description": "Fijá cómo se lee la regla de este criterio, para todas sus pruebas.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pregunta": {
+                "type": "string",
+                "description": "Qué pregunta la regla, en una frase, con sus palabras.",
+            },
+            "definiciones": {
+                "type": "string",
+                "description": (
+                    "Los términos de la regla que admiten más de una lectura, "
+                    "cada uno fijado: qué incluye y qué no."
+                ),
+            },
+            "cumple": {
+                "type": "string",
+                "description": "Qué HECHO observable en la plataforma cuenta como CUMPLE.",
+            },
+            "parcial": {
+                "type": "string",
+                "description": "Qué hecho observable cuenta como PARCIAL.",
+            },
+            "no_cumple": {
+                "type": "string",
+                "description": "Qué HECHO observable cuenta como NO_CUMPLE.",
+            },
+            "no_alcanza": {
+                "type": "string",
+                "description": (
+                    "Qué evidencia NO responde a la regla aunque se le parezca "
+                    "(un hecho vecino, una ausencia): con eso es NO_EVALUADO."
+                ),
+            },
+        },
+        "required": ["pregunta", "cumple", "no_cumple", "no_alcanza"],
+    },
+}
+
+READING_SYSTEM = (
+    "Fijás, UNA vez por criterio, cómo se lee su regla en una evaluación de "
+    "plataformas educativas. Después, varias pruebas de ese criterio se juzgan "
+    "por separado, cada una con su evidencia y todas con tu lectura: tu trabajo "
+    "es que todas midan lo mismo. Todavía nadie miró la evidencia y vos no "
+    "conocés la plataforma: no supongas qué se va a encontrar ni a favor ni en "
+    "contra.\n"
+    "Leé la regla LITERALMENTE. Decí qué pregunta, con sus palabras. Fijá los "
+    "términos que admiten más de una lectura (qué cuenta como 'elemento nuevo', "
+    "qué cuenta como 'explicar antes'): elegí la lectura más apegada al texto y "
+    "decí qué incluye y qué no. Decí qué HECHO observable en pantalla cuenta "
+    "como CUMPLE, cuál como PARCIAL y cuál como NO_CUMPLE. Y decí qué NO "
+    "alcanza: los hechos vecinos que se confunden con la regla (que una "
+    "actividad empiece con una pregunta no dice si hubo una explicación antes) "
+    "y las ausencias (que no haya un temporizador no muestra que el avance sea "
+    "por dominio). Sé breve y concreto. Respondés con la herramienta."
+)
+
+
+def read_rule(
+    test: CriterionTest, client: Any, *, model: str | None = None, context: str = "",
+) -> str:
+    """Cómo se lee la regla de UN criterio, fijado antes de juzgar. Una llamada.
+
+    POR QUÉ. En la corrida completa del 2026-11-26 cinco criterios (16 pruebas
+    que habían llegado al final) quedaron sin veredicto por "juicio en duda".
+    El chequeo de coherencia los frenó con razón, y en los cinco la causa era la
+    misma: cada prueba se juzga sola, y cada juicio leía la regla por su cuenta.
+    En PT-D2-01 dos pruebas decidieron que los botones de ayuda no contaban como
+    "elemento nuevo" y la tercera los contó. En PT-D6-03 el mismo hecho recibió
+    NO_CUMPLE en dos pruebas y CUMPLE en otra. En PT-D5-05 se juzgó la pregunta
+    de reflexión que viene después, no si el ítem exige el principio.
+
+    Degradar el veredicto evita publicar algo que no se sostiene, pero deja al
+    criterio sin respuesta por una falla del evaluador. Esto ataca la causa: la
+    lectura de la regla se fija UNA vez, antes de ver la evidencia, y viaja
+    igual a todas las pruebas del criterio (`score_test(..., reading=...)`).
+
+    `context` es lo que el plan dijo que se iba a hacer y mirar; ayuda a fijar
+    las definiciones sobre lo que de verdad se va a observar.
+
+    Devuelve "" si el modelo no usó la herramienta: sin lectura se juzga como
+    antes, y el chequeo de coherencia sigue estando después. Un error de la API
+    sube.
+    """
+    if model is None:
+        from ..config import CONFIG
+
+        model = CONFIG.model_heavy
+    response = client.messages.create(
+        model=model,
+        max_tokens=2500,
+        system=[{"type": "text", "text": READING_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": (
+            f"CRITERIO {test.id}: {test.name}\n"
+            f"Aprueba si: {test.pass_criteria}\n"
+            f"Falla si: {test.fail_criteria}\n"
+            f"Cómo se verifica: {test.verification}"
+            + (f"\n\nLO QUE EL PLAN DICE QUE SE VA A HACER Y MIRAR: {context}" if context else "")
+        )}]}],
+        tools=[READING_TOOL],
+        tool_choice={"type": "tool", "name": _READING_TOOL_NAME},
+    )
+    try:
+        data = _extract_tool_input(response, _READING_TOOL_NAME)
+    except (ValueError, TypeError, AttributeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    lines = []
+    for key, human in (
+        ("pregunta", "Qué pregunta la regla"),
+        ("definiciones", "Definiciones"),
+        ("cumple", "CUMPLE si se observa"),
+        ("parcial", "PARCIAL si se observa"),
+        ("no_cumple", "NO_CUMPLE si se observa"),
+        ("no_alcanza", "NO alcanza para decidir (es NO_EVALUADO)"),
+    ):
+        value = str(data.get(key) or "").strip()
+        if value:
+            lines.append(f"- {human}: {value}")
+    # Sin la pregunta y los dos extremos no hay lectura que valga la pena mandar.
+    if not all(str(data.get(k) or "").strip() for k in ("pregunta", "cumple", "no_cumple")):
+        return ""
+    return "\n".join(lines)
 
 _CHECK_TOOL_NAME = "emitir_chequeo"
 
@@ -352,7 +494,9 @@ def _read_text_artifact(path: Path) -> str | None:
     return raw
 
 
-def _build_content(test: CriterionTest, evidence_rows: list[dict]) -> tuple[list[dict], set[str]]:
+def _build_content(
+    test: CriterionTest, evidence_rows: list[dict], reading: str = "",
+) -> tuple[list[dict], set[str]]:
     """Build the user content and the set of artifacts we did NOT actually send.
 
     Screenshots go in as base64 images. EVERY OTHER KIND HAS ITS CONTENTS
@@ -370,6 +514,15 @@ def _build_content(test: CriterionTest, evidence_rows: list[dict]) -> tuple[list
         f"TEST {test.id}: {test.name}",
         f"Criterio CUMPLE: {test.pass_criteria}",
         f"Criterio NO_CUMPLE: {test.fail_criteria}",
+    ]
+    if reading:
+        # La misma para todas las pruebas del criterio (ver `read_rule`).
+        lines += [
+            "",
+            "LECTURA DE LA REGLA (la misma para todas las pruebas de este criterio):",
+            reading,
+        ]
+    lines += [
         "",
         "EVIDENCIA OBSERVADA:",
     ]
@@ -410,9 +563,10 @@ def _build_content(test: CriterionTest, evidence_rows: list[dict]) -> tuple[list
 
 
 def _ask_once(
-    test: CriterionTest, evidence_rows: list[dict], client: Any, model: str
+    test: CriterionTest, evidence_rows: list[dict], client: Any, model: str,
+    reading: str = "",
 ) -> tuple[dict, set[str]]:
-    content, missing = _build_content(test, evidence_rows)
+    content, missing = _build_content(test, evidence_rows, reading)
     # NO `temperature` PARAMETER. This is not an oversight -- it is a property
     # of the model. `temperature`, `top_p` and `top_k` were REMOVED on Opus 4.8
     # and 4.7; sending any of them returns:
@@ -447,9 +601,12 @@ def _ask_once(
     )
 
 
-def _one_run(test: CriterionTest, evidence_rows: list[dict], client: Any, model: str) -> tuple[str, str, list[str]]:
+def _one_run(
+    test: CriterionTest, evidence_rows: list[dict], client: Any, model: str,
+    reading: str = "",
+) -> tuple[str, str, list[str]]:
     """One judged run -> (status, rationale, cited). Coerces uncited positives."""
-    data, missing, stop_reason = _ask_once(test, evidence_rows, client, model)
+    data, missing, stop_reason = _ask_once(test, evidence_rows, client, model, reading)
     status = data.get("verdict")
     # ALLOWLIST, not blocklist. Keep only citations of artifacts that were
     # actually supplied AND actually sent. The previous rule filtered just the
@@ -486,8 +643,12 @@ def score_test(
     platform: str | None = None,
     repeats: int = 1,
     model: str | None = None,
+    reading: str = "",
 ) -> TestVerdict:
     """Judge one test on one platform against its evidence rows.
+
+    `reading` es la lectura de la regla fijada para el criterio (ver
+    `read_rule`): viaja igual a todas sus pruebas. Vacía = se juzga como antes.
 
     `evidence_rows` are ledger dicts already filtered to this test AND platform
     (see EvidenceLedger.for_platform_test). Empty evidence returns NO_EVALUADO
@@ -515,7 +676,7 @@ def score_test(
         model = CONFIG.model_heavy
 
     runs: list[tuple[str, str, list[str]]] = [
-        _one_run(test, evidence_rows, client, model) for _ in range(max(1, repeats))
+        _one_run(test, evidence_rows, client, model, reading) for _ in range(max(1, repeats))
     ]
     statuses = [r[0] for r in runs]
     modal = _modal(statuses)
@@ -542,7 +703,8 @@ def judge_fingerprint() -> str:
     globals at call time so a monkeypatched prompt changes the hash.
     """
     payload = json.dumps(
-        {"system": JUDGE_SYSTEM, "tool": VERDICT_TOOL}, sort_keys=True, ensure_ascii=False
+        {"system": JUDGE_SYSTEM, "tool": VERDICT_TOOL, "reading": READING_SYSTEM},
+        sort_keys=True, ensure_ascii=False
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

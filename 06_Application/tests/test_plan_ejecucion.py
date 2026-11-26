@@ -154,6 +154,9 @@ def _plan_listo(tmp_path, *, cliente=None, corta_en=None):
     engine = make_engine(
         tmp_path, client=cliente or _cliente(),
         plan_strategy=_estrategia_dos, plan_sampling=_muestreo,
+        # El recorrido dirigido y el reintento tienen sus propias pruebas
+        # (test_arreglos_corrida_2026_11_26.py); acá se mira el camino base.
+        plan_revisit=False, probe_retries=0,
     )
 
     def factory(job, credentials, artifacts_dir):
@@ -340,6 +343,7 @@ def test_a_probe_that_blows_up_does_not_take_the_whole_run_with_it(tmp_path, env
     todo por una."""
     engine = make_engine(
         tmp_path, client=_cliente(), plan_strategy=_estrategia_dos, plan_sampling=_muestreo,
+        plan_revisit=False,
     )
 
     def factory(job, credentials, artifacts_dir):

@@ -734,6 +734,129 @@ async def explore_platform(
     return profile
 
 
+#: Cuántos criterios pendientes se le encargan a UNA exploración dirigida.
+#: Pocos: cada uno es un lugar distinto de la plataforma, y una exploración que
+#: persigue seis termina sin turnos a mitad del tercero.
+REVISIT_BATCH = int(os.getenv("LXP_RECON_REVISIT_BATCH", "3"))
+#: Tope de exploraciones dirigidas por plan. Es un freno de gasto, no un
+#: presupuesto: lo que no entra queda como estaba, dicho.
+MAX_REVISITS = int(os.getenv("LXP_RECON_MAX_REVISITS", "4"))
+
+REVISIT_DONE = "hecha"
+
+
+def _revisit_focus(batch: list[dict]) -> str:
+    items = "\n".join(
+        f"- {d.get('id')} ({d.get('nombre') or 'sin nombre'}): {d.get('motivo') or ''}"
+        for d in batch
+    )
+    return (
+        "EXPLORACIÓN DIRIGIDA. El plan dejó SIN DECIDIR estos criterios porque el "
+        "recorrido no llegó a la pantalla donde se probarían. Cada uno dice qué "
+        f"habría que mirar:\n{items}\n\n"
+        "Andá a buscar esas pantallas siguiendo esas indicaciones, una por una. "
+        "Registrá con `record_part` cada pantalla nueva a la que llegues y con "
+        "`record_behavior` lo que averigües haciendo (por ejemplo, qué aparece "
+        "al empezar un contenido que nunca se abrió, o al volver a uno ya "
+        "empezado). Podés responder actividades para llegar. No podés escribir "
+        "texto: si una pantalla sólo avanza escribiendo, registrala hasta donde "
+        "se llega y decí que lo que sigue pide escribir.\n\n"
+        "Si después de buscar por el camino indicado una pantalla NO EXISTE, "
+        "anotalo en `no_encontrado` diciendo qué buscaste, por dónde y qué había "
+        "en su lugar. 'No existe' es una respuesta válida y es lo que este "
+        "encargo tiene que poder decir; lo que no vale es darla por inexistente "
+        "sin haber abierto el lugar que se indica."
+    )
+
+
+async def revisit(
+    agent: Any,
+    profile: dict,
+    pending: list[dict],
+    *,
+    root_url: str,
+    prepare: Any = None,
+    on_progress: Any = None,
+) -> dict[str, str]:
+    """Vuelve a la plataforma a buscar lo que el plan dejó en "falta recorrer".
+
+    POR QUÉ. En la corrida completa del 2026-11-26 siete criterios quedaron sin
+    evaluar por "falta recorrer". El planificador había hecho bien su parte: no
+    los dio por inexistentes y escribió, para cada uno, qué habría que mirar
+    ("abrir un subtema 'Sin empezar' y ver si hay modelado antes de la primera
+    pregunta", "abrir 'Mezclar subtemas, como en una prueba'"). Pero nadie iba a
+    mirar: el recorrido ya había terminado, y esa indicación sólo servía para
+    que una persona la leyera en el plan. El resultado era un criterio sin
+    respuesta por una pantalla que estaba a dos toques.
+
+    Esto cierra ese círculo: lo que el planificador pide mirar se le encarga al
+    explorador, en tandas chicas, y lo que encuentra se suma al MISMO perfil
+    (con sus capturas e ids nuevos), para que el planificador decida otra vez
+    con eso a la vista.
+
+    `pending` son las decisiones en `falta_recorrer` (con `id`, `nombre`,
+    `motivo`). `prepare` es una corrutina opcional que deja la plataforma lista
+    antes de cada exploración (volver al inicio, entrar con un estudiante
+    nuevo); con ella la exploración arranca leyendo la pantalla en vez de
+    navegar.
+
+    Devuelve, por id de criterio, `REVISIT_DONE` o el motivo por el que su
+    exploración no se completó. Sólo de una exploración COMPLETA se puede
+    concluir "esa pantalla no existe"; de una que se quedó sin turnos, no.
+    """
+    explore = getattr(agent, "explore", None)
+    outcome: dict[str, str] = {}
+    todo = [d for d in (pending or []) if isinstance(d, dict) and d.get("id")]
+    if explore is None or not todo:
+        return outcome
+    profile.setdefault("partes", [])
+    profile.setdefault("comportamientos", [])
+    for key in ("no_encontrado", "documentado_sin_verificar", "sin_explorar"):
+        profile.setdefault(key, [])
+    profile.setdefault("notas", "")
+    batches = [todo[i:i + REVISIT_BATCH] for i in range(0, len(todo), REVISIT_BATCH)]
+    for number, batch in enumerate(batches, start=1):
+        ids = [str(d["id"]) for d in batch]
+        label = "dirigida: " + ", ".join(ids)
+        if number > MAX_REVISITS:
+            for cid in ids:
+                outcome[cid] = (
+                    f"no se exploró: el plan admite {MAX_REVISITS} exploraciones "
+                    "dirigidas y esta quedó afuera"
+                )
+            continue
+        if on_progress is not None:
+            try:
+                on_progress(number, len(batches), label)
+            except Exception:  # noqa: BLE001 -- el aviso no puede tumbar el recorrido
+                logger.debug("no pude avisar el avance del recorrido dirigido", exc_info=True)
+        navigate = True
+        try:
+            if prepare is not None:
+                await prepare(number)
+                navigate = False
+            already = [str(p.get("nombre", "")) for p in profile["partes"]]
+            report = await explore(
+                _exploration_task(_revisit_focus(batch), root_url, "", already, navigate=navigate)
+            )
+        except Exception as exc:  # noqa: BLE001 -- una exploración fallida es un hallazgo
+            profile["sin_explorar"].append(f"{label}: {exc}")
+            for cid in ids:
+                outcome[cid] = f"no se pudo explorar: {exc}"
+            continue
+        report = report if isinstance(report, dict) else {}
+        _merge_profile(profile, report, label)
+        if report.get("incompleto"):
+            why = f"terminó sin el informe de cierre ({report['incompleto']})"
+            profile["sin_explorar"].append(f"{label}: {why}; lo que registró al pasar se conserva")
+            for cid in ids:
+                outcome[cid] = why
+        else:
+            for cid in ids:
+                outcome[cid] = REVISIT_DONE
+    return outcome
+
+
 def render_profile(profile: dict) -> str:
     """El perfil como texto, para quien redacta, planifica y juzga las pruebas."""
     lines = [f"Dirección: {profile.get('direccion') or '(no registrada)'}"]

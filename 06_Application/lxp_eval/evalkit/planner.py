@@ -359,10 +359,33 @@ def evaluate_strategy(
     documents: list[str] | None = None,
     on_progress: Any = None,
     max_tokens: int = 16000,
+    revisited: dict[str, str] | None = None,
 ) -> list[dict]:
-    """El planificador decide, criterio por criterio, qué se prueba y qué no."""
+    """El planificador decide, criterio por criterio, qué se prueba y qué no.
+
+    `revisited` se pasa en la SEGUNDA decisión, después del recorrido dirigido
+    (ver recon.revisit y `settle_revisited`): dice, por criterio, cómo terminó
+    la exploración que fue a buscar su pantalla.
+    """
     if not criteria:
         return []
+    second = ""
+    if revisited:
+        listed = "\n".join(f"- {cid}: {how}" for cid, how in revisited.items())
+        second = (
+            "\n\nSEGUNDA DECISIÓN. Estos criterios habían quedado en "
+            "`falta_recorrer` y ya se hizo una exploración dirigida a buscar la "
+            "pantalla que faltaba; lo que encontró está arriba, en las partes y "
+            "comportamientos más nuevos y en lo que se buscó y no se encontró. "
+            f"Cómo terminó cada exploración:\n{listed}\n"
+            "Decidí de nuevo. Si la pantalla apareció, es `se_prueba` y citá su "
+            "id. Quien ejecuta las pruebas SÍ puede escribir (el explorador no): "
+            "si la pantalla existe y lo único que faltó fue escribir para "
+            "avanzar, es `se_prueba`. Si la exploración terminó y la pantalla no "
+            "existe, es `no_se_puede_medir` y el motivo dice qué se buscó, por "
+            "dónde y qué había en su lugar. `falta_recorrer` sólo vale para un "
+            "criterio cuya exploración no se completó."
+        )
     docs = (
         "\n\nDOCUMENTOS DEL PROVEEDOR ADJUNTOS A ESTA EVALUACIÓN: "
         + "; ".join(documents) + "."
@@ -384,7 +407,7 @@ def evaluate_strategy(
                     "text": "LO QUE EL RECORRIDO VIO DE LA PLATAFORMA\n" + profile_text + docs,
                     "cache_control": {"type": "ephemeral"},
                 },
-                {"type": "text", "text": "CRITERIOS A DECIDIR\n" + _criteria_block(chunk)},
+                {"type": "text", "text": "CRITERIOS A DECIDIR\n" + _criteria_block(chunk) + second},
             ]}],
             tools=[STRATEGY_TOOL],
             tool_choice={"type": "tool", "name": STRATEGY_TOOL_NAME},
@@ -396,6 +419,43 @@ def evaluate_strategy(
             except Exception:  # noqa: BLE001 -- el aviso no puede tumbar el plan
                 pass
     return validate_strategy(raw, criteria, profile)
+
+
+def settle_revisited(decisions: list[dict], revisited: dict[str, str]) -> list[dict]:
+    """Lo que el código no le cree a la segunda decisión. En el lugar.
+
+    Después de una exploración dirigida COMPLETA, "falta recorrer" deja de ser
+    una respuesta: o la pantalla apareció (y el criterio se prueba) o no existe
+    (y el criterio no se puede medir en esta plataforma, que es un resultado y
+    no una falla del evaluador). Si el planificador insiste con `falta_recorrer`
+    para un criterio cuya exploración terminó, pasa a `no_se_puede_medir` con el
+    motivo que él mismo dio y la aclaración de que se fue a buscar.
+
+    Al revés no se toca: un criterio cuya exploración NO se completó sigue en
+    `falta_recorrer`. Decir "no existe" de algo que no se terminó de buscar es
+    exactamente la afirmación que este repo no hace.
+    """
+    for d in decisions or []:
+        how = (revisited or {}).get(str(d.get("id")))
+        if how is None:
+            continue
+        notes = d.setdefault("advertencias", [])
+        if d.get("estado") == FALTA_RECORRER and how == "hecha":
+            d["estado"] = NO_SE_PUEDE_MEDIR
+            d["cubeta"] = BUCKET[NO_SE_PUEDE_MEDIR]
+            d["motivo"] = (
+                "Se fue a buscar con una exploración dirigida y la pantalla "
+                "donde se probaría no apareció. " + str(d.get("motivo") or "")
+            ).strip()
+            notes.append(
+                "seguía en 'falta recorrer' después de una exploración dirigida "
+                "completa: pasa a no se puede medir en esta plataforma"
+            )
+        elif d.get("estado") == FALTA_RECORRER:
+            notes.append(f"la exploración dirigida no se completó: {how}")
+        else:
+            notes.append("decidido de nuevo después de una exploración dirigida")
+    return decisions
 
 
 def reconcile(decisions: list[dict], matrix: dict[str, dict]) -> list[dict]:

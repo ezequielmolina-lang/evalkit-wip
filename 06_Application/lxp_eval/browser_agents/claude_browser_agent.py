@@ -86,6 +86,9 @@ class AgentRunResult:
     #: El paso estaba marcado [SI APARECE] y lo que nombra no apareció (ver
     #: agent_driver.STEP_DONE_TOOL). No es un fallo ni un éxito.
     not_present: bool = False
+    #: El paso se cumplió por un camino distinto del escrito, y cuál (ver
+    #: agent_driver.STEP_DONE_TOOL, campo `desvio`). Vacío = se hizo tal cual.
+    deviation: str = ""
     #: Lo que el agente informó con una herramienta de cierre propia (hoy,
     #: `describe_platform` del recorrido). None = no informó nada.
     report: dict[str, Any] | None = None
@@ -823,6 +826,9 @@ class ClaudeBrowserAgent:
             if "accomplished" in args:
                 result.accomplished = bool(args["accomplished"])
                 result.not_present = bool(args.get("no_aparecio")) and not result.accomplished
+                result.deviation = (
+                    str(args.get("desvio") or "").strip() if result.accomplished else ""
+                )
             else:
                 # Whole-task `done` cannot express failure, so it can only mean
                 # "the loop ended cleanly" -- never "the step really happened".
