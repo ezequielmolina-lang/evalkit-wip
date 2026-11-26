@@ -745,6 +745,28 @@ class RiskMarker:
     #: Optional in the YAML; falls back to `reason`, which is written for the
     #: evaluator rather than for the vendor, so authoring it is worth it.
     notice: str = ""
+    #: Phrases inside which a term does NOT count (optional in the YAML).
+    unless: tuple[str, ...] = ()
+
+    def fires(self, haystack: str) -> bool:
+        """Does this marker's vocabulary appear in `haystack` (already folded)?
+
+        A term counts unless every one of its occurrences sits inside a phrase
+        listed in `unless`. On 2026-11-25 a verdict rule that read "(menos
+        pasos, números menores, nivel rotulado más bajo)" tripped
+        `datos_de_menores` through its term `menores`, and a probe about item
+        difficulty waited for a signature it never needed. Matching whole words
+        would not have helped -- `menores` IS a whole word there -- so what is
+        declared is the context in which the word means something else.
+
+        The exclusion is by phrase and nothing wider: the phrase is blanked and
+        the terms are looked up in what is left, so "números menores" next to
+        "datos de alumnos menores" still fires. A phrase nobody listed keeps
+        firing, which is the cheap direction: it costs a signature.
+        """
+        for phrase in self.unless:
+            haystack = haystack.replace(_fold(phrase), " ")
+        return any(_fold(t) in haystack for t in self.terms)
 
 
 @dataclass(frozen=True)
@@ -764,14 +786,14 @@ class RiskPolicy:
     def matches(self, blobs: Iterable[str]) -> list[RiskMarker]:
         """Every marker whose vocabulary appears anywhere in `blobs`."""
         haystack = _fold(" \n ".join(blobs))
-        return [m for m in self.markers if any(_fold(t) in haystack for t in m.terms)]
+        return [m for m in self.markers if m.fires(haystack)]
 
     def self_declaration(self, blobs: Iterable[str]) -> RiskMarker | None:
         """The self-declared-precondition marker, if the probe declares any."""
         if self.self_declared is None:
             return None
         haystack = _fold(" \n ".join(blobs))
-        if any(_fold(t) in haystack for t in self.self_declared.terms):
+        if self.self_declared.fires(haystack):
             return self.self_declared
         return None
 
@@ -844,12 +866,21 @@ def _marker_from(m: Any, where: str, path: Path) -> RiskMarker:
             path=path,
             line=mline,
         )
+    unless = m.get("unless") or []
+    if not isinstance(unless, list) or not all(str(u).strip() for u in unless):
+        raise GeneratorError(
+            f'el marcador "{m["id"]}" tiene un "unless" que no es una lista de frases '
+            "- una frase vacía en un archivo de compuertas es un error de edición",
+            path=path,
+            line=mline,
+        )
     return RiskMarker(
         id=str(m["id"]),
         label=str(m["label"]),
         reason=str(m["reason"]).strip(),
         terms=tuple(str(t) for t in terms),
         notice=str(m.get("notice") or "").strip(),
+        unless=tuple(str(u) for u in unless),
     )
 
 

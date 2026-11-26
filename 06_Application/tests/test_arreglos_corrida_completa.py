@@ -724,3 +724,52 @@ def test_the_manifest_carries_the_preamble(tmp_path):
     )
     entrada = load_manifest(ruta).entries[0]
     assert entrada.antes_de_cada_prueba == ["Tocar Cambiar estudiante", "Escribir el nombre: Evalkit {n}"]
+
+
+# --- 7. una palabra del marcador que también significa otra cosa ---------------
+
+
+def _clases(texto):
+    return {m.id for m in gen.load_risk_markers().matches([texto])}
+
+
+def test_numbers_that_are_smaller_are_not_minors_data():
+    """La prueba de PT-D14-01 redactada el 2026-11-25 quedó en compuerta de datos
+    de menores porque su regla de veredicto decía "(menos pasos, números menores,
+    nivel rotulado más bajo)". Nadie la firmó y no corrió."""
+    for texto in (
+        "un ítem reconociblemente más simple (menos pasos, números menores, nivel rotulado más bajo)",
+        "elegir el número que es menor que 10",
+        "ordenar las fracciones de menor a mayor",
+        "valores menores o iguales a cero, sin entrar en pormenores",
+    ):
+        assert "datos_de_menores" not in _clases(texto), texto
+
+
+def test_minors_data_still_gates_even_next_to_a_number_comparison():
+    """La excepción tapa la frase, no la prueba: si además de "números menores"
+    el texto habla de personas, la compuerta sigue ahí."""
+    for texto in (
+        "exportar los datos de un menor de edad",
+        "ver qué muestra la vista docente de los alumnos menores",
+        "los menores que usan la plataforma",
+        "comparar números menores y después descargar el listado de menores inscritos",
+    ):
+        assert "datos_de_menores" in _clases(texto), texto
+
+
+def test_an_empty_exception_phrase_is_refused(tmp_path):
+    """Una frase en blanco en un archivo de compuertas es un error de quien lo
+    editó, y se le dice en vez de cargarlo como si nada."""
+    ruta = tmp_path / "marcadores.yaml"
+    ruta.write_text(
+        "markers:\n"
+        "  - id: prueba\n"
+        "    label: una clase\n"
+        "    reason: porque sí\n"
+        "    terms: [menores]\n"
+        "    unless: ['']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(EvalkitError, match="unless"):
+        gen.load_risk_markers(ruta)
