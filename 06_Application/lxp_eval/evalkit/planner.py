@@ -519,7 +519,9 @@ MARK_VARIANT = "[VARIANTE]"
 _SOFT_VARIANT = (
     " (Es una orientación: si lo que aparece en pantalla no permite exactamente "
     "esa situación, hacé la más parecida que sí permita, seguí con el paso y "
-    "decí en el cierre cuál hiciste. No lo des por no hecho sólo por eso.)"
+    "decí en el cierre cuál hiciste. No lo des por no hecho sólo por eso. Y en "
+    "ESTE paso hacé una sola acción: si la descripción habla de una secuencia "
+    "entera, el resto lo cubren los otros pasos de la prueba.)"
 )
 
 

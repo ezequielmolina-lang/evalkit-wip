@@ -85,6 +85,10 @@ class InventoryError(EvalkitError):
     """El inventario no se pudo armar."""
 
 
+#: Lo que separa los niveles cuando alguien escribe una ruta en una línea.
+_SEPARATORS = re.compile(r"\s*[›>»→/]\s*")
+
+
 def _norm(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
 
@@ -119,8 +123,14 @@ def find(inventory: list[dict] | None, name: Any) -> dict | None:
     key = _norm(name)
     if not key:
         return None
+    # LA HOJA O LA RUTA ENTERA. En la primera verificación en vivo el muestreo
+    # copió la ruta completa ("Eje › Tema › Subtema") como tema, tal como se la
+    # habíamos mostrado; la comparación era sólo contra la hoja, así que TODAS
+    # las celdas perdieron su tema y las pruebas fueron al primer contenido.
+    last = _norm(_SEPARATORS.split(str(name))[-1])
     for entry in inventory or []:
-        if _norm(entry.get("hoja")) == key:
+        leaf = _norm(entry.get("hoja"))
+        if leaf in (key, last):
             return entry
     return None
 
@@ -128,7 +138,9 @@ def find(inventory: list[dict] | None, name: Any) -> dict | None:
 def render_inventory(inventory: list[dict] | None) -> str:
     if not inventory:
         return "(el recorrido no dejó un inventario de contenidos)"
-    return "\n".join("- " + " › ".join(e["ruta"]) for e in inventory)
+    return "\n".join(
+        f"- {e['hoja']}   [se llega por: {' › '.join(e['ruta'])}]" for e in inventory
+    )
 
 
 def build_inventory(

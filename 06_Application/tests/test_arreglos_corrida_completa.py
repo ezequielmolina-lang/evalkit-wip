@@ -258,6 +258,28 @@ def test_a_screen_name_is_not_a_topic_and_a_real_topic_carries_its_route():
     assert any("borrados" in a for a in fila["advertencias"])
 
 
+def test_a_topic_written_as_its_whole_route_is_still_that_topic():
+    """Primera verificación en vivo (2026-11-25): el muestreo copió la ruta
+    entera como tema y las 15 pruebas quedaron sin tema."""
+    inventario = [{"ruta": ["Eje A", "Tema B", "Subtema C"], "hoja": "Subtema C"}]
+    assert inv.find(inventario, "Eje A › Tema B › Subtema C")["hoja"] == "Subtema C"
+    assert inv.find(inventario, "Como el programa > Eje A > Tema B > subtema c")["hoja"] == "Subtema C"
+    assert inv.find(inventario, "Tema B") is None, "un nivel intermedio no es la hoja"
+    assert inv.render_inventory(inventario).startswith("- Subtema C")
+
+
+def test_a_variant_that_describes_a_sequence_does_not_turn_one_step_into_many():
+    """Misma verificación: la variante decía "secuencia que mezcla aciertos y
+    errores" y el paso "responder la actividad 1" gastó sus 20 turnos
+    intentando hacer la secuencia entera."""
+    inst = pl.instantiate(
+        {"probeId": "PB-X", "criterionId": "X", "goal": "g", "verdictRule": "r",
+         "steps": [{"n": 1, "action": "Responder de modo que ocurra esto: [VARIANTE]"}]},
+        [{"tema": "", "variante": "Secuencia que mezcla aciertos y errores"}],
+    )[0]
+    assert "hacé una sola acción" in inst["steps"][0]["action"]
+
+
 def test_the_navigation_step_gets_the_whole_route():
     """Cinco cortes: el contenido existía, bajo otro eje del que suponían los pasos."""
     inst = pl.instantiate(
