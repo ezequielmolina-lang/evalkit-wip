@@ -173,12 +173,13 @@ import threading
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from .criteria import Criteria, CriterionTest
 from .errors import EvalkitError
+from .steps import LONG_MARK, OPTIONAL_MARK, lint_steps, repair_steps
 from .probes import DEFAULT_CAPTURE, Probe
 from .yamlsrc import line_of, load_yaml_with_lines
 
@@ -629,6 +630,21 @@ COUNCIL: tuple[Judge, ...] = (
 #: The seats whose verdict decides approval and can trigger a redraft.
 VOTING_JUDGES = tuple(j for j in COUNCIL if j.voting)
 
+#: EL CONSEJO REDUCIDO, para pruebas que salen de un plan aprobado.
+#:
+#: En la corrida del 2026-11-25 cada una de las 45 pruebas pasó por los siete
+#: asientos, hasta dos vueltas. Los siete no frenaron ninguna de las causas que
+#: después cortaron 50 ejecuciones (ver evalkit/steps.py), así que el consejo
+#: completo costaba sin proteger. Con un plan aprobado ya decidieron una
+#: persona y el planificador QUÉ se prueba y DÓNDE; lo que queda por revisar es
+#: si la prueba mide el criterio (coherencia_criterio), si se puede ejecutar en
+#: esta plataforma (realismo) y qué riesgo tiene (seguridad, que no vota y es la
+#: que alimenta la compuerta: no se saca nunca). Los otros cuatro asientos se
+#: sientan sólo si alguno de estos objeta o si hay riesgo: `escalate_to`.
+REDUCED_SEATS = ("coherencia_criterio", "realismo", "seguridad")
+REDUCED_COUNCIL = tuple(j for j in COUNCIL if j.name in REDUCED_SEATS)
+assert {j.name for j in REDUCED_COUNCIL} == set(REDUCED_SEATS)
+
 #: The name of the seat that classifies risk. It is looked up by name in
 #: `_direct_gate`, so it has to stay in sync with the roster above.
 CLASSIFIER_JUDGE = "seguridad"
@@ -651,8 +667,24 @@ DRAFT_SYSTEM = (
     "('si aparece X, hacer Y') ni de pasos que repiten ('repetir seis veces'): "
     "un paso que no aplica cuenta como no ejecutado y corta la prueba, y uno "
     "que repite no entra en los turnos de un paso. Si hay que hacer algo tres "
-    "veces, son tres pasos. Lo que puede no estar se resuelve en la regla de "
-    "veredicto, no en un paso.\n"
+    "veces, son tres pasos.\n"
+    # Agregado tras la corrida completa del 2026-11-25 (ver evalkit/steps.py):
+    # veinte pruebas se cortaron por un botón nombrado por su texto que la
+    # plataforma muestra sólo por uno de sus caminos.
+    "- Cada paso dice el OBJETIVO, no el botón: 'confirmar con el tutor el error "
+    "que propone', no 'tocar el botón Sí, hice eso'. Podés dar el texto del "
+    "control como ejemplo entre paréntesis, nunca como lo único que vale.\n"
+    f"- Un paso que depende de algo que la plataforma puede mostrar o no "
+    f"empieza con {OPTIONAL_MARK}. Si no aparece, quien ejecuta lo dice y la "
+    "prueba sigue. Es la única forma de condicional permitida y va sólo en lo "
+    "que de verdad puede no aparecer: el paso que provoca el estímulo y el que "
+    "muestra lo que el criterio pregunta NO la llevan.\n"
+    f"- Un paso que es un solo objetivo pero lleva varias interacciones (llegar "
+    f"a un contenido por su ruta, responder bien la pregunta en pantalla) "
+    f"empieza con {LONG_MARK}. No es permiso para repetir ni para juntar "
+    "objetivos.\n"
+    "- Nada de grabar la pantalla, cronometrar ni medir tiempos: quien ejecuta "
+    "sólo opera la página y guarda captura y texto.\n"
     "- Describí QUÉ tiene que lograr la plataforma, nunca CÓMO la implementa un "
     "producto en particular: otra arquitectura puede cumplir el mismo criterio de "
     "otra manera, y castigarla por eso es un error de medición.\n"
@@ -1523,7 +1555,14 @@ PROFILE_SEATS = frozenset({"realismo", "neutralidad"})
 _PROFILE_RULES_DRAFTER = (
     "Escribí los PASOS para esta plataforma, tal como se la vio:\n"
     "- Partí de la entrada descrita y usá sólo las partes y las interacciones que "
-    "figuran. Nombrá los botones y opciones con el texto que tienen.\n"
+    "figuran. El texto de un botón va como ejemplo, no como condición.\n"
+    f"- Para llegar a un contenido, UN solo paso {LONG_MARK}: 'Ir al contenido X "
+    "siguiendo su ruta desde el menú de temas'. No escribas un paso por cada "
+    "nivel del menú: el menú puede estar en otro nivel del que suponés.\n"
+    "- Lo que la plataforma muestra sólo por uno de sus caminos (un diálogo de "
+    "confirmación, una pregunta de reflexión antes de avanzar, un botón para "
+    f"seguir) va en un paso {OPTIONAL_MARK}. El recorrido vio UN camino; la "
+    "plataforma tiene más.\n"
     "- NO pidas abrir la plataforma, iniciar sesión ni crear una cuenta: quien "
     "ejecuta ya está adentro. No escribas ninguna dirección que no figure acá.\n"
     "- Nada que ocurra fuera del navegador (cronómetros, grabaciones, otra "
@@ -1541,9 +1580,9 @@ _PROFILE_RULES_DRAFTER = (
     "dependa de que aparezca una pregunta o una opción en particular. Pedí "
     "'en la pregunta que aparezca, tocar una opción incorrecta', no 'tocar la "
     "opción A) 58'.\n"
-    "- Lo que figura como no verificado puede no existir. No lo pongas en un "
-    "paso condicional: escribí el paso que lo busca y pedí capturar la pantalla "
-    "tal como quede; la regla de veredicto dice qué significa que no esté.\n"
+    f"- Lo que figura como no verificado puede no existir: el paso que lo usa "
+    f"lleva {OPTIONAL_MARK}, y después va un paso que captura la pantalla tal "
+    "como quede; la regla de veredicto dice qué significa que no esté.\n"
     "El criterio y la regla de veredicto NO cambian por esto: siguen juzgando QUÉ "
     "logra la plataforma, no cómo está construida."
 )
@@ -1557,7 +1596,11 @@ _PROFILE_RULES_JUDGE = (
     "fuera del navegador, que sea condicional ('si aparece...') o que repita "
     "una acción varias veces: ese paso no se puede ejecutar. Los marcadores "
     "[TEMA] y [VARIANTE] dentro de un paso NO son una ambigüedad: la prueba se "
-    "ejecuta una vez por celda del muestreo aprobado y ahí se reemplazan."
+    "ejecuta una vez por celda del muestreo aprobado y ahí se reemplazan. "
+    f"Tampoco lo son las marcas {OPTIONAL_MARK} (el paso puede no aplicar y la "
+    f"prueba sigue) y {LONG_MARK} (un objetivo de varias interacciones): son "
+    "parte del formato. Objetá, sí, que la lleven el paso que provoca el "
+    "estímulo o el que muestra lo que el criterio pregunta."
 )
 
 
@@ -1659,6 +1702,7 @@ def _draft(
     objections: Sequence[JudgeVerdict],
     platform_profile: dict | None = None,
     guidance: str | None = None,
+    lint: Sequence[str] = (),
 ) -> Probe:
     blocks = []
     # PRIMERO la plataforma: es igual para todos los criterios de la corrida,
@@ -1686,7 +1730,57 @@ def _draft(
         blocks.append({"type": "text", "text": "\n".join(lines)})
     else:
         blocks.append({"type": "text", "text": "Redactá el probe para este criterio."})
+    if lint:
+        blocks.append({"type": "text", "text": (
+            "Tu borrador anterior tenía pasos que no se pueden ejecutar. Lo dice "
+            "una revisión automática, antes de que lo vea el consejo. Corregí "
+            "exactamente esto y volvé a emitir el probe completo:\n"
+            + "\n".join(f"  - {x}" for x in lint)
+        )})
     return _to_probe(_ask(client, model, DRAFT_SYSTEM, blocks, DRAFT_TOOL), test)
+
+
+#: Cuántas veces vuelve un borrador al redactor por la revisión automática de
+#: pasos antes de arreglarlo por código. Cada vuelta es una llamada; el consejo
+#: que evita son tres o siete.
+LINT_RETRIES = 2
+
+
+def _draft_clean(
+    client: Any,
+    model: str,
+    test: CriterionTest,
+    platform_kind: str | None,
+    objections: Sequence[JudgeVerdict],
+    platform_profile: dict | None = None,
+    guidance: str | None = None,
+) -> Probe:
+    """Un borrador que ya pasó la revisión de pasos que no necesita un modelo.
+
+    En la corrida del 2026-11-25 dos condicionales y dos pasos imposibles
+    pasaron por el redactor Y por el consejo de siete, con la regla escrita en
+    los dos prompts. Acá el borrador vuelve al redactor con la objeción exacta
+    (hasta LINT_RETRIES veces) y, si insiste, lo que el código puede arreglar se
+    arregla (ver steps.repair_steps). Así el consejo nunca gasta en un paso que
+    se sabe inejecutable.
+    """
+    probe = _draft(client, model, test, platform_kind, objections, platform_profile, guidance)
+    for _ in range(LINT_RETRIES):
+        issues = lint_steps(list(probe.steps))
+        if not issues:
+            return probe
+        probe = _draft(
+            client, model, test, platform_kind, objections, platform_profile,
+            guidance, lint=issues,
+        )
+    if lint_steps(list(probe.steps)):
+        fixed, left = repair_steps(list(probe.steps))
+        if left:
+            logger.warning("probe %s: la revisión de pasos no pudo arreglar: %s",
+                           probe.probe_id, "; ".join(left))
+        if fixed:
+            probe = replace(probe, steps=tuple(fixed) if isinstance(probe.steps, tuple) else fixed)
+    return probe
 
 
 # --- judging ----------------------------------------------------------------
@@ -2537,6 +2631,7 @@ def generate_probes(
     on_probe_done: Callable[[int, int], None] | None = None,
     max_workers: int = DEFAULT_PROBE_WORKERS,
     plan_guidance: dict[str, str] | None = None,
+    escalate_to: Sequence[Judge] | None = None,
 ) -> ProbeSet:
     """Draft and review one probe per criteria test.
 
@@ -2607,7 +2702,7 @@ def generate_probes(
             if banked is not None and index == 0:
                 probe = banked
             else:
-                probe = _draft(
+                probe = _draft_clean(
                     client, model, test, platform_kind, objections, platform_profile,
                     (plan_guidance or {}).get(test.id),
                 )
@@ -2624,6 +2719,21 @@ def generate_probes(
                 break
 
         assert probe is not None and panel is not None  # max_rounds >= 1
+        # EL CONSEJO SE AMPLÍA SÓLO CUANDO HACE FALTA. Con un consejo reducido
+        # (ver REDUCED_COUNCIL), los asientos que no se sentaron revisan el
+        # borrador final si alguien objetó o si el clasificador de riesgo no
+        # aprobó: desacuerdo o materia sensible. El resto de las pruebas no
+        # paga siete jueces.
+        extra = [j for j in (escalate_to or ()) if j.name not in {c.name for c in council}]
+        if extra and any(v.verdict != APPROVE for v in panel.verdicts):
+            more = _review(
+                client, extra, model, test, probe, platform_kind, panel.index,
+                objective, criteria.name, policy, platform_profile,
+            )
+            panel = ReviewRound(
+                index=panel.index, verdicts=panel.verdicts + more.verdicts, draft=panel.draft,
+            )
+            rounds[-1] = panel
         return test, probe, panel, tuple(rounds)
 
     # EN PARALELO. El consejo de CADA probe ya corría en paralelo, pero las

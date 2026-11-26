@@ -83,6 +83,9 @@ class AgentRunResult:
     #: not "I called done to explain that I could not do this".
     accomplished: bool | None = None
     done_reason: str = ""
+    #: El paso estaba marcado [SI APARECE] y lo que nombra no apareció (ver
+    #: agent_driver.STEP_DONE_TOOL). No es un fallo ni un éxito.
+    not_present: bool = False
     #: Lo que el agente informó con una herramienta de cierre propia (hoy,
     #: `describe_platform` del recorrido). None = no informó nada.
     report: dict[str, Any] | None = None
@@ -769,6 +772,7 @@ class ClaudeBrowserAgent:
             result.done_reason = reason
             if "accomplished" in args:
                 result.accomplished = bool(args["accomplished"])
+                result.not_present = bool(args.get("no_aparecio")) and not result.accomplished
             else:
                 # Whole-task `done` cannot express failure, so it can only mean
                 # "the loop ended cleanly" -- never "the step really happened".

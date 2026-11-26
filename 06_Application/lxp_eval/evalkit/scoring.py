@@ -107,8 +107,108 @@ JUDGE_SYSTEM = (
     "- NO_EVALUADO: la evidencia no alcanza para decidir.\n"
     "Regla estricta: NO emitas CUMPLE, PARCIAL ni NO_CUMPLE sin citar en "
     "cited_artifacts al menos un artefacto que respalde el veredicto. Si no podés "
-    "citar evidencia, el veredicto es NO_EVALUADO."
+    "citar evidencia, el veredicto es NO_EVALUADO.\n"
+    # Agregado tras la corrida del 2026-11-25. En PT-D1-06 ("explica antes de
+    # preguntar, o espera que el estudiante descubra") el juez leyó
+    # "descubrimiento" como navegación automática y puso CUMPLE sobre capturas
+    # que mostraban lo contrario. En PT-D4-03 dio CUMPLE "porque no hay
+    # temporizador" a una regla que pedía avance por dominio.
+    "LEÉ LA REGLA LITERALMENTE. Tu justificación empieza con dos frases: qué "
+    "PREGUNTA la regla (con sus palabras) y qué HECHO observado en la evidencia "
+    "la responde. Si la evidencia muestra otra cosa que lo que la regla "
+    "pregunta, el veredicto es NO_EVALUADO, no CUMPLE. Que algo no aparezca no "
+    "prueba lo contrario de otra cosa: que no haya un temporizador no muestra "
+    "que el avance dependa del dominio.\n"
+    "Una nota que dice [NO APARECIÓ, EL PASO NO SE HIZO] avisa que la captura "
+    "muestra la pantalla SIN ese paso: no la leas como evidencia de que el paso "
+    "ocurrió."
 )
+
+_CHECK_TOOL_NAME = "emitir_chequeo"
+
+CHECK_TOOL: dict[str, Any] = {
+    "name": _CHECK_TOOL_NAME,
+    "description": "Emití el chequeo de los veredictos de un criterio.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "responden_a_la_regla": {
+                "type": "boolean",
+                "description": (
+                    "True si TODAS las justificaciones juzgan lo que la regla "
+                    "pregunta, leída literalmente. False si alguna juzga otra cosa."
+                ),
+            },
+            "mismo_hecho_distinto_veredicto": {
+                "type": "boolean",
+                "description": (
+                    "True si dos pruebas describen el MISMO hecho observado y le "
+                    "ponen veredictos distintos."
+                ),
+            },
+            "motivo": {"type": "string", "description": "Una o dos frases. Citá la prueba."},
+        },
+        "required": ["responden_a_la_regla", "mismo_hecho_distinto_veredicto", "motivo"],
+    },
+}
+
+CHECK_SYSTEM = (
+    "Revisás los veredictos que un juez dio a las pruebas de UN criterio de una "
+    "evaluación de plataformas educativas. No volvés a juzgar la plataforma: "
+    "mirás si el juez hizo bien su trabajo. Dos preguntas:\n"
+    "1. ¿Cada justificación responde a lo que la regla PREGUNTA, leída "
+    "literalmente? Un veredicto que habla de otra cosa (la regla pregunta si se "
+    "explica un concepto antes de preguntar y la justificación habla de cómo se "
+    "navega el menú), o que deduce un sí de una ausencia (no hay temporizador, "
+    "entonces el avance es por dominio), NO responde a la regla.\n"
+    "2. ¿Hay dos pruebas que describen el MISMO hecho observado con veredictos "
+    "distintos? Veredictos distintos sobre hechos distintos están bien: eso es "
+    "lo que el muestreo busca.\n"
+    "Sé estricto con la primera y prudente con la segunda. Respondés con la "
+    "herramienta."
+)
+
+
+def check_consistency(
+    test: CriterionTest, cells: list[tuple[str, str, str]], client: Any,
+    *, model: str | None = None,
+) -> dict:
+    """Un segundo par de ojos sobre los veredictos de un criterio. Una llamada.
+
+    `cells` son (rótulo de la prueba, veredicto, justificación completa).
+    Devuelve {"ok": bool, "motivo": str}. En la corrida del 2026-11-25, 2 de 22
+    criterios salieron con un veredicto que no se sostenía y el consejo completo
+    que había revisado las pruebas no tenía cómo verlo: el error fue del juez,
+    después. Esto no vuelve a juzgar; dice si lo juzgado se puede citar.
+    """
+    if not cells:
+        return {"ok": True, "motivo": ""}
+    if model is None:
+        from ..config import CONFIG
+
+        model = CONFIG.model_heavy
+    listing = "\n\n".join(
+        f"PRUEBA {i} ({label}) — veredicto: {status}\n{rationale}"
+        for i, (label, status, rationale) in enumerate(cells, start=1)
+    )
+    response = client.messages.create(
+        model=model,
+        max_tokens=1500,
+        system=[{"type": "text", "text": CHECK_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": (
+            f"CRITERIO {test.id}: {test.name}\n"
+            f"Aprueba si: {test.pass_criteria}\n"
+            f"Falla si: {test.fail_criteria}\n"
+            f"Cómo se verifica: {test.verification}\n\n"
+            f"VEREDICTOS DEL JUEZ\n{listing}"
+        )}]}],
+        tools=[CHECK_TOOL],
+        tool_choice={"type": "tool", "name": _CHECK_TOOL_NAME},
+    )
+    data = _extract_tool_input(response, _CHECK_TOOL_NAME)
+    answers = data.get("responden_a_la_regla", True) is not False
+    clash = data.get("mismo_hecho_distinto_veredicto", False) is True
+    return {"ok": answers and not clash, "motivo": str(data.get("motivo") or "").strip()}
 
 _IMAGE_MEDIA = {
     ".png": "image/png",

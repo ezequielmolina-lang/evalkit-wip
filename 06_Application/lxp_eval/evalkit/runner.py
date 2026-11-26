@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .steps import split_marks
 from .ledger import EvidenceLedger
 from .probes import Probe
 from .session import SessionExpired
@@ -86,9 +87,19 @@ async def _refuse_if_logged_out(driver: Any, probe: Probe, index: int, step: str
         )
 
 
-def _note(index: int, step: str, driver: Any = None, *, kind: str = "") -> str:
-    """The ledger note for one capture, including any truncation admission."""
-    note = f"paso {index}: {step}"
+def _note(
+    index: int, step: str, driver: Any = None, *, kind: str = "", skipped: str = ""
+) -> str:
+    """The ledger note for one capture, including any truncation admission.
+
+    `skipped` es lo que el agente vio cuando un paso [SI APARECE] no aplicó. Va
+    en la nota porque la captura que sigue NO muestra el paso hecho: muestra la
+    pantalla tal como estaba, y el juez tiene que saberlo para no leerla como
+    evidencia de algo que no pasó.
+    """
+    note = f"paso {index}: {split_marks(step)[0]}"
+    if skipped:
+        note += f" [NO APARECIÓ, EL PASO NO SE HIZO: {skipped[:400]}]"
     if kind == PAGE_TEXT and getattr(driver, "last_read_truncated", False):
         full = getattr(driver, "last_read_full_chars", 0)
         note += f" [TEXTO TRUNCADO: se guardaron los primeros caracteres de {full} en total]"
@@ -131,12 +142,17 @@ async def _run_once(
                 url=url,
                 artifact=artifact,
                 kind=kind,
-                note=_note(index, step, kind=kind) if kind == PAGE_TEXT else _note(index, step),
+                note=_note(index, step, kind=kind, skipped=skipped.get(index, "")),
                 timestamp=_now(),
             )
 
+    #: Pasos [SI APARECE] que no aplicaron: índice -> lo que el agente vio.
+    skipped: dict[int, str] = {}
+
     for index, step in enumerate(probe.steps, start=1):
-        await driver.do(step)
+        outcome = await driver.do(step)
+        if isinstance(outcome, str) and outcome:
+            skipped[index] = outcome
 
         # AFTER the step and BEFORE the capture. A step can be what kills the
         # session (a timeout, an idle logout, a role-gated page bouncing us),
@@ -159,7 +175,7 @@ async def _run_once(
                 url=url,
                 artifact=shot,
                 kind=SCREENSHOT,
-                note=_note(index, step),
+                note=_note(index, step, skipped=skipped.get(index, "")),
                 timestamp=_now(),
             )
             _credit_shared(shot, url, SCREENSHOT, index, step)
@@ -184,7 +200,7 @@ async def _run_once(
                 url=url,
                 artifact=txt,
                 kind=PAGE_TEXT,
-                note=_note(index, step, driver, kind=PAGE_TEXT),
+                note=_note(index, step, driver, kind=PAGE_TEXT, skipped=skipped.get(index, "")),
                 timestamp=_now(),
             )
             _credit_shared(txt, url, PAGE_TEXT, index, step)

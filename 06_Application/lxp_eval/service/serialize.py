@@ -217,6 +217,15 @@ def quorum_line(probe_dicts: list[dict]) -> str:
     gets forwarded, quoted, and disputed a year later.
     """
     short = [p for p in probe_dicts if not p.get("quorum", {}).get("complete", True)]
+    reduced = sum(1 for p in probe_dicts if p.get("consejo") == "reducido")
+    if not short and reduced:
+        # No es el consejo completo y el informe no puede decir que lo fue.
+        wider = sum(1 for p in probe_dicts if p.get("consejo") == "ampliado")
+        return (
+            f"{reduced} prueba(s) fueron revisadas por el consejo reducido "
+            f"(coherencia con el criterio, realismo y riesgo) y {wider} por el "
+            "consejo completo, que se convoca cuando hay una objeción o un riesgo."
+        )
     if not short:
         return "Todas las pruebas fueron juzgadas por el consejo completo."
     detalle = "; ".join(

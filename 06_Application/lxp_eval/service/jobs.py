@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,7 @@ from urllib.parse import urlparse
 
 from ..evalkit import framework as framework_mod
 from ..evalkit import generator as generator_mod
+from ..evalkit import inventory as inventory_mod
 from ..evalkit import planner as planner_mod
 from ..evalkit import sampling as sampling_mod
 from ..evalkit import report as report_mod
@@ -304,6 +306,15 @@ class Engine:
     #: El planificador y el muestreo (ver `JobRunner.build_plan_document`).
     plan_strategy: Callable[..., Any] = staticmethod(planner_mod.evaluate_strategy)
     plan_sampling: Callable[..., Any] = staticmethod(sampling_mod.propose_sampling)
+    #: El inventario de contenidos navegables, de donde salen los temas del
+    #: muestreo (ver evalkit/inventory.py), y el chequeo de los veredictos de un
+    #: criterio (ver scoring.check_consistency).
+    plan_inventory: Callable[..., Any] = staticmethod(inventory_mod.build_inventory)
+    check_verdicts: Callable[..., Any] = staticmethod(scoring_mod.check_consistency)
+    #: Qué consejo revisa las pruebas que salen de un plan aprobado: "reducido"
+    #: (tres asientos, y los otros cuatro sólo si hay objeción o riesgo) o
+    #: "completo". Ver generator.REDUCED_COUNCIL para el porqué y los números.
+    plan_council: str = os.getenv("EVALKIT_CONSEJO", "reducido")
 
     bank: Any = None
     model: str | None = None
@@ -379,7 +390,7 @@ class JobRunner:
         return self.engine.retry.wrap(MeteredClient(self.engine.client_factory()))
 
     @staticmethod
-    def _fold_client_spend(record: JobRecord, client: Any) -> None:
+    def _fold_client_spend(record: JobRecord, client: Any, stage: str = "") -> None:
         """Add a metered client's accumulated spend + tokens onto the record.
 
         Additive on purpose: build_plan (framework + probes) and _score run at
@@ -387,9 +398,14 @@ class JobRunner:
         browser spend is folded in separately. The record is the one place they
         all sum, and it persists between the two stages.
         """
-        record.spend_usd = round(
-            record.spend_usd + float(getattr(client, "spend_usd", 0.0) or 0.0), 4
-        )
+        spent = float(getattr(client, "spend_usd", 0.0) or 0.0)
+        record.spend_usd = round(record.spend_usd + spent, 4)
+        if stage:
+            # POR ETAPA. La corrida del 2026-11-25 costó USD 73,7 y no había
+            # forma de decir cuánto fue redactar, cuánto ejecutar y cuánto
+            # juzgar: sin eso, "bajar el costo" es adivinar dónde.
+            by = record.spend_by_stage
+            by[stage] = round(float(by.get(stage, 0.0)) + spent, 4)
         record.cache_read_tokens += int(getattr(client, "cache_read_tokens", 0) or 0)
         record.cache_write_tokens += int(getattr(client, "cache_write_tokens", 0) or 0)
 
@@ -542,7 +558,7 @@ class JobRunner:
                 # eran ~$8.70 reales. Mismo pliegue aditivo que las demás
                 # etapas -- el driver expone la misma forma que el cliente
                 # medido (spend_usd + contadores de cache).
-                self._fold_client_spend(record, driver)
+                self._fold_client_spend(record, driver, "recorrido")
         except BaseException as exc:  # noqa: BLE001 -- the message is the product
             self._fail(record, Stage.RECON, "", exc)
             return False
@@ -690,9 +706,13 @@ class JobRunner:
                 message="El muestreo propone cuántas pruebas y sobre qué temas",
             )
             chosen = [d for d in decisions if d["estado"] == planner_mod.SE_PRUEBA]
+            record.content_inventory = await asyncio.to_thread(
+                self._inventory, record, profile, profile_text, client, model,
+            )
+            extra = {"inventory": record.content_inventory} if record.content_inventory else {}
             matrix = await asyncio.to_thread(
                 self.engine.plan_sampling,
-                chosen, profile_text=profile_text, client=client, model=model,
+                chosen, profile_text=profile_text, client=client, model=model, **extra,
             )
             # EL CIERRE CONJUNTO: el planificador integra la matriz y las
             # objeciones del muestreo cambian el plan (ver planner.reconcile).
@@ -700,7 +720,7 @@ class JobRunner:
         except BaseException as exc:  # noqa: BLE001 -- the message is the product
             self._fail(record, Stage.FRAMEWORK, "", exc)
             return record
-        self._fold_client_spend(record, client)
+        self._fold_client_spend(record, client, "plan")
 
         record.strategy = final
         record.sampling_matrix = matrix
@@ -756,6 +776,33 @@ class JobRunner:
             ),
         )
         return record
+
+    def _inventory(
+        self, record: JobRecord, profile: dict | None, profile_text: str, client: Any, model: str,
+    ) -> list[dict]:
+        """Las rutas del menú hasta cada contenido, verificadas contra las pantallas.
+
+        Lee el texto de las pantallas que el recorrido guardó (el campo `texto`
+        de cada parte). Sin pantallas guardadas devuelve vacío y el muestreo
+        trabaja como antes. Que el modelo no arme el inventario no frena el
+        plan; un error de la API sí sube.
+        """
+        folder = self.store.artifacts_dir(record.job_id)
+        trees: list[str] = []
+        for part in (profile or {}).get("partes") or []:
+            name = str(part.get("texto") or "")
+            path = folder / name
+            if name and path.is_file():
+                trees.append(path.read_text(encoding="utf-8", errors="replace"))
+        if not trees:
+            return []
+        try:
+            return self.engine.plan_inventory(
+                profile_text=profile_text, trees=trees, client=client, model=model,
+            )
+        except inventory_mod.InventoryError as exc:
+            logger.warning("no se pudo armar el inventario de contenidos: %s", exc)
+            return []
 
     async def draft_from_plan(
         self, record: JobRecord, *, only: list[str] | None = None
@@ -880,6 +927,13 @@ class JobRunner:
                 # best-effort y perderlo no puede matar la etapa.
                 pass
 
+        # CON UN PLAN APROBADO, CONSEJO REDUCIDO (ver generator.REDUCED_COUNCIL).
+        council_kw: dict = {}
+        if guidance and self.engine.plan_council != "completo":
+            council_kw = {
+                "council": generator_mod.REDUCED_COUNCIL,
+                "escalate_to": generator_mod.COUNCIL,
+            }
         try:
             probeset = await asyncio.to_thread(
                 self.engine.generate_probes,
@@ -912,6 +966,7 @@ class JobRunner:
                 probe_bank=None if guidance else probe_bank,
                 surfaces=surfaces,
                 plan_guidance=guidance,
+                **council_kw,
                 # LO QUE EL RECORRIDO VIO. Sin esto el plan se escribe a ciegas:
                 # el 2026-11-25 costó USD 7,22 de pruebas para un chat libre que
                 # la plataforma no tiene. None cuando no hubo recorrido o el
@@ -923,6 +978,10 @@ class JobRunner:
             return record
 
         record.probes = [serialize.probe_to_dict(g) for g in probeset]
+        if council_kw:
+            small = len(generator_mod.REDUCED_COUNCIL)
+            for p in record.probes:
+                p["consejo"] = "reducido" if len(p.get("judges") or []) <= small else "ampliado"
         if cells is not None:
             # UNA PRUEBA POR CELDA del muestreo aprobado.
             record.probes = [
@@ -946,7 +1005,7 @@ class JobRunner:
         # `client` above. Record it NOW, before the stop -- a job parked at
         # awaiting_approval must still show what it has already cost, and the
         # browser run (which adds its own spend later) may never happen.
-        self._fold_client_spend(record, client)
+        self._fold_client_spend(record, client, "redaccion")
 
         gated = sum(1 for p in record.probes if p["requiresSignoff"])
         message = (
@@ -1073,6 +1132,24 @@ class JobRunner:
                                         "no se pudo volver al inicio antes de %s: %s",
                                         lead.probe_id, exc,
                                     )
+                            # LA PREPARACIÓN DE CADA PRUEBA. En la corrida del
+                            # 2026-11-25 las 120 pruebas usaron la misma cuenta
+                            # de estudiante y su historial se acumuló: las
+                            # tardías encontraron otra plataforma que la que
+                            # suponían sus pasos. Los pasos de preparación (por
+                            # ejemplo, crear un estudiante nuevo) vienen del
+                            # manifiesto, no del código: cada plataforma dice
+                            # cómo se deja limpia. `{n}` es distinto en cada
+                            # prueba. No dejan evidencia; si fallan, la prueba
+                            # se corta con ese motivo.
+                            for prep in record.probe_preamble:
+                                tag = f"{record.job_id[:4]}{i + 1}"
+                                try:
+                                    await driver.do(str(prep).replace("{n}", tag))
+                                except EvalkitError as exc:
+                                    raise EvalkitError(
+                                        f"la preparación de la prueba no se pudo hacer: {exc}"
+                                    ) from exc
                             await self.engine.run_probe(
                                 lead, driver, ledger,
                                 platform=record.platform,
@@ -1140,10 +1217,10 @@ class JobRunner:
                     # the scorer will add its own after this. Overwriting here
                     # threw both away and is the reason the browser run was the
                     # only cost the record ever showed.
-                    record.spend_usd = round(
-                        record.spend_usd
-                        + float(getattr(driver, "spend_usd", 0.0) or 0.0),
-                        4,
+                    ran = float(getattr(driver, "spend_usd", 0.0) or 0.0)
+                    record.spend_usd = round(record.spend_usd + ran, 4)
+                    record.spend_by_stage["ejecucion"] = round(
+                        float(record.spend_by_stage.get("ejecucion", 0.0)) + ran, 4
                     )
                     record.cache_read_tokens += int(
                         getattr(driver, "cache_read_tokens", 0) or 0
@@ -1299,7 +1376,7 @@ class JobRunner:
         # The last uncounted leg: the scorer's own API spend. Framework + probes
         # went onto the record at build_plan, the browser run at execute; this
         # completes the bill.
-        self._fold_client_spend(record, client)
+        self._fold_client_spend(record, client, "juicio")
 
         try:
             markdown = self.engine.render_markdown(criteria, verdicts)
@@ -1361,6 +1438,7 @@ class JobRunner:
             causes = _causes_of(record.report)
             bugs = {k: v for k, v in causes.items() if k in _BUG_CAUSES}
             record.report.setdefault("meta", {})["causasNoEvaluado"] = causes
+            record.report["meta"]["gastoPorEtapa"] = dict(record.spend_by_stage)
             # EL AUTOCHEQUEO DE LA CORRIDA. Que un criterio quede sin evaluar
             # porque hace falta un documento o un estudio es un resultado. Que
             # quede así porque el recorrido no llegó, la prueba se cortó o no
@@ -1460,6 +1538,24 @@ class JobRunner:
             cause = "ejecución fallida" if cut and not thin else "evidencia insuficiente"
             return unscored(cause, f"ninguna prueba se pudo juzgar.{tail} " + " ".join(lines))
 
+        # UN SEGUNDO PAR DE OJOS, antes de que el veredicto salga en el informe
+        # (ver scoring.check_consistency). Si el chequeo objeta, el criterio NO
+        # se puntúa: queda sin evaluar con la causa "juicio en duda" y los
+        # veredictos por prueba a la vista, para volver a juzgarlo. Es una falla
+        # del evaluador y el autochequeo de la corrida la cuenta como tal.
+        check = await asyncio.to_thread(
+            self.engine.check_verdicts, test,
+            [(label, status, str(reason)) for label, status, reason, _ in judged],
+            client, model=self.engine.model,
+        )
+        if not check.get("ok", True):
+            return unscored(
+                "juicio en duda",
+                "los veredictos del juez no se sostienen como están: "
+                f"{check.get('motivo', '')} Veredictos por prueba, sin puntuar: "
+                + " ".join(lines) + tail,
+            )
+
         worth = {scoring_mod.CUMPLE: 1.0, scoring_mod.PARCIAL: 0.5, scoring_mod.NO_CUMPLE: 0.0}
         met = sum(1 for r in judged if r[1] == scoring_mod.CUMPLE)
         statuses = {r[1] for r in judged}
@@ -1501,7 +1597,7 @@ _CAUSE_OF = {
 }
 _BUG_CAUSES = frozenset({
     "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
-    "evidencia insuficiente",
+    "evidencia insuficiente", "juicio en duda",
 })
 
 

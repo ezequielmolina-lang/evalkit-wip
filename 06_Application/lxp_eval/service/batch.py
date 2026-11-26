@@ -126,6 +126,13 @@ class ManifestEntry:
     #: a su vez el del manifiesto o "human"). `load_manifest` deja "" cuando la
     #: entrada no fija una, para que el default se resuelva en un solo lugar.
     approval_policy: str = ""
+    #: Pasos que se ejecutan antes de CADA prueba, para que no herede el estado
+    #: que dejó la anterior (por ejemplo: cambiar de estudiante y entrar con un
+    #: nombre nuevo). `{n}` se reemplaza por algo distinto en cada prueba. Va
+    #: acá y no en el código porque cada plataforma se deja limpia a su manera;
+    #: en la corrida del 2026-11-25 las 120 pruebas compartieron una cuenta y
+    #: las tardías encontraron un historial que sus pasos no suponían.
+    antes_de_cada_prueba: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -194,6 +201,7 @@ def _entry_from(raw: dict, *, index: int, default_risk: str) -> ManifestEntry:
         credentials_ref=str(raw.get("credentials_ref") or ""),
         risk_policy=risk,
         approval_policy=policy,
+        antes_de_cada_prueba=_as_list(raw.get("antes_de_cada_prueba"), "antes_de_cada_prueba"),
     )
 
 
@@ -622,6 +630,7 @@ async def run_batch(
                     documents=documents,
                     approval_policy=policy,
                     plan_corrections=list(corrections or []),
+                    probe_preamble=list(entry.antes_de_cada_prueba),
                 )
                 if blob is not None:
                     store.put_credentials(record.job_id, blob)
@@ -773,8 +782,13 @@ async def run_from_plan(
     approved_by: str,
     only: list[str] | None = None,
     runner_factory: RunnerFactory | None = None,
+    preamble: list[str] | None = None,
 ) -> JobOutcome:
     """Del plan aprobado al informe: redacta por celda, ejecuta y puntúa.
+
+    `preamble` son los pasos de preparación de cada prueba (ver
+    ManifestEntry.antes_de_cada_prueba); si se pasa, reemplaza a los del
+    trabajo, para poder agregarlos a un plan que se hizo sin ellos.
 
     Es el paso que le faltaba al camino "sólo el plan". `approved_by` va tal
     cual al ledger: quién aprobó el documento del plan. Las compuertas no se
@@ -785,6 +799,9 @@ async def run_from_plan(
     record = store.get(job_id)
     if record is None:
         return JobOutcome(job_id, "", "missing", "", 0.0, 0, 0, "el trabajo no existe")
+    if preamble is not None:
+        record.probe_preamble = [str(s) for s in preamble if str(s).strip()]
+        store.save(record)
     runner = (runner_factory or _default_runner_factory)(store, engine or Engine(), box, Clock())
     await runner.draft_from_plan(record, only=only)
     fresh = store.get(job_id) or record
@@ -801,8 +818,17 @@ def _cli_from_plan(args: argparse.Namespace) -> int:
     except ServiceError:
         box = None
     only = [x.strip() for x in (args.solo or "").split(",") if x.strip()] or None
+    preamble = None
+    if getattr(args, "antes_de_cada_prueba", None):
+        try:
+            lines = Path(args.antes_de_cada_prueba).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print(f"no se pudo leer la preparación de cada prueba: {exc}", file=sys.stderr)
+            return EXIT_BAD_MANIFEST
+        preamble = [x.strip() for x in lines if x.strip() and not x.lstrip().startswith("#")]
     outcome = asyncio.run(run_from_plan(
         store, args.job_id, box=box, approved_by=args.aprobado_por, only=only,
+        preamble=preamble,
     ))
     summary = BatchSummary(jobs=[outcome], total_spend_usd=outcome.spend_usd)
     _print_summary(summary)
@@ -932,6 +958,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     fromp.add_argument(
         "--solo", default=None,
         help="ids de criterios separados por coma, para un piloto",
+    )
+    fromp.add_argument(
+        "--antes-de-cada-prueba", default=None,
+        help=(
+            "archivo de texto con un paso por línea, que se ejecuta antes de cada "
+            "prueba (por ejemplo, entrar con un estudiante nuevo); {n} cambia en "
+            "cada prueba"
+        ),
     )
     args = parser.parse_args(argv)
     if args.command == "desde-plan":

@@ -40,6 +40,7 @@ import logging
 import os
 from typing import Any
 
+from ..evalkit.steps import split_marks
 from ..evalkit.errors import EvalkitError
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,18 @@ STEP_DONE_TOOL: dict[str, Any] = {
                     "what stopped you."
                 ),
             },
+            # Agregado tras la corrida del 2026-11-25 (ver evalkit/steps.py):
+            # un paso marcado [SI APARECE] puede no aplicar sin que la prueba
+            # se corte. Va aparte de `accomplished` para que "no apareció" no
+            # se confunda con "lo hice" ni con "no pude".
+            "no_aparecio": {
+                "type": "boolean",
+                "description": (
+                    "Sólo para un paso marcado [SI APARECE]: true si lo que el "
+                    "paso nombra no apareció en la plataforma. En ese caso poné "
+                    "accomplished=false y contá en `reason` qué había en pantalla."
+                ),
+            },
         },
         "required": ["accomplished", "reason"],
     },
@@ -129,7 +142,18 @@ STEP_SYSTEM = (
     "alcanza, terminá con accomplished=false. No uses buscadores ni sitios de "
     "terceros. Si aparece una verificación de humano (captcha, 'no soy un "
     "robot', control de seguridad), no intentes resolverla: terminá con "
-    "accomplished=false y decí que esa verificación lo impidió."
+    "accomplished=false y decí que esa verificación lo impidió.\n\n"
+    # Agregado tras la corrida del 2026-11-25. Veinte pruebas se cortaron
+    # porque el paso nombraba un botón por su texto y la plataforma mostraba
+    # otro que hacía lo mismo; y unas quince gastaron los 30 turnos buscando en
+    # todo el menú algo que no existía.
+    "EL PASO ES UN OBJETIVO. Si nombra un botón por su texto y ese texto no "
+    "está, pero en pantalla hay un control que hace claramente lo mismo, usá "
+    "ese y decilo en `reason`. Si lo que pide no está: leé la página entera una "
+    "vez (con desplazamiento si hace falta) y probá como mucho UN camino obvio "
+    "para llegar. Si sigue sin estar, terminá YA con accomplished=false y "
+    "decí qué había en pantalla. No recorras otras secciones buscándolo: cada "
+    "turno cuesta, y un paso que no se puede hacer no mejora insistiendo."
 )
 
 
@@ -391,8 +415,26 @@ def _step_task(step: str, platform_url: str = "") -> str:
         "(ninguna otra).\n\n"
         if platform_url else ""
     )
+    text, optional, long = split_marks(step)
+    extra = ""
+    if optional:
+        extra += (
+            "\n\nEste paso está marcado [SI APARECE]: depende de algo que la "
+            "plataforma puede mostrar o no. Si aparece, hacelo. Si NO aparece, "
+            "no lo busques ni lo fuerces: llamá a `done` con accomplished=false "
+            "y no_aparecio=true, y contá en `reason` qué había en pantalla. La "
+            "prueba sigue."
+        )
+    if long:
+        extra += (
+            "\n\nEste paso es UN objetivo que lleva varias interacciones "
+            "(por ejemplo, llegar a un contenido por su ruta o responder bien una "
+            "pregunta). Hacé las que hagan falta para ESE objetivo y nada más. "
+            "Si ya estás en parte de la ruta, seguí desde ahí; si estás en otra "
+            "rama del menú, volvé por el menú principal."
+        )
     return (
-        f"{where}Ejecutá este paso en la página actual:\n\n{step}\n\n"
+        f"{where}Ejecutá este paso en la página actual:\n\n{text}{extra}\n\n"
         "Cuando termines, llamá a `done` con accomplished=true si el paso "
         "ocurrió, o accomplished=false y el motivo si no."
     )
@@ -504,8 +546,13 @@ class AgentDriver:
 
     # --- the one method that needs the LLM --------------------------------
 
-    async def do(self, step: str) -> None:
+    async def do(self, step: str) -> str | None:
         """Let the agent accomplish one prose step. Raises if it could not.
+
+        Devuelve None si el paso ocurrió. Devuelve un TEXTO sólo en un caso: el
+        paso estaba marcado [SI APARECE] y lo que nombra no apareció. Ese texto
+        es lo que el agente vio; el runner lo escribe en la nota de la captura
+        (ver evalkit/steps.py para el caso que lo motivó).
 
         Two distinct ways a step fails, and BOTH raise, because run_probe must
         not capture evidence for a step that did not happen:
@@ -516,9 +563,17 @@ class AgentDriver:
           common case in practice and used to pass silently.
         """
         logger.info("agente ejecutando paso: %s", step)
-        result = await self._agent.run(
-            system=STEP_SYSTEM, user_task=_step_task(step, self.platform_url)
-        )
+        _, optional, long = split_marks(step)
+        # Un objetivo de varias interacciones recibe el doble de turnos, y sólo
+        # él: subir el tope para todos fue lo que dejó a quince pruebas gastar
+        # 30 turnos cada una buscando algo que no existía.
+        self._agent.max_iterations = self.max_iterations_per_step * (2 if long else 1)
+        try:
+            result = await self._agent.run(
+                system=STEP_SYSTEM, user_task=_step_task(step, self.platform_url)
+            )
+        finally:
+            self._agent.max_iterations = self.max_iterations_per_step
 
         step_cost = float(getattr(result, "estimated_cost_usd", 0.0) or 0.0)
         self.spend_usd += step_cost
@@ -540,6 +595,10 @@ class AgentDriver:
             raise self._not_done(step, reason)
 
         accomplished = getattr(result, "accomplished", True)
+        if optional and accomplished is False and getattr(result, "not_present", False):
+            seen = str(getattr(result, "done_reason", "") or "").strip()
+            logger.info("paso opcional que no aplicó: %s", seen[:200])
+            return seen or "lo que el paso nombra no apareció"
         if accomplished is not True:
             reason = (
                 getattr(result, "done_reason", None)
@@ -553,6 +612,7 @@ class AgentDriver:
             raise self._not_done(step, reason)
 
         logger.debug("paso completado en %s turnos", getattr(result, "turns", "?"))
+        return None
 
     async def explore(
         self,

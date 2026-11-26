@@ -143,6 +143,16 @@ class JobRecord:
     sampling_matrix: dict = field(default_factory=dict)
     plan_document: dict = field(default_factory=dict)
     plan_corrections: list[dict] = field(default_factory=list)
+    #: Lo que agregó la corrida completa del 2026-11-25 (50 pruebas cortadas,
+    #: USD 73,7 sin saber en qué etapa se fueron):
+    #: `content_inventory`, las rutas del menú hasta cada contenido navegable
+    #: (ver evalkit/inventory.py): de ahí salen los temas del muestreo;
+    #: `probe_preamble`, pasos que se ejecutan antes de CADA prueba (crear un
+    #: estudiante nuevo, por ejemplo) para que una prueba no herede el estado
+    #: que dejó la anterior; y `spend_by_stage`, el gasto separado por etapa.
+    content_inventory: list[dict] = field(default_factory=list)
+    probe_preamble: list[str] = field(default_factory=list)
+    spend_by_stage: dict = field(default_factory=dict)
     #: The reviewed plan exactly as the human approved it.
     approved_plan: dict | None = None
     approved_at: str = ""

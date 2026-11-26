@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import EvalkitError
+from .steps import LONG_MARK
 
 #: Los cinco estados que el planificador puede darle a un criterio.
 SE_PRUEBA = "se_prueba"
@@ -159,7 +160,10 @@ STRATEGY_SYSTEM = (
     "- necesita_estudio: exige un relevamiento con personas o datos de uso; "
     "ninguna pantalla ni documento lo contesta.\n"
     "- no_se_puede_medir: operando el navegador no hay forma de observarlo "
-    "(por ejemplo, un tiempo que la pantalla no muestra). Decí qué haría falta.\n"
+    "(por ejemplo, un tiempo que la pantalla no muestra). Decí qué haría falta. "
+    "Quien ejecuta las pruebas toca, escribe y guarda captura y texto de la "
+    "página: NO mide tiempos ni latencias, no graba video ni audio. Un criterio "
+    "que sólo se zanja cronometrando va acá, no a se_prueba.\n"
     "- falta_recorrer: el criterio se podría probar en una parte que el "
     "recorrido vio y NO recorrió, o que no encontró y podría existir. No lo "
     "des por inexistente: decí qué parte habría que mirar. Es lo que la persona "
@@ -545,9 +549,11 @@ def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
         f"{listing or '  1. única'}\n\n"
         "Escribí los pasos UNA sola vez, de modo que sirvan para todas las celdas, "
         "usando dos marcadores literales que el ejecutor reemplaza:\n"
-        f"- {MARK_TOPIC}: donde se elige el tema o subtema. Escribí el camino "
-        f"completo hasta ahí y, en el paso que elige, 'el subtema {MARK_TOPIC}'. "
-        "Si el criterio no depende del tema, no lo uses.\n"
+        f"- {MARK_TOPIC}: el contenido al que hay que entrar. UN solo paso de "
+        f"navegación: '{LONG_MARK} Ir al contenido {MARK_TOPIC} y abrir su "
+        "actividad'. El ejecutor recibe la ruta completa del menú con el nombre, "
+        "así que NO escribas un paso por nivel. Si el criterio no depende del "
+        "tema, no lo uses.\n"
         f"- {MARK_VARIANT}: lo que distingue a la celda (qué error provocar, qué "
         "mensaje escribir, qué momento mirar). Ponelo en el paso que produce el "
         "estímulo, por ejemplo: 'responder de modo que ocurra esto: "
@@ -576,7 +582,15 @@ def instantiate(probe: dict, cells: list[dict] | None) -> list[dict]:
     out: list[dict] = []
     seen: set[tuple] = set()
     for k, cell in enumerate(cells, start=1):
-        topic = str(cell.get("tema") or "").strip() or "el primer tema disponible"
+        topic = str(cell.get("tema") or "").strip()
+        route = [str(x) for x in (cell.get("ruta") or []) if str(x).strip()]
+        if topic and len(route) > 1:
+            # LA RUTA VIAJA CON EL NOMBRE. Cinco pruebas del 2026-11-25 pidieron
+            # un contenido real por el camino equivocado (estaba bajo otro eje);
+            # quien ejecuta no tiene que adivinar dónde está.
+            topic = f"{topic} (ruta en el menú: {' › '.join(route)})"
+        elif not topic:
+            topic = "el primer contenido disponible del menú"
         variant = str(cell.get("variante") or "").strip() or "la situación habitual"
 
         def fill(text: str) -> str:
@@ -605,7 +619,10 @@ def instantiate(probe: dict, cells: list[dict] | None) -> list[dict]:
             "steps": steps,
             "goal": fill(probe.get("goal", "")),
             "verdictRule": fill(probe.get("verdictRule", "")),
-            "celda": {"n": k, "tema": cell.get("tema", ""), "variante": cell.get("variante", "")},
+            "celda": {
+                "n": k, "tema": cell.get("tema", ""), "variante": cell.get("variante", ""),
+                **({"ruta": route} if route else {}),
+            },
         })
         out.append(inst)
     if len(out) < len(cells):

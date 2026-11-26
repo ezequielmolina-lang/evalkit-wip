@@ -30,6 +30,7 @@ import re
 from typing import Any
 
 from .errors import EvalkitError
+from .inventory import find as find_content, render_inventory
 
 #: Tope de pruebas por criterio. Es un freno de gasto: cada celda es una prueba
 #: entera contra la plataforma.
@@ -72,8 +73,10 @@ SAMPLING_TOOL: dict[str, Any] = {
                                     "tema": {
                                         "type": "string",
                                         "description": (
-                                            "El tema o subtema, con el nombre que "
-                                            "tiene en la plataforma."
+                                            "Un contenido del INVENTARIO, con su "
+                                            "nombre tal cual. Vacío si la prueba no "
+                                            "entra a un contenido (una pantalla del "
+                                            "docente, un panel, una política)."
                                         ),
                                     },
                                     "variante": {
@@ -136,9 +139,12 @@ SAMPLING_SYSTEM = (
     "describila de modo que se pueda provocar en cualquier pregunta del tema "
     "('un error de signo', 'una respuesta apurada', 'pedir ayuda antes de "
     "responder').\n"
-    "- Usá sólo temas que figuren en lo que el recorrido vio, con el nombre que "
-    "tienen en la plataforma. Si el recorrido vio pocos, decilo en el motivo en "
-    "vez de inventar temas.\n"
+    "- El tema es un CONTENIDO en el que el estudiante entra desde el menú, y "
+    "sale del INVENTARIO que recibís, con su nombre tal cual. El nombre de una "
+    "pantalla ('Pantalla de pregunta'), de una pestaña o de la propia prueba NO "
+    "es un tema: si la prueba no entra a un contenido, dejá el tema vacío y "
+    "poné la diferencia en la variante. Si el inventario tiene pocos "
+    "contenidos, decilo en el motivo en vez de inventar temas.\n"
     "- Si un criterio no se puede muestrear como está planteado (la pantalla "
     "señalada no ofrece temas, o la prueba cambiaría datos de otras personas), "
     "poné confirmado=false y la objeción: vuelve al planificador.\n"
@@ -164,8 +170,17 @@ def _tool_input(response: Any, tool_name: str) -> dict:
     )
 
 
-def validate_matrix(rows: Any, wanted: list[str], seen_text: str = "") -> dict[str, dict]:
+def validate_matrix(
+    rows: Any, wanted: list[str], seen_text: str = "", inventory: list[dict] | None = None,
+) -> dict[str, dict]:
     """La matriz que el modelo propuso, pasada por lo que el código no le cree.
+
+    Con `inventory` (ver evalkit/inventory.py), un tema vale sólo si es una
+    hoja del inventario: la celda se lleva su ruta y un tema que no está se
+    BORRA (la prueba corre sin tema fijo) con lo que decía guardado al lado. En
+    la corrida del 2026-11-25, 14 pruebas se cortaron buscando en el menú el
+    nombre de una pantalla, y `tema_no_visto` no las frenó porque ese nombre
+    figuraba en el texto del recorrido.
 
     `wanted` son los criterios que se le dieron; `seen_text`, el texto del
     recorrido (para marcar temas que nadie vio). Un criterio pedido que no
@@ -194,7 +209,15 @@ def validate_matrix(rows: Any, wanted: list[str], seen_text: str = "") -> dict[s
                 continue
             variants.add(key)
             clean = {"tema": topic, "variante": variant}
-            if topic and seen and _norm(topic) not in seen:
+            if inventory and topic:
+                entry = find_content(inventory, topic)
+                if entry is None:
+                    clean["tema"] = ""
+                    clean["tema_descartado"] = topic
+                else:
+                    clean["tema"] = entry["hoja"]
+                    clean["ruta"] = list(entry["ruta"])
+            elif topic and seen and _norm(topic) not in seen:
                 clean["tema_no_visto"] = True
             cells.append(clean)
         limit = MAX_CELLS if sensitive else MAX_INVARIANT
@@ -203,6 +226,11 @@ def validate_matrix(rows: Any, wanted: list[str], seen_text: str = "") -> dict[s
         notes: list[str] = []
         if trimmed:
             notes.append(f"se recortó a {limit} pruebas (tope de gasto por criterio)")
+        dropped = [c["tema_descartado"] for c in cells if c.get("tema_descartado")]
+        if dropped:
+            notes.append(
+                "temas que no son contenidos del inventario, borrados: " + "; ".join(dropped)
+            )
         if not cells:
             cells = [{"tema": "", "variante": "única"}]
             notes.append("el muestreo no propuso celdas: queda una prueba")
@@ -248,6 +276,7 @@ def propose_sampling(
     client: Any,
     model: str,
     max_tokens: int = 16000,
+    inventory: list[dict] | None = None,
 ) -> dict[str, dict]:
     """Una llamada al modelo: la matriz para los criterios que se van a probar.
 
@@ -275,10 +304,17 @@ def propose_sampling(
                 "text": "LO QUE EL RECORRIDO VIO DE LA PLATAFORMA\n" + profile_text,
                 "cache_control": {"type": "ephemeral"},
             },
+            {
+                "type": "text",
+                "text": "INVENTARIO DE CONTENIDOS (los únicos temas válidos)\n"
+                + render_inventory(inventory),
+            },
             {"type": "text", "text": "CRITERIOS QUE EL PLANIFICADOR DECIDIÓ PROBAR\n" + listing},
         ]}],
         tools=[SAMPLING_TOOL],
         tool_choice={"type": "tool", "name": SAMPLING_TOOL_NAME},
     )
     data = _tool_input(response, SAMPLING_TOOL_NAME)
-    return validate_matrix(data.get("filas"), [c["id"] for c in chosen], profile_text)
+    return validate_matrix(
+        data.get("filas"), [c["id"] for c in chosen], profile_text, inventory,
+    )
