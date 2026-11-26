@@ -1890,6 +1890,65 @@ class JobRunner:
 
         results = await judge_all()
         judged, lines, tail, cut, thin = summarize(results)
+        if not judged and thin >= 2:
+            # NINGUNA PRUEBA ALCANZÓ SOLA, PERO HAY VARIAS COMPLETAS: se juzgan
+            # JUNTAS, una vez. En la verificación en vivo del 2026-11-26 un
+            # criterio (PT-D8-01) tuvo sus seis pruebas completas y quedó sin
+            # veredicto: su regla pide mirar una MUESTRA de unas doce preguntas
+            # de subtemas distintos, y cada prueba, juzgada sola, traía tres de
+            # un subtema. Los seis juicios dijeron lo mismo y con razón ("acá
+            # hay tres preguntas de un subtema, no una muestra"), con dieciocho
+            # preguntas de seis subtemas guardadas en el ledger. Juzgar por
+            # celda es lo correcto cuando la regla se puede contestar en una
+            # pantalla; cuando la regla habla de un conjunto, el conjunto es la
+            # evidencia.
+            #
+            # Sólo cuando NINGUNA celda dio veredicto: si alguna lo dio, la regla
+            # se contesta por celda y las demás quedan como "sin evidencia
+            # suficiente", que es lo que son. Y el veredicto conjunto dice que
+            # lo es, porque no es "en x de n".
+            together = [
+                r for p in to_judge for r in rows if r.get("probe_id") == p.probe_id
+            ]
+            # El texto de las páginas, no las capturas: seis pruebas son decenas
+            # de imágenes, y lo que se compara entre contenidos está en el texto.
+            # Pero sólo si TODAS las pruebas guardaron texto: dejar afuera a la
+            # que sólo tiene capturas sería juzgar "el conjunto" sin ella.
+            text_only = [r for r in together if r.get("kind") == runner_mod.PAGE_TEXT]
+            with_text = {r.get("probe_id") for r in text_only}
+            on_text = bool(text_only) and all(p.probe_id in with_text for p in to_judge)
+            pooled_rows = text_only if on_text else together
+            said = "\n".join(x for x in (reading, (
+                f"JUICIO CONJUNTO. Ninguna de las {len(to_judge)} pruebas de este "
+                "criterio alcanzó sola para decidir. Abajo está la evidencia de "
+                "TODAS juntas (cada artefacto dice de qué prueba es en su ruta). "
+                "Si la regla habla de una muestra, de un conjunto o de comparar "
+                "entre contenidos, juzgala sobre el conjunto. Si aun juntas no "
+                "muestran el hecho que la regla pregunta, el veredicto es "
+                "NO_EVALUADO."
+            )) if x)
+            pooled = await asyncio.to_thread(
+                self.engine.score_test, test, pooled_rows, client,
+                platform=record.platform, repeats=1, model=self.engine.model,
+                reading=said,
+            )
+            if pooled.status in scoring_mod.SCORED:
+                return scoring_mod.TestVerdict(
+                    test_id=test.id, platform=record.platform, status=pooled.status,
+                    points_earned=pooled.points_earned,
+                    points_possible=pooled.points_possible,
+                    rationale=(
+                        f"JUICIO CONJUNTO de {len(to_judge)} prueba(s): ninguna "
+                        "alcanzaba sola para decidir y se juzgaron juntas, una "
+                        "vez"
+                        + (", sobre el texto guardado de sus páginas" if on_text else "")
+                        + f".{tail} "
+                        f"{pooled.rationale} Juicios por prueba, sin puntuar: "
+                        + " ".join(lines)
+                    ),
+                    evidence=list(pooled.evidence), runs=[pooled.status],
+                )
+            lines.append(f"[juntas] NO_EVALUADO. {str(pooled.rationale)[:600]}")
         if not judged:
             cause = "ejecución fallida" if cut and not thin else "evidencia insuficiente"
             return unscored(cause, f"ninguna prueba se pudo juzgar.{tail} " + " ".join(lines))

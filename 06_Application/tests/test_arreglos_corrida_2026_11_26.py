@@ -757,3 +757,60 @@ def test_the_plan_sends_the_explorer_back_and_decides_again(tmp_path, env):  # n
 def test_direct_capture_still_marks_the_note():
     """El paso que sólo mira sigue avisando que nadie comprobó la pantalla."""
     assert "CAPTURA DIRECTA" in _note(2, "Guardar la solución paso a paso.", skipped=DIRECT)
+
+
+# --- 10. cuando la regla pide una muestra, se juzga el conjunto --------------
+
+
+def _con_juez_por_conjunto(tmp_path, veredicto_conjunto):
+    """Un juez que no decide con UNA prueba y sí (o no) con todas juntas."""
+    llamadas: list[tuple[int, str, set]] = []
+
+    def score(test, rows, client, *, platform=None, reading="", **kw):
+        pruebas = {r.get("probe_id") for r in rows}
+        llamadas.append((len(pruebas), reading, {r.get("kind") for r in rows}))
+        juntas = len(pruebas) > 1
+        status = veredicto_conjunto if juntas else scoring.NO_EVALUADO
+        scored = status in scoring.SCORED
+        return scoring.TestVerdict(
+            test_id=test.id, platform=platform or "", status=status,
+            points_earned=float(test.points) if status == scoring.CUMPLE else 0.0,
+            points_possible=float(test.points) if scored else 0.0,
+            rationale=(
+                "las tres pruebas suman una muestra de tres subtemas" if juntas
+                else "acá hay un solo subtema, no una muestra"
+            ),
+            evidence=[str(rows[0]["artifact"])] if scored else [], runs=[status],
+        )
+
+    store, engine, job_id = _plan(tmp_path, score_test=score)
+    return store, engine, job_id, llamadas
+
+
+def test_a_rule_about_a_sample_is_judged_on_all_the_probes_together(tmp_path, env):  # noqa: F811
+    """PT-D8-01: seis pruebas completas, seis juicios 'no es una muestra', ningún veredicto."""
+    store, engine, job_id, llamadas = _con_juez_por_conjunto(tmp_path, scoring.CUMPLE)
+    probados = [d["id"] for d in store.get(job_id).strategy if d["estado"] == "se_prueba"]
+    _correr(store, engine, job_id)
+
+    fila = _fila(store, job_id, probados[0])
+    assert fila["verdict"] == "CUMPLE"
+    assert fila["rationale"].startswith("JUICIO CONJUNTO de 3 prueba(s)")
+    assert "Juicios por prueba, sin puntuar" in fila["rationale"], \
+        "el informe dice que no es un 'en x de n'"
+    assert fila["evidence"], "y cita un artefacto que el juez recibió"
+    conjuntas = [c for c in llamadas if c[0] > 1]
+    assert conjuntas and all("JUICIO CONJUNTO" in c[1] for c in conjuntas)
+    assert all(c[0] == 3 for c in conjuntas), \
+        "ninguna prueba queda afuera del conjunto, tampoco la que sólo tiene capturas"
+
+
+def test_if_not_even_together_they_are_enough_the_criterion_stays_unevaluated(tmp_path, env):  # noqa: F811
+    store, engine, job_id, _ = _con_juez_por_conjunto(tmp_path, scoring.NO_EVALUADO)
+    probados = [d["id"] for d in store.get(job_id).strategy if d["estado"] == "se_prueba"]
+    _correr(store, engine, job_id)
+
+    fila = _fila(store, job_id, probados[0])
+    assert fila["verdict"] == "NO_EVALUADO"
+    assert fila["rationale"].startswith("[causa: evidencia insuficiente]")
+    assert "[juntas] NO_EVALUADO" in fila["rationale"]
