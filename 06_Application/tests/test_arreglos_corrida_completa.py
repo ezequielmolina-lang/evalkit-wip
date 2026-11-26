@@ -535,7 +535,7 @@ def test_a_variant_that_describes_a_sequence_does_not_turn_one_step_into_many():
          "steps": [{"n": 1, "action": "Responder de modo que ocurra esto: [VARIANTE]"}]},
         [{"tema": "", "variante": "Secuencia que mezcla aciertos y errores"}],
     )[0]
-    assert "hacé una sola acción" in inst["steps"][0]["action"]
+    assert "respondé una sola pregunta" in inst["steps"][0]["action"]
 
 
 def test_the_navigation_step_gets_the_whole_route():

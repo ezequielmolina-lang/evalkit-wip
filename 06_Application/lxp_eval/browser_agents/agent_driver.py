@@ -161,7 +161,19 @@ STEP_SYSTEM = (
     "vez (con desplazamiento si hace falta) y probá como mucho UN camino obvio "
     "para llegar. Si sigue sin estar, terminá YA con accomplished=false y "
     "decí qué había en pantalla. No recorras otras secciones buscándolo: cada "
-    "turno cuesta, y un paso que no se puede hacer no mejora insistiendo."
+    "turno cuesta, y un paso que no se puede hacer no mejora insistiendo.\n\n"
+    # Agregado tras la primera tanda con el modelo liviano (2026-11-25). Un
+    # ítem pedía dos cosas seguidas (en qué paso está el error y después qué
+    # error es). El paso decía "elegir una opción incorrecta", el agente eligió
+    # en la primera parte y cerró; el paso siguiente, "avanzar", no encontró
+    # con qué avanzar porque el ítem seguía abierto, y la prueba se cortó.
+    "RESPONDER ES DEJAR LA PREGUNTA RESPONDIDA. Si el paso pide responder o "
+    "elegir en una pregunta y, después de tu elección, la plataforma pide otra "
+    "parte de ESA MISMA pregunta antes de darla por respondida (por ejemplo, "
+    "primero en qué paso está el error y después qué error es), respondé "
+    "también esa parte, en el mismo sentido que pide el paso (acertar o "
+    "errar). El paso termina cuando la plataforma muestra su devolución o "
+    "deja avanzar. Eso no es pasar a otro paso: es terminar este."
 )
 
 
