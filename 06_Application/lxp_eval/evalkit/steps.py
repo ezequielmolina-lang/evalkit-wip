@@ -69,6 +69,42 @@ def with_mark(step: str, mark: str) -> str:
 
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"|«[^»]*»|“[^”]*”")
 
+#: Un paso que sólo mira: empieza por guardar o capturar algo de la pantalla...
+_OBSERVES = re.compile(
+    r"^(guardar|capturar|registrar|tomar|anotar|copiar|sacar)\b.{0,40}?"
+    r"\b(captura|texto|pantalla|recuadro|bloque)\b",
+    re.IGNORECASE,
+)
+#: ...y no encadena después una acción sobre la página. "Después de responder la
+#: tercera pregunta" NO es una acción: dice cuándo se mira. Por eso sólo cuenta
+#: un verbo de acción que venga coordinado ("y luego tocar", "; avanzar").
+_THEN_ACTS = re.compile(
+    r"(\by\s+(luego\s+|despu[eé]s\s+)?|;\s*|\bluego\s+)"
+    r"(tocar|responder|escribir|enviar|avanzar|elegir|seleccionar|abrir|ir a|volver|"
+    r"confirmar|pulsar|presionar|hacer clic|ingresar|entrar)\b",
+    re.IGNORECASE,
+)
+
+
+def is_observation(step: str) -> bool:
+    """¿Este paso sólo mira lo que ya está en pantalla?
+
+    POR QUÉ. En la verificación en vivo del 2026-11-25 se cortaron 7 pruebas y 6
+    fueron por un paso así: "Guardar captura y texto de la tercera pregunta que
+    aparezca". La tercera pregunta ESTABA en pantalla (las capturas anteriores
+    muestran tres preguntas distintas, una tras otra). Quien ejecuta no tiene
+    memoria de los pasos anteriores, miró el indicador de avance (que mide
+    dominio, no cuenta preguntas), concluyó que no era la tercera y gastó los 20
+    turnos respondiendo preguntas para "llegar". Un paso que no pide hacer nada
+    no puede costar 20 turnos ni cortar una prueba por una cuenta que no es suya:
+    quien ejecuta lo trata aparte (ver agent_driver).
+
+    Conservador a propósito: ante la duda es un paso común, con sus turnos.
+    """
+    text, _, _ = split_marks(step)
+    bare = _QUOTED.sub("''", text)
+    return bool(_OBSERVES.search(bare)) and not _THEN_ACTS.search(bare)
+
 _CONDITIONAL = re.compile(
     r"(^|[.;:,(]\s*|\by\s+)(si|en caso de que|en caso de|de ser as[ií]|de lo contrario|"
     r"si no|cuando aparezca|cuando se muestre|siempre que)\b",

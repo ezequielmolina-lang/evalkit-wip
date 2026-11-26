@@ -685,6 +685,13 @@ DRAFT_SYSTEM = (
     "objetivos.\n"
     "- Nada de grabar la pantalla, cronometrar ni medir tiempos: quien ejecuta "
     "sólo opera la página y guarda captura y texto.\n"
+    # Verificación en vivo del 2026-11-25: "guardar el tercer ítem (enunciado
+    # y las 4 opciones)" cayó sobre un ítem de otro tipo, sin cuatro opciones,
+    # y quien ejecuta lo dio por no encontrado.
+    "- Un paso que sólo guarda captura y texto va SOLO (no se junta con una "
+    "acción) y dice qué se mira, sin suponer su forma: 'guardar la pregunta que "
+    "quedó en pantalla', no 'guardar el enunciado y las 4 opciones'. La "
+    "plataforma puede mostrar otro tipo de pregunta.\n"
     "- Describí QUÉ tiene que lograr la plataforma, nunca CÓMO la implementa un "
     "producto en particular: otra arquitectura puede cumplir el mismo criterio de "
     "otra manera, y castigarla por eso es un error de medición.\n"

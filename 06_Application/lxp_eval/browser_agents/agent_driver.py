@@ -40,7 +40,7 @@ import logging
 import os
 from typing import Any
 
-from ..evalkit.steps import split_marks
+from ..evalkit.steps import is_observation, split_marks
 from ..evalkit.errors import EvalkitError
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,11 @@ logger = logging.getLogger(__name__)
 #: 20 fits a multi-hop navigation while staying a bounded runaway guard. A step
 #: that needs more than this is a step that should be split.
 DEFAULT_MAX_ITERATIONS_PER_STEP = int(os.getenv("LXP_MAX_ITERS_PER_STEP", "20"))
+
+#: Topes más bajos para los dos pasos que no actúan sobre la página: el que sólo
+#: mira y el que puede no aplicar. Ver AgentDriver._turns_for.
+OBSERVE_MAX_ITERATIONS = int(os.getenv("LXP_OBSERVE_MAX_ITERS", "5"))
+OPTIONAL_MAX_ITERATIONS = int(os.getenv("LXP_OPTIONAL_MAX_ITERS", "8"))
 
 #: A single step should cost cents, not dollars. Second bound in case the page
 #: is huge and each turn carries a big accessibility tree.
@@ -417,6 +422,24 @@ def _step_task(step: str, platform_url: str = "") -> str:
     )
     text, optional, long = split_marks(step)
     extra = ""
+    if is_observation(step):
+        # Ver steps.is_observation: seis pruebas cortadas por dudar de "la
+        # tercera pregunta" con la tercera pregunta en pantalla.
+        extra += (
+            "\n\nEste paso es de OBSERVACIÓN: no pide responder, avanzar ni "
+            "escribir. La captura y el texto los guarda el evaluador en cuanto "
+            "termines; vos no tenés que guardarlos. La cuenta (primera, tercera, "
+            "cuarto ítem...) la llevan los pasos anteriores, que ya se hicieron: "
+            "lo que está en pantalla AHORA es lo que el paso nombra. No la "
+            "verifiques contra indicadores de avance, y no respondas ni avances "
+            "preguntas para 'llegar'. Si lo que hay que mirar está plegado en "
+            "esta misma pantalla, desplegalo; nada más. Terminá con "
+            "accomplished=true y contá en `reason` qué hay en pantalla, aunque "
+            "su forma no sea la que el paso supone (otro tipo de pregunta, otro "
+            "número de opciones). Sólo accomplished=false si en pantalla no hay "
+            "nada de lo que el paso nombra (por ejemplo, el menú en vez de una "
+            "actividad)."
+        )
     if optional:
         extra += (
             "\n\nEste paso está marcado [SI APARECE]: depende de algo que la "
@@ -544,6 +567,27 @@ class AgentDriver:
             return False
         return bool(await reopen(self.platform_url))
 
+    def _turns_for(self, step: str, *, optional: bool, long: bool) -> int:
+        """Cuántos turnos puede gastar este paso.
+
+        El tope común (20) es un freno para un paso que ACTÚA. En la
+        verificación en vivo del 2026-11-25, siete pruebas lo gastaron entero
+        en pasos que no lo merecían: seis en un paso que sólo pedía mirar la
+        pantalla, y una en un paso [SI APARECE] buscando un campo de texto que
+        no estaba. Mirar lleva dos o tres turnos (leer, quizá desplegar,
+        cerrar); decidir que algo no apareció, pocos más. El tope más bajo no
+        cambia el resultado de un paso que anda y abarata cuatro veces el que
+        no.
+        """
+        base = self.max_iterations_per_step
+        if long:
+            return base * 2
+        if is_observation(step):
+            return min(base, OBSERVE_MAX_ITERATIONS)
+        if optional:
+            return min(base, OPTIONAL_MAX_ITERATIONS)
+        return base
+
     # --- the one method that needs the LLM --------------------------------
 
     async def do(self, step: str) -> str | None:
@@ -567,7 +611,7 @@ class AgentDriver:
         # Un objetivo de varias interacciones recibe el doble de turnos, y sólo
         # él: subir el tope para todos fue lo que dejó a quince pruebas gastar
         # 30 turnos cada una buscando algo que no existía.
-        self._agent.max_iterations = self.max_iterations_per_step * (2 if long else 1)
+        self._agent.max_iterations = self._turns_for(step, optional=optional, long=long)
         try:
             result = await self._agent.run(
                 system=STEP_SYSTEM, user_task=_step_task(step, self.platform_url)

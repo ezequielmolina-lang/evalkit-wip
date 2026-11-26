@@ -207,6 +207,50 @@ def test_only_a_long_step_gets_more_turns(tmp_path):
     assert agente.max_iterations == 12, "el tope vuelve a su valor"
 
 
+def test_a_step_that_only_looks_is_recognised_and_one_that_acts_is_not():
+    """Los pasos reales de la verificación en vivo del 2026-11-25: seis pruebas
+    se cortaron en uno que sólo pedía mirar, con lo que nombraba ya en pantalla."""
+    miran = [
+        "Guardar captura y texto de la tercera pregunta tal como aparece.",
+        "Guardar captura y texto de lo que la plataforma muestra inmediatamente "
+        "después de responder la tercera pregunta.",
+        "Guardar captura y texto del cuarto ítem que aparezca (enunciado completo y las 4 opciones).",
+        "Capturar la pantalla de la solución paso a paso, incluyendo el recuadro 'PARA RECORDAR'.",
+        f"{st.OPTIONAL_MARK} Capturar el recuadro de sugerencia de repaso (por ejemplo "
+        "'Parece que te conviene repasar' con el botón 'Ir a repasar') y guardar su texto.",
+        "Guardar el texto completo del bloque 'PARA RECORDAR' tal como aparece en pantalla.",
+    ]
+    actuan = [
+        "Avanzar a la siguiente pregunta (por ejemplo, 'Siguiente pregunta').",
+        "En el segundo ítem, responder eligiendo la opción correcta.",
+        "Guardar captura de la pregunta y luego tocar una opción incorrecta.",
+        "Capturar la pantalla y avanzar a la siguiente pregunta.",
+        f"{st.LONG_MARK} Ir al contenido X y abrir su primera actividad.",
+        "Registrar al estudiante con el nombre Evalkit 3.",
+    ]
+    assert all(st.is_observation(p) for p in miran), [p for p in miran if not st.is_observation(p)]
+    assert not any(st.is_observation(p) for p in actuan), [p for p in actuan if st.is_observation(p)]
+
+
+def test_a_step_that_only_looks_gets_few_turns_and_is_told_not_to_count(tmp_path):
+    """Con 20 turnos, un paso de mirar que dudó de "la tercera pregunta" los
+    gastó todos respondiendo preguntas para llegar a una que ya tenía delante."""
+    agente = _Agente([_res(), _res(), _res()])
+    driver = ad.AgentDriver(agente, _Navegador(tmp_path), max_iterations_per_step=20)
+    asyncio.run(driver.do("Guardar captura y texto de la tercera pregunta tal como aparece."))
+    asyncio.run(driver.do(f"{st.OPTIONAL_MARK} Confirmar con el tutor el error que propone."))
+    asyncio.run(driver.do("Tocar una opción."))
+    assert agente.topes == [ad.OBSERVE_MAX_ITERATIONS, ad.OPTIONAL_MAX_ITERATIONS, 20]
+
+    tarea = ad._step_task("Guardar captura y texto de la tercera pregunta tal como aparece.")
+    assert "OBSERVACIÓN" in tarea and "No la verifiques contra indicadores de avance" in tarea
+    assert "OBSERVACIÓN" not in ad._step_task("Tocar una opción.")
+
+
+def test_the_drafter_is_told_a_capture_step_does_not_assume_a_shape():
+    assert "sin suponer su forma" in gen.DRAFT_SYSTEM
+
+
 def test_the_agent_is_told_to_stop_looking_early():
     assert "terminá YA con accomplished=false" in ad.STEP_SYSTEM
     assert "EL PASO ES UN OBJETIVO" in ad.STEP_SYSTEM
