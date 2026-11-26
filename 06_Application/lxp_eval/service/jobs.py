@@ -51,6 +51,7 @@ from ..evalkit import sampling as sampling_mod
 from ..evalkit import report as report_mod
 from ..evalkit import runner as runner_mod
 from ..evalkit import scoring as scoring_mod
+from ..evalkit import usage as usage_mod
 from ..evalkit.framework import Document
 from ..evalkit.ledger import EvidenceLedger, rows_since
 from ..evalkit.errors import EvalkitError
@@ -330,6 +331,13 @@ class Engine:
     #: El planificador y el muestreo (ver `JobRunner.build_plan_document`).
     plan_strategy: Callable[..., Any] = staticmethod(planner_mod.evaluate_strategy)
     plan_sampling: Callable[..., Any] = staticmethod(sampling_mod.propose_sampling)
+    #: El alcance: de quién es el rol que mira cada criterio y de qué país y
+    #: materia son los hechos de su regla (ver evalkit/usage.py). Corre ANTES
+    #: que el planificador y sólo si el config de la plataforma declara un
+    #: modelo de uso o un contexto. `usage_for` dice de dónde sale esa
+    #: declaración; None = del config.yaml de la plataforma.
+    plan_scope: Callable[..., Any] = staticmethod(usage_mod.classify_scope)
+    usage_for: Callable[..., Any] | None = None
     #: El inventario de contenidos navegables, de donde salen los temas del
     #: muestreo (ver evalkit/inventory.py), y el chequeo de los veredictos de un
     #: criterio (ver scoring.check_consistency).
@@ -653,6 +661,8 @@ class JobRunner:
         # ANTES del cliente, no sólo antes de `build_framework`: construirlo ya
         # es haber decidido gastar, y el envoltorio de reintentos lee
         # `client.messages` en el momento de construirse.
+        if not self._usage_declared_ok(record):
+            return record
         if not await self._recon(record):
             return record
 
@@ -661,7 +671,15 @@ class JobRunner:
         result = await self._framework(record, client)
         if result is None:
             return record
-        return await self._probes(record, client, result.criteria())
+        # EL ALCANCE TAMBIÉN POR ACÁ. Este es el camino que usan la API y el
+        # lote sin `plan_only`: si sólo el camino del documento de plan
+        # leyera el modelo de uso, una plataforma que lo declara volvería a
+        # recibir pruebas por lo que hace el docente con sólo entrar por la
+        # otra puerta.
+        criteria = await self._scoped_criteria(record, client, result.criteria())
+        if criteria is None:
+            return record
+        return await self._probes(record, client, criteria)
 
     async def _framework(self, record: JobRecord, client: Any) -> Any:
         """Selecciona los criterios y clasifica su observabilidad. None = murió acá."""
@@ -716,6 +734,8 @@ class JobRunner:
         aprobado es el paso siguiente y todavía no existe: hasta entonces, un
         trabajo en `plan_ready` no se puede aprobar ni ejecutar.
         """
+        if not self._usage_declared_ok(record):
+            return record
         if not await self._recon(record):
             return record
         client = self._client()
@@ -738,11 +758,18 @@ class JobRunner:
             message="El planificador decide qué se prueba y qué no",
         )
         try:
+            # EL ALCANCE VA PRIMERO (ver `scope_criteria`): lo que es del
+            # docente o de otro país no llega al planificador, así que no
+            # puede salir de él como "se prueba".
+            in_scope = await self.scope_criteria(record, client)
             decisions = await asyncio.to_thread(
                 self.engine.plan_strategy,
-                list(record.criteria),
+                in_scope,
                 profile=profile, profile_text=profile_text,
                 client=client, model=model, documents=doc_names,
+            ) if in_scope else []
+            decisions = planner_mod.with_scope(
+                list(decisions or []), list(record.criteria), record.scope
             )
             # LO QUE EL PLANIFICADOR PIDIÓ MIRAR, SE MIRA (ver `revisit_pending`).
             record.strategy = decisions
@@ -767,6 +794,10 @@ class JobRunner:
             # EL CIERRE CONJUNTO: el planificador integra la matriz y las
             # objeciones del muestreo cambian el plan (ver planner.reconcile).
             final = planner_mod.reconcile(decisions, matrix)
+            # El recorrido dirigido vuelve a decidir algunos criterios; el
+            # alcance se aplica otra vez al final para que ninguno de esos
+            # vuelva a entrar por la ventana.
+            planner_mod.enforce_scope(final, list(record.criteria), record.scope)
         except BaseException as exc:  # noqa: BLE001 -- the message is the product
             self._fail(record, Stage.FRAMEWORK, "", exc)
             return record
@@ -788,6 +819,7 @@ class JobRunner:
                 objective=record.objective, profile=profile, decisions=final,
                 documents=doc_names, spend_usd=record.spend_usd,
                 version=version, corrections=record.plan_corrections,
+                criteria=list(record.criteria), usage=record.usage,
             )
             plan["cambios"] = planner_mod.diff_plans(previous, plan)
             (job_dir / "plan.json").write_text(
@@ -821,11 +853,159 @@ class JobRunner:
             message=(
                 f"Plan listo para tu revisión: {counts['se_prueba']} criterios se "
                 f"prueban ({counts['pruebas']} pruebas), {counts['no_se_puede']} no se "
-                f"pueden evaluar, {counts['indefinido']} quedaron indefinidos y hacen "
-                f"falta {counts['documentos']} documento(s).{gaps}"
+                f"pueden evaluar, {counts['indefinido']} quedaron indefinidos, "
+                f"{counts.get('fuera_de_alcance', 0)} están fuera del alcance de la "
+                f"plataforma y hacen falta {counts['documentos']} documento(s).{gaps}"
             ),
         )
         return record
+
+    def _usage_declared_ok(self, record: JobRecord) -> bool:
+        """Lee el modelo de uso ANTES de gastar. False = el config está mal y el trabajo falló.
+
+        Un `modelo_de_uso` mal escrito es un error con archivo y línea (ver
+        usage.parse_usage). Leerlo recién al planear lo hacía aparecer
+        después de pagar el recorrido y el marco; acá cuesta cero.
+        """
+        try:
+            self.usage_of(record)
+        except EvalkitError as exc:
+            self._fail(record, record.stage or Stage.FRAMEWORK, "", exc)
+            return False
+        return True
+
+    def _mark_out_of_scope(self, record: JobRecord) -> list[str]:
+        """Escribe en cada criterio fuera de alcance por qué no se evalúa. Devuelve sus ids.
+
+        Es lo que hace `draft_from_plan` con la decisión del plan, para el
+        camino que no tiene plan: el informe lee la causa del criterio.
+        """
+        decided = {
+            d["id"]: d for d in planner_mod.with_scope([], list(record.criteria), record.scope)
+            if d["estado"] in planner_mod.OUT_OF_SCOPE
+        }
+        for c in record.criteria:
+            d = decided.get(str(c.get("id")))
+            if d is None:
+                continue
+            c.setdefault("observabilityOriginal", c.get("observability", ""))
+            c["observability"] = _OBSERVABILITY_OF[d["estado"]]
+            c["observabilityReason"] = f"[causa: {_CAUSE_OF[d['estado']]}] {d.get('motivo', '')}".strip()
+            c["evidenciaRequerida"] = d.get("evidencia_requerida") or c.get("evidenciaRequerida", "")
+        return list(decided)
+
+    async def _scoped_criteria(self, record: JobRecord, client: Any, criteria: Any) -> Any:
+        """Los criterios a redactar, sin los que están fuera de alcance. None = falló.
+
+        Para el camino sin documento de plan (`build_plan`). Quita del
+        conjunto a redactar los criterios del docente y los mal
+        localizados, deja escrita su causa, y reemplaza el texto de los
+        corregidos por el corregido.
+        """
+        try:
+            in_scope = await self.scope_criteria(record, client)
+        except BaseException as exc:  # noqa: BLE001 -- the message is the product
+            self._fail(record, Stage.FRAMEWORK, "", exc)
+            return None
+        if not record.scope:
+            return criteria
+        self._mark_out_of_scope(record)
+        self.store.save(record)
+        keep = {str(c.get("id")): c for c in in_scope}
+        domains = []
+        for domain in criteria.domains:
+            tests = [
+                replace(
+                    t,
+                    name=keep[t.id].get("name") or t.name,
+                    verification=keep[t.id].get("verification") or t.verification,
+                    pass_criteria=keep[t.id].get("passCriteria") or t.pass_criteria,
+                    fail_criteria=keep[t.id].get("failCriteria") or t.fail_criteria,
+                )
+                for t in domain.tests if t.id in keep
+            ]
+            if tests:
+                domains.append(replace(domain, tests=tests, points=sum(t.points for t in tests)))
+        return replace(criteria, domains=domains)
+
+    def usage_of(self, record: JobRecord) -> "usage_mod.UsageModel":
+        """El modelo de uso y el contexto que declara la plataforma de este trabajo.
+
+        Sale del `config.yaml` de la plataforma (la misma carpeta de donde
+        salen su login y sus hosts permitidos) y se guarda en el trabajo:
+        el plan, la redacción y el informe leen una sola declaración, y un
+        config que cambie después no reescribe un plan ya aprobado. Una
+        plataforma sin carpeta propia (una dirección suelta) no declara
+        nada, y el plan lo dice arriba.
+        """
+        if record.usage:
+            return usage_mod.UsageModel.from_dict(record.usage)
+        if self.engine.usage_for is not None:
+            found = self.engine.usage_for(record)
+            usage = (
+                found if isinstance(found, usage_mod.UsageModel)
+                else usage_mod.UsageModel.from_dict(found)
+            )
+        else:
+            from ..config import CONFIG
+            from ..platform_loader import PlatformNotFound, resolve_platform_dir
+
+            try:
+                key = resolve_platform_dir(record.platform_url, CONFIG.platforms_dir)
+            except PlatformNotFound:
+                return usage_mod.UsageModel()
+            usage = usage_mod.load_usage(key, platforms_dir=CONFIG.platforms_dir)
+        if usage.declared:
+            record.usage = usage.as_dict()
+        return usage
+
+    async def scope_criteria(self, record: JobRecord, client: Any) -> list[dict]:
+        """Clasifica el alcance de CADA criterio antes de planear. Devuelve los que siguen.
+
+        POR QUÉ. En la corrida completa del 2026-11-26 cuatro NO_CUMPLE no
+        eran de la plataforma: tres miraban algo que en ese modelo de uso
+        hace el docente y uno pedía el dato de otro país (ver
+        evalkit/usage.py). Se planearon como "se prueba" porque el plan no
+        tenía de dónde saber quién hace qué.
+
+        Deja en el trabajo `record.scope` (una fila por criterio) y los
+        criterios corregidos con los hechos del contexto, con el texto
+        original al lado. Devuelve sólo los criterios que el planificador
+        tiene que decidir: los del docente y los mal localizados no le
+        llegan (ver planner.with_scope).
+
+        Sin modelo de uso ni contexto declarados no gasta una llamada y
+        devuelve todos: es el comportamiento de antes, y el plan avisa.
+        """
+        usage = self.usage_of(record)
+        overrides = usage_mod.scope_overrides(record.plan_corrections)
+        if not usage.classifiable and not overrides:
+            record.scope = []
+            return list(record.criteria)
+        if not usage.classifiable:
+            # Nadie declaró nada, pero una persona fijó el alcance de algún
+            # criterio al revisar el plan: eso vale, y no cuesta una llamada.
+            scope = usage_mod.validate_scope(
+                [], list(record.criteria), usage, overrides=overrides
+            )
+        else:
+            scope = await asyncio.to_thread(
+                self.engine.plan_scope,
+                list(record.criteria),
+                usage=usage, client=client,
+                model=self.engine.model or _configured_model(),
+                overrides=overrides,
+            )
+        record.scope = list(scope or [])
+        rows = {str(r.get("id")): r for r in record.scope}
+        record.criteria = [
+            usage_mod.localized(c, rows.get(str(c.get("id")))) for c in record.criteria
+        ]
+        self.store.save(record)
+        return [
+            c for c in record.criteria
+            if not planner_mod.out_of_scope_state(rows.get(str(c.get("id"))))
+        ]
 
     async def revisit_pending(self, record: JobRecord, client: Any) -> list[str]:
         """Recorre de forma dirigida lo que el plan dejó en "falta recorrer".
@@ -1007,6 +1187,24 @@ class JobRunner:
         moved = planner_mod.reclassify_unmeasurable(record.strategy, record.criteria)
         if moved:
             logger.info("criterios que piden cronómetro, pasan a no medibles: %s", ", ".join(moved))
+        # Y un plan guardado antes del alcance, o tocado a mano después, puede
+        # traer como "se prueba" un criterio del docente o de otro país: el
+        # alcance se aplica acá otra vez (ver planner.enforce_scope). Si el
+        # plan es anterior a la regla no tiene clasificación guardada: se
+        # clasifica ahora, con lo que el config declare hoy. Sólo puede sacar
+        # pruebas o corregir un dato; nunca agrega una prueba que la persona
+        # no aprobó.
+        if not record.scope:
+            try:
+                scope_client = self._client()
+                await self.scope_criteria(record, scope_client)
+                self._fold_client_spend(record, scope_client, "plan")
+            except BaseException as exc:  # noqa: BLE001 -- the message is the product
+                self._fail(record, Stage.PLAN_READY, "", exc)
+                return record
+        outside = planner_mod.enforce_scope(record.strategy, record.criteria, record.scope)
+        if outside:
+            logger.info("criterios fuera del alcance de la plataforma: %s", ", ".join(outside))
         decisions = {d["id"]: d for d in record.strategy}
         chosen = [
             d for d in record.strategy
@@ -1022,8 +1220,9 @@ class JobRunner:
                 c["observabilityReason"] = (
                     f"[causa: {_CAUSE_OF[d['estado']]}] {d.get('motivo', '')}".strip()
                 )
-                if d.get("documento"):
-                    c["evidenciaRequerida"] = d["documento"]
+                needed = d.get("documento") or d.get("evidencia_requerida")
+                if needed:
+                    c["evidenciaRequerida"] = needed
         self.store.save(record)
 
         from ..evalkit.criteria import Criteria, CriterionDomain, CriterionTest
@@ -1701,6 +1900,12 @@ class JobRunner:
             self._fail(record, Stage.SCORE, getattr(exc, "test_id", ""), exc)
             return record
 
+        # UN CRITERIO CORREGIDO LO DICE EN SU VEREDICTO. El juez recibió el
+        # texto con los hechos del contexto de esta plataforma, no el del
+        # banco: quien lee el informe tiene que ver los dos sin ir a buscarlos.
+        fixed_by_id = {str(c.get("id")): c for c in record.criteria if c.get("localizado")}
+        verdicts = [_with_localization_note(v, fixed_by_id.get(v.test_id)) for v in verdicts]
+
         # The last uncounted leg: the scorer's own API spend. Framework + probes
         # went onto the record at build_plan, the browser run at execute; this
         # completes the bill.
@@ -1811,6 +2016,29 @@ class JobRunner:
                 points_earned=0.0, points_possible=0.0,
                 rationale=f"[causa: {cause}] {text}", evidence=[], runs=[],
             )
+
+        plan_decision = next(
+            (d for d in record.strategy if str(d.get("id")) == test.id), {}
+        )
+        if plan_decision.get("estado") in planner_mod.OUT_OF_SCOPE:
+            # LA REGLA DURA, TAMBIÉN ACÁ. Un criterio del docente o mal
+            # localizado no debería tener pruebas (ver planner.with_scope);
+            # si igual llegó con evidencia, por un plan viejo o una edición a
+            # mano, no se juzga: no puede salir un NO_CUMPLE de la
+            # plataforma por algo que no es de la plataforma.
+            return unscored(
+                _CAUSE_OF[plan_decision["estado"]],
+                str(plan_decision.get("motivo") or ""),
+            )
+
+        def absent(status: str, judged_count: int) -> Any:
+            """Un NO_CUMPLE de existencia sin cobertura baja a NO_EVALUADO (ver planner.absence_gap)."""
+            if status != scoring_mod.NO_CUMPLE:
+                return None
+            gap = planner_mod.absence_gap(plan_decision, judged_count)
+            if not gap:
+                return None
+            return gap
 
         if not cells:
             if gated:
@@ -1932,6 +2160,13 @@ class JobRunner:
                 platform=record.platform, repeats=1, model=self.engine.model,
                 reading=said,
             )
+            gap = absent(pooled.status, len(to_judge)) if pooled.status in scoring_mod.SCORED else None
+            if gap:
+                return unscored(
+                    "ausencia sin cobertura",
+                    f"el juicio conjunto no encontró lo que la regla busca, pero {gap}.{tail} "
+                    f"{pooled.rationale}",
+                )
             if pooled.status in scoring_mod.SCORED:
                 return scoring_mod.TestVerdict(
                     test_id=test.id, platform=record.platform, status=pooled.status,
@@ -2010,6 +2245,13 @@ class JobRunner:
         met = sum(1 for r in judged if r[1] == scoring_mod.CUMPLE)
         statuses = {r[1] for r in judged}
         status = statuses.pop() if len(statuses) == 1 else scoring_mod.PARCIAL
+        gap = absent(status, len(judged))
+        if gap:
+            return unscored(
+                "ausencia sin cobertura",
+                f"ninguna prueba encontró lo que la regla busca, pero {gap}.{tail}"
+                f"{second_round} " + " ".join(lines),
+            )
         earned = float(test.points) * sum(worth[r[1]] for r in judged) / len(judged)
         evidence: list[str] = []
         for r in judged:
@@ -2035,6 +2277,11 @@ _OBSERVABILITY_OF = {
     planner_mod.NECESITA_ESTUDIO: "REQUIERE_ESTUDIO",
     planner_mod.NO_SE_PUEDE_MEDIR: "NO_DECIDIBLE_EN_EVALUACION",
     planner_mod.FALTA_RECORRER: "NO_DECIDIBLE_EN_EVALUACION",
+    # Fuera del alcance de la plataforma: no es que no se pueda decidir, es
+    # que no le toca. La clase de observabilidad no tiene un valor propio para
+    # eso; la causa, que es lo que el informe muestra, sí (ver `_CAUSE_OF`).
+    planner_mod.FUERA_DE_ALCANCE: "NO_DECIDIBLE_EN_EVALUACION",
+    planner_mod.MAL_LOCALIZADO: "NO_DECIDIBLE_EN_EVALUACION",
 }
 
 #: La causa de un NO_EVALUADO, en palabras. Las tres primeras son resultados
@@ -2044,11 +2291,38 @@ _CAUSE_OF = {
     planner_mod.NECESITA_ESTUDIO: "necesita estudio",
     planner_mod.NO_SE_PUEDE_MEDIR: "no se puede medir",
     planner_mod.FALTA_RECORRER: "falta recorrer",
+    planner_mod.FUERA_DE_ALCANCE: "fuera de alcance: rol del docente",
+    planner_mod.MAL_LOCALIZADO: "mal localizado",
 }
 _BUG_CAUSES = frozenset({
     "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
     "evidencia insuficiente", "juicio en duda",
+    # La ausencia de algo no se pudo afirmar porque faltó cobertura (una sola
+    # prueba, o un lugar sin recorrer): es nuestra, se arregla mirando más.
+    "ausencia sin cobertura",
 })
+
+
+def _with_localization_note(verdict: Any, criterion: dict | None) -> Any:
+    """El veredicto de un criterio corregido, con la corrección escrita al final.
+
+    Al final y no al principio: la causa de un NO_EVALUADO se lee del comienzo
+    de la justificación (ver `_causes_of`).
+    """
+    if not criterion:
+        return verdict
+    facts = planner_mod._facts_text(criterion.get("localizado") or [])
+    original = "; ".join(
+        f"{label}: «{criterion[key]}»"
+        for key, label in (("verificationOriginal", "regla original"),
+                           ("passCriteriaOriginal", "cumple si, original"))
+        if criterion.get(key)
+    )
+    note = (
+        " [Criterio corregido con los hechos del contexto declarado en el config de "
+        f"la plataforma: {facts}. Se juzgó el texto corregido. {original}]"
+    )
+    return replace(verdict, rationale=str(verdict.rationale) + note)
 
 
 def _attempt_rows(rows: list[dict], retried: dict | None) -> list[dict]:

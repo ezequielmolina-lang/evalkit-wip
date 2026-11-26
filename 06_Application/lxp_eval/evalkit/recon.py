@@ -353,7 +353,11 @@ _ACTIVITY = (
     "con `record_part` cada momento distinto: la pregunta, lo que aparece "
     "después de un acierto, lo que aparece después de un error, cada ayuda, y el "
     "tutor o asistente de IA si aparece (en qué momento, y si hay un campo para "
-    "escribirle y a quién le llega lo escrito). Anotá cómo son las preguntas: "
+    "escribirle y a quién le llega lo escrito). Registrá también lo PRIMERO que "
+    "aparece al empezar a trabajar un contenido (antes de la primera pregunta) "
+    "y lo que aparece al TERMINARLO o al salir (un cierre, un resumen, una "
+    "despedida), si se llega: son dos momentos que una evaluación suele "
+    "necesitar y que nadie ve si sólo se mira el medio. Anotá cómo son las preguntas: "
     "formato, cuántas opciones, el enunciado textual de las que viste, y los "
     "nombres de los temas o subtemas entre los que se puede elegir.",
 )

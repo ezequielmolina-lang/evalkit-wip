@@ -46,26 +46,58 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import usage as usage_mod
 from .errors import EvalkitError
 from .steps import LONG_MARK
 
-#: Los cinco estados que el planificador puede darle a un criterio.
+#: Los cinco estados que el planificador (el modelo) puede darle a un criterio.
 SE_PRUEBA = "se_prueba"
 NECESITA_DOCUMENTO = "necesita_documento"
 NECESITA_ESTUDIO = "necesita_estudio"
 NO_SE_PUEDE_MEDIR = "no_se_puede_medir"
 FALTA_RECORRER = "falta_recorrer"
-STATES = (SE_PRUEBA, NECESITA_DOCUMENTO, NECESITA_ESTUDIO, NO_SE_PUEDE_MEDIR, FALTA_RECORRER)
+MODEL_STATES = (SE_PRUEBA, NECESITA_DOCUMENTO, NECESITA_ESTUDIO, NO_SE_PUEDE_MEDIR, FALTA_RECORRER)
 
-#: Las cuatro cubetas del documento. `indefinido` es a propósito una cubeta
-#: propia y no una variante de "no se puede": es donde la persona corrige.
+#: Los dos estados que sólo pone el CÓDIGO, a partir del alcance (ver
+#: `with_scope` y evalkit/usage.py). El modelo que decide la estrategia no los
+#: puede emitir: salen del modelo de uso y del contexto que declara el config.
+#: `fuera_de_alcance`: el comportamiento lo hace el docente, no la plataforma.
+#: `mal_localizado`: la regla depende de un hecho de otro país o de otra materia.
+FUERA_DE_ALCANCE = "fuera_de_alcance"
+MAL_LOCALIZADO = "mal_localizado"
+OUT_OF_SCOPE = (FUERA_DE_ALCANCE, MAL_LOCALIZADO)
+STATES = MODEL_STATES + OUT_OF_SCOPE
+
+#: Las cubetas del documento. `indefinido` es a propósito una cubeta propia y
+#: no una variante de "no se puede": es donde la persona corrige. Y
+#: `fuera_de_alcance` tampoco es "no se puede": no es que no se pueda medir, es
+#: que medirlo sobre la plataforma sería medir a otro.
 BUCKET = {
     SE_PRUEBA: "se_prueba",
     NECESITA_DOCUMENTO: "documento",
     NECESITA_ESTUDIO: "no_se_puede",
     NO_SE_PUEDE_MEDIR: "no_se_puede",
     FALTA_RECORRER: "indefinido",
+    FUERA_DE_ALCANCE: "fuera_de_alcance",
+    MAL_LOCALIZADO: "fuera_de_alcance",
 }
+
+#: Los cuatro cubos del alcance, que es como el revisor lee el plan: qué es
+#: trabajo de la plataforma, qué es del docente, qué está escrito para otro
+#: lugar y qué pide un documento o un estudio.
+CUBO_PLATAFORMA = "plataforma"
+CUBO_DOCENTE = "docente"
+CUBO_MAL_LOCALIZADO = "mal_localizado"
+CUBO_DOC_ESTUDIO = "doc_estudio"
+CUBOS = (CUBO_PLATAFORMA, CUBO_DOC_ESTUDIO, CUBO_DOCENTE, CUBO_MAL_LOCALIZADO)
+
+#: Un criterio que pregunta si algo EXISTE ("¿hay un modo donde...?"), frente a
+#: uno que pregunta cómo se comporta algo que está ahí.
+EXISTENCIA = "existencia"
+COMPORTAMIENTO = "comportamiento"
+
+#: Cuántas pruebas juzgadas hacen falta para afirmar una ausencia.
+MIN_PROBES_FOR_ABSENCE = 2
 
 #: Qué estado hereda un criterio sin decisión, según cómo lo clasificó el marco.
 _FROM_OBSERVABILITY = {
@@ -105,7 +137,7 @@ STRATEGY_TOOL: dict[str, Any] = {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "El id del criterio, tal cual."},
-                        "estado": {"type": "string", "enum": list(STATES)},
+                        "estado": {"type": "string", "enum": list(MODEL_STATES)},
                         "partes": {
                             "type": "array", "items": {"type": "string"},
                             "description": (
@@ -122,6 +154,34 @@ STRATEGY_TOOL: dict[str, Any] = {
                             "description": (
                                 "En una o dos frases: qué se va a hacer en esa "
                                 "pantalla y qué se va a mirar."
+                            ),
+                        },
+                        "estimulo": {
+                            "type": "string",
+                            "description": (
+                                "Si se prueba: lo que se le pone a la plataforma, "
+                                "CONCRETO. El texto literal que se escribe, la "
+                                "respuesta que se elige, el botón que se toca. No "
+                                "una etiqueta ('probar el feedback'): la acción."
+                            ),
+                        },
+                        "tipo_de_regla": {
+                            "type": "string", "enum": [EXISTENCIA, COMPORTAMIENTO],
+                            "description": (
+                                "existencia: la regla pregunta si algo existe en "
+                                "la plataforma (un modo, una pantalla, un control). "
+                                "comportamiento: pregunta cómo responde algo que está."
+                            ),
+                        },
+                        "superficie_no_vista": {
+                            "type": "string",
+                            "description": (
+                                "Sólo para reglas de existencia: si lo que se "
+                                "busca podría vivir en un lugar que el recorrido "
+                                "NO registró (lo que aparece al empezar una sesión, "
+                                "al terminarla, una sección sin recorrer), decí "
+                                "cuál. Vacío si todos los lugares donde viviría "
+                                "están entre las pantallas vistas."
                             ),
                         },
                         "motivo": {
@@ -179,6 +239,14 @@ STRATEGY_SYSTEM = (
     "en pantalla NO convierte un criterio en 'se_prueba'.\n"
     "- Lo que escribe en el chat de un tutor o cambia una clase real se puede "
     "probar; el riesgo lo clasifica otra etapa. No lo descartes por eso.\n"
+    "- Para cada criterio que se prueba escribí el ESTÍMULO concreto: qué se "
+    "escribe, qué se elige, qué se toca. Es lo que la persona lee para saber "
+    "qué se le va a hacer a la plataforma.\n"
+    "- Decí si la regla es de EXISTENCIA o de comportamiento. Encontrar algo "
+    "una vez prueba que existe; no encontrarlo en un lugar no prueba que no "
+    "exista. Si es de existencia y lo que se busca podría estar en un lugar que "
+    "el recorrido no registró (el comienzo de una sesión, su cierre, una "
+    "sección que quedó sin recorrer), nombralo en `superficie_no_vista`.\n"
     "Respondés con la herramienta, una decisión por criterio recibido."
 )
 
@@ -278,10 +346,11 @@ def validate_strategy(decisions: Any, criteria: list[dict], profile: dict | None
         cid = str(criterion.get("id"))
         raw = by_id.get(cid)
         notes: list[str] = []
-        if raw is None or raw.get("estado") not in STATES:
+        if raw is None or raw.get("estado") not in MODEL_STATES:
             state, reason = _default_state(criterion)
             decision = {"estado": state, "motivo": reason, "partes": [], "comportamientos": [],
-                        "que_se_prueba": "", "documento": ""}
+                        "que_se_prueba": "", "documento": "", "estimulo": "",
+                        "tipo_de_regla": "", "superficie_no_vista": ""}
             if raw is None:
                 notes.append("sin decisión del planificador: hereda la clasificación del marco")
         else:
@@ -303,6 +372,12 @@ def validate_strategy(decisions: Any, criteria: list[dict], profile: dict | None
                 ],
                 "que_se_prueba": str(raw.get("que_se_prueba") or "").strip(),
                 "documento": str(raw.get("documento") or "").strip(),
+                "estimulo": str(raw.get("estimulo") or "").strip(),
+                "tipo_de_regla": (
+                    raw.get("tipo_de_regla")
+                    if raw.get("tipo_de_regla") in (EXISTENCIA, COMPORTAMIENTO) else ""
+                ),
+                "superficie_no_vista": str(raw.get("superficie_no_vista") or "").strip(),
             }
             if decision["estado"] == SE_PRUEBA and not parts:
                 # UNA PRUEBA SIN PANTALLA NO ES UNA PRUEBA. Es exactamente el
@@ -458,6 +533,344 @@ def settle_revisited(decisions: list[dict], revisited: dict[str, str]) -> list[d
     return decisions
 
 
+# --- el alcance: de quién es el rol y de qué lugar son los hechos --------------
+
+def cube_of(decision: dict) -> str:
+    """En cuál de los cuatro cubos del alcance cae una decisión."""
+    state = decision.get("estado")
+    if state == MAL_LOCALIZADO:
+        return CUBO_MAL_LOCALIZADO
+    if state == FUERA_DE_ALCANCE:
+        return CUBO_DOCENTE
+    if state in (NECESITA_DOCUMENTO, NECESITA_ESTUDIO):
+        return CUBO_DOC_ESTUDIO
+    return CUBO_PLATAFORMA
+
+
+def out_of_scope_state(row: dict | None) -> str:
+    """El estado que el alcance le impone a un criterio, o "" si no le impone ninguno.
+
+    Mal localizado va primero: un criterio de otra materia que además sería
+    del docente no aplica, antes de ser de nadie.
+    """
+    row = row or {}
+    if row.get("localizacion") == usage_mod.LOC_MAL:
+        return MAL_LOCALIZADO
+    if row.get("rol") == usage_mod.ROL_DOCENTE:
+        return FUERA_DE_ALCANCE
+    return ""
+
+
+def _scope_summary(row: dict) -> dict:
+    return {
+        "rol": row.get("rol") or usage_mod.ROL_PLATAFORMA,
+        "rol_motivo": row.get("rol_motivo") or "",
+        "hechos": list(row.get("hechos") or []),
+        "localizacion": row.get("localizacion") or usage_mod.LOC_OK,
+        "localizacion_motivo": row.get("localizacion_motivo") or "",
+    }
+
+
+def _facts_text(facts: list[dict]) -> str:
+    out = []
+    for f in facts or []:
+        if f.get("coincide") == "si":
+            out.append(f"{f.get('hecho')}: {f.get('en_el_criterio')} (coincide con el contexto)")
+        elif f.get("coincide") == "no":
+            there = f.get("en_el_contexto") or "el contexto declarado no lo trae"
+            out.append(f"{f.get('hecho')}: el criterio dice «{f.get('en_el_criterio')}»; en este contexto: {there}")
+        else:
+            out.append(
+                f"{f.get('hecho')}: el criterio dice «{f.get('en_el_criterio')}» "
+                "(sin contrastar: el contexto declarado no trae este dato)"
+            )
+    return "; ".join(out)
+
+
+def with_scope(decisions: list[dict], criteria: list[dict], scope: list[dict] | None) -> list[dict]:
+    """LA REGLA DURA: un criterio del docente o mal localizado no se prueba sobre la plataforma.
+
+    POR QUÉ. En la corrida completa del 2026-11-26 cuatro NO_CUMPLE no eran de
+    la plataforma (ver evalkit/usage.py, con el caso). Los cuatro se habían
+    planeado como "se prueba", se pagaron sus pruebas y el juez, con razón
+    según lo que tenía delante, dijo que eso no aparecía en pantalla. El error
+    no estaba en el juicio: estaba en haberle preguntado a la plataforma por el
+    trabajo de otro, o con el dato de otro país.
+
+    Acá se cierra antes de planear nada. `scope` es la clasificación ya
+    validada (usage.validate_scope); `decisions` son las del planificador, que
+    puede no haber recibido los criterios fuera de alcance. Sale UNA decisión
+    por criterio, en el orden de `criteria`:
+
+      * rol del docente -> `fuera_de_alcance`. No genera prueba. En el informe
+        es NO_EVALUADO con "observación de aula" como evidencia requerida.
+      * hecho de otro país o materia que no se pudo corregir con el contexto ->
+        `mal_localizado`. NO_EVALUADO hasta que el dato esté en el config.
+      * todo lo demás queda como lo decidió el planificador, con el alcance
+        escrito al lado para que la persona lo vea y lo pueda vetar.
+
+    Si el planificador igual decidió algo para un criterio fuera de alcance
+    (un plan viejo, una corrección a mano), el alcance gana y queda anotado
+    qué decía: el código lo hace imposible, no improbable.
+    """
+    rows = {str(r.get("id")): r for r in scope or []}
+    have = {str(d.get("id")): d for d in decisions or []}
+    out: list[dict] = []
+    for criterion in criteria:
+        cid = str(criterion.get("id"))
+        row = rows.get(cid)
+        forced = out_of_scope_state(row)
+        current = have.get(cid)
+        if not forced:
+            if current is None:
+                state, reason = _default_state(criterion)
+                current = {
+                    "id": cid, "area": str(criterion.get("area") or ""),
+                    "nombre": str(criterion.get("name") or ""),
+                    "estado": state, "motivo": reason, "partes": [], "comportamientos": [],
+                    "que_se_prueba": "", "documento": "", "estimulo": "",
+                    "tipo_de_regla": "", "superficie_no_vista": "",
+                    "advertencias": ["sin decisión del planificador: hereda la clasificación del marco"],
+                }
+            d = dict(current)
+            if d.get("estado") in OUT_OF_SCOPE:
+                # Estaba fuera de alcance y ya no (cambió el config o una
+                # persona lo vetó): vuelve a indefinido para que se decida de
+                # nuevo, en vez de quedar con un estado que nadie sostiene.
+                d["estado"] = FALTA_RECORRER
+                d["motivo"] = "dejó de estar fuera de alcance y todavía no se decidió cómo se prueba"
+            if row:
+                d["alcance"] = _scope_summary(row)
+                notes = list(d.get("advertencias") or [])
+                notes += [n for n in row.get("advertencias") or [] if n not in notes]
+                if row.get("localizacion") == usage_mod.LOC_CORREGIDO:
+                    fixed_note = (
+                        "criterio corregido con los hechos del contexto: "
+                        + _facts_text([f for f in row.get("hechos") or [] if f.get("coincide") == "no"])
+                    )
+                    if fixed_note not in notes:
+                        notes.append(fixed_note)
+                d["advertencias"] = notes
+            d["cubeta"] = BUCKET[d["estado"]]
+            d["cubo"] = cube_of(d)
+            out.append(d)
+            continue
+
+        notes = list((row or {}).get("advertencias") or [])
+        if current is not None and current.get("estado") not in OUT_OF_SCOPE:
+            notes.append(
+                f"el planificador lo había dejado en '{current.get('estado')}': el "
+                "alcance manda, no se prueba sobre la plataforma"
+            )
+        if forced == FUERA_DE_ALCANCE:
+            reason = (
+                "En el modelo de uso declarado este comportamiento lo hace el "
+                "docente, no la plataforma. " + str(row.get("rol_motivo") or "")
+                + " Que no aparezca en pantalla es el diseño, no una falla: "
+                "probarlo sobre la plataforma sería medir a otro."
+            ).replace("  ", " ").strip()
+            needed = usage_mod.EVIDENCIA_DOCENTE
+        else:
+            facts = [f for f in row.get("hechos") or [] if f.get("coincide") == "no"]
+            reason = (
+                "La regla de este criterio depende de hechos de otro país o de "
+                "otra materia"
+                + (": " + _facts_text(facts) if facts else "")
+                + ". " + str(row.get("localizacion_motivo") or "")
+            ).strip()
+            needed = (
+                "el dato equivalente de este contexto, declarado en el config de "
+                "la plataforma (bloque contexto), o un criterio escrito para esta "
+                "materia y este país"
+            )
+        d = {
+            "id": cid,
+            "area": str(criterion.get("area") or ""),
+            "nombre": str(criterion.get("name") or ""),
+            "estado": forced,
+            "motivo": reason,
+            "partes": [], "comportamientos": [],
+            "que_se_prueba": "", "documento": "", "estimulo": "",
+            "tipo_de_regla": "", "superficie_no_vista": "",
+            "evidencia_requerida": needed,
+            "alcance": _scope_summary(row),
+            "cubeta": BUCKET[forced],
+            "advertencias": notes,
+        }
+        d["cubo"] = cube_of(d)
+        out.append(d)
+    return out
+
+
+def enforce_scope(decisions: list[dict], criteria: list[dict], scope: list[dict] | None) -> list[str]:
+    """Aplica `with_scope` sobre un plan ya guardado. En el lugar; devuelve qué cambió.
+
+    Para el plan hecho antes de esta regla, o editado a mano después: se llama
+    al redactar desde el plan, igual que `reclassify_unmeasurable`, así no se
+    paga una prueba que no puede terminar en un veredicto válido.
+    """
+    if not scope:
+        return []
+    before = {str(d.get("id")): d.get("estado") for d in decisions or []}
+    known = {str(c.get("id")) for c in criteria or []}
+    fresh = {d["id"]: d for d in with_scope(
+        [d for d in decisions or [] if str(d.get("id")) in known], criteria, scope
+    )}
+    changed = []
+    for i, d in enumerate(decisions or []):
+        new = fresh.get(str(d.get("id")))
+        if new is None:
+            continue
+        if new["estado"] in OUT_OF_SCOPE:
+            new.update({"n": 0, "celdas": [], "sensible_al_tema": None, "revisar": False})
+        decisions[i] = new
+        if before.get(new["id"]) != new["estado"]:
+            changed.append(new["id"])
+    return changed
+
+
+def absence_gap(decision: dict | None, judged: int) -> str:
+    """Por qué una ausencia NO alcanza para un NO_CUMPLE. "" si alcanza.
+
+    POR QUÉ. Un criterio de la corrida del 2026-11-26 preguntaba si existe un
+    modo de práctica sin ayuda. La prueba miró un lugar, no vio el rótulo y el
+    veredicto fue NO_CUMPLE con una sola prueba. Pero para una regla de
+    existencia las dos respuestas no pesan igual: encontrarlo una vez prueba
+    que existe; no encontrarlo en un lugar no prueba que no exista. Si quedó
+    sin mirar un lugar donde podría estar (el comienzo o el cierre de una
+    sesión, que el recorrido no siempre registra), o si la ausencia se vio en
+    una sola prueba, el veredicto honesto es NO_EVALUADO.
+
+    Sólo aplica a reglas que el plan marcó como de existencia. Una regla de
+    comportamiento ("¿el tutor nombra el error?") sí se contesta con un NO en
+    la pantalla donde debía pasar.
+
+    Y sólo cuando el veredicto del criterio entero es NO_CUMPLE, es decir,
+    cuando NINGUNA prueba juzgada lo encontró. Si unas lo encontraron y otras
+    no, el criterio sigue en "x de n" (PARCIAL): cada celda mira un contenido
+    distinto y "existe en este tema y no en aquel" es un resultado, no una
+    ausencia sin cobertura. `judged` cuenta las pruebas juzgadas; las cortadas
+    no suman.
+    """
+    d = decision or {}
+    if d.get("tipo_de_regla") != EXISTENCIA:
+        return ""
+    unseen = str(d.get("superficie_no_vista") or "").strip()
+    if unseen:
+        return (
+            "la regla pregunta si algo existe y quedó sin alcanzar un lugar donde "
+            f"podría estar ({unseen}): no encontrarlo donde se miró no prueba que no exista"
+        )
+    if judged < MIN_PROBES_FOR_ABSENCE:
+        return (
+            "la regla pregunta si algo existe y la ausencia se observó en "
+            f"{judged} prueba: una presencia se muestra una vez, una ausencia "
+            f"necesita cobertura (al menos {MIN_PROBES_FOR_ABSENCE} pruebas)"
+        )
+    return ""
+
+
+_ROLE_TEXT = {
+    usage_mod.ROL_PLATAFORMA: "La plataforma",
+    usage_mod.ROL_DOCENTE: "El docente",
+    usage_mod.ROL_COMPARTIDO: "Compartido entre docente y plataforma",
+}
+
+
+def ficha(decision: dict, criterion: dict | None, surfaces: list[dict] | None = None) -> dict:
+    """Los cinco campos que el revisor lee, por criterio, ANTES de aprobar y gastar.
+
+    Es prevención en el plan en vez de detección en el informe: con estos cinco
+    campos a la vista, "esto lo hace el docente" o "ese número es de otro país"
+    se ven leyendo, no después de pagar la corrida.
+
+      1. stress_test: qué se le pone a la plataforma, concreto.
+      2. como_se_juzga: la regla, qué aprueba, qué falla y qué evidencia decide.
+      3. rol_y_superficie: de quién es el comportamiento y en qué pantalla
+         debería aparecer.
+      4. hechos_localizados: cada dato por país, materia o currículo del que
+         depende la regla, contrastado con el contexto.
+      5. que_falta: si no es observable, qué documento, estudio u observación
+         lo zanjaría.
+
+    Todo sale de datos que ya están en la decisión y en el criterio: no hay una
+    llamada al modelo acá, y un campo sin dato lo dice.
+    """
+    c = criterion or {}
+    state = decision.get("estado")
+    scope = decision.get("alcance") or {}
+    by_id = {s.get("id"): s for s in surfaces or []}
+    tested = state == SE_PRUEBA
+
+    if tested:
+        stress = str(decision.get("estimulo") or "").strip() or (
+            str(decision.get("que_se_prueba") or "").strip()
+            or "(el planificador no escribió el estímulo: pídalo antes de aprobar)"
+        )
+        cells = [
+            " · ".join(x for x in (str(cell.get("tema") or ""), str(cell.get("variante") or "")) if x)
+            for cell in decision.get("celdas") or []
+        ]
+        cells = [x for x in cells if x]
+        if cells:
+            stress += " Se repite en: " + " | ".join(cells) + "."
+    else:
+        stress = "No se le pone nada a la plataforma: este criterio no se prueba recorriéndola."
+
+    rule = str(c.get("verification") or c.get("name") or "").strip()
+    judged = f"Regla: {rule or '(el criterio no la trae)'}"
+    if c.get("passCriteria"):
+        judged += f" Cumple si: {c['passCriteria']}"
+    if c.get("failCriteria"):
+        judged += f" No cumple si: {c['failCriteria']}"
+    if tested:
+        judged += " Decide la captura y el texto de la pantalla después del estímulo."
+        if decision.get("tipo_de_regla") == EXISTENCIA:
+            judged += (
+                " Es una regla de existencia: un NO_CUMPLE exige al menos "
+                f"{MIN_PROBES_FOR_ABSENCE} pruebas y haber alcanzado todo lugar "
+                "donde podría estar; si no, queda sin evaluar."
+            )
+    else:
+        judged += " En esta evaluación queda sin evaluar; no cuenta como un cero."
+
+    role = _ROLE_TEXT.get(scope.get("rol") or usage_mod.ROL_PLATAFORMA, "La plataforma")
+    if not scope:
+        role += " (supuesto por defecto: el config no declara modelo de uso)"
+    elif scope.get("rol_motivo"):
+        role += f". {scope['rol_motivo']}"
+    where = "; ".join(
+        f"{pid} {by_id.get(pid, {}).get('nombre', '')}".strip()
+        for pid in decision.get("partes") or []
+    )
+    role += f" Superficie: {where}." if where else " Superficie: ninguna pantalla del recorrido."
+    if decision.get("superficie_no_vista"):
+        role += f" Podría estar también en un lugar que no se recorrió: {decision['superficie_no_vista']}."
+
+    facts = _facts_text(scope.get("hechos") or [])
+    if not facts:
+        facts = (
+            "Ninguno: la regla no depende de datos por país, materia o currículo."
+            if scope else
+            "Sin contrastar: el config no declara el contexto (país, materia, líneas de crisis)."
+        )
+
+    if tested:
+        missing = "Nada: es observable recorriendo la plataforma."
+    else:
+        missing = str(
+            decision.get("documento") or decision.get("evidencia_requerida")
+            or decision.get("motivo") or ""
+        ).strip() or "(sin dato)"
+    return {
+        "stress_test": stress,
+        "como_se_juzga": judged,
+        "rol_y_superficie": role,
+        "hechos_localizados": facts,
+        "que_falta": missing,
+    }
+
+
 def reconcile(decisions: list[dict], matrix: dict[str, dict]) -> list[dict]:
     """El cierre conjunto: el planificador integra la matriz del muestreo.
 
@@ -490,6 +903,12 @@ def reconcile(decisions: list[dict], matrix: dict[str, dict]) -> list[dict]:
         if any(c.get("tema_no_visto") for c in cells):
             review = True
             notes.append("hay temas propuestos que el recorrido no vio")
+        # Una regla de existencia que no puede terminar en NO_CUMPLE se dice
+        # ANTES de pagar sus pruebas (ver `absence_gap`).
+        gap = absence_gap(d, len(cells))
+        if gap:
+            review = True
+            notes.append("así planeado, una ausencia quedaría sin evaluar: " + gap)
         d.update({
             "n": len(cells),
             "celdas": cells,
@@ -517,16 +936,27 @@ def build_plan(
     spend_usd: float = 0.0,
     version: int = 1,
     corrections: list[dict] | None = None,
+    criteria: list[dict] | None = None,
+    usage: dict | None = None,
 ) -> dict:
     """El plan como DATOS: lo que el documento muestra y lo que la web va a editar.
 
     Lleva las tres cubetas, las referencias a la evidencia de cada superficie,
     las repeticiones y los temas (editables), el lugar para las correcciones de
     la persona y la versión, para poder mostrar la diferencia cuando se replanea.
+
+    Con `criteria` y `usage`, cada criterio lleva además su FICHA de cinco
+    campos (ver `ficha`) y el plan dice qué modelo de uso y qué contexto se
+    declararon. Sin ellos el plan sale igual, y dice que nadie los declaró.
     """
     profile = profile or {}
     parts = [p for p in profile.get("partes") or [] if isinstance(p, dict)]
     cover = profile.get("cobertura") or {}
+    by_criterion = {str(c.get("id")): c for c in criteria or []}
+    declared = usage_mod.UsageModel.from_dict(usage)
+    for d in decisions:
+        d["cubo"] = cube_of(d)
+        d["ficha"] = ficha(d, by_criterion.get(str(d.get("id"))), parts)
 
     surfaces = []
     for part in parts:
@@ -571,6 +1001,8 @@ def build_plan(
         "se_prueba": len(tested),
         "no_se_puede": sum(1 for d in decisions if d["cubeta"] == "no_se_puede"),
         "indefinido": sum(1 for d in decisions if d["cubeta"] == "indefinido"),
+        "fuera_de_alcance": sum(1 for d in decisions if d["cubeta"] == "fuera_de_alcance"),
+        "cubos": {cube: sum(1 for d in decisions if d["cubo"] == cube) for cube in CUBOS},
         "documentos": len(needed),
         "criterios_con_documento": sum(1 for d in decisions if d["cubeta"] == "documento"),
         "criterios": len(decisions),
@@ -586,6 +1018,16 @@ def build_plan(
         "generado": _now(),
         "plataforma": {"nombre": platform, "url": url},
         "objetivo": objective,
+        # QUÉ SE DECLARÓ SOBRE CÓMO SE USA. Va arriba porque cambia cómo se lee
+        # todo lo demás: con "capa de práctica", que la plataforma no explique
+        # antes de preguntar deja de ser un hallazgo.
+        "modelo_de_uso": {
+            "declarado": declared.declared,
+            "modelo": declared.modelo,
+            "quien_hace_que": declared.quien_hace_que,
+            "documento": declared.documento,
+            "contexto": usage_mod.context_lines(declared),
+        },
         "conteos": counts,
         "recorrido": {
             "entrada": profile.get("entrada", ""),
@@ -663,10 +1105,24 @@ def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
         f"  {i}. tema: {c.get('tema') or '(no depende del tema)'} · variante: {c.get('variante')}"
         for i, c in enumerate(cells, start=1)
     )
+    scope = decision.get("alcance") or {}
+    extra = ""
+    if decision.get("estimulo"):
+        extra += f"Estímulo que la persona aprobó: {decision['estimulo']}\n"
+    fixed = [f for f in scope.get("hechos") or [] if f.get("coincide") == "no" and f.get("en_el_contexto")]
+    if fixed:
+        # EL DATO DEL PAÍS VIAJA HASTA LOS PASOS. Un criterio corregido con la
+        # línea de crisis de este contexto no sirve si la prueba se redacta
+        # buscando la del país para el que se escribió el banco.
+        extra += (
+            "Hechos de ESTE contexto (usá estos, no los del criterio original): "
+            + _facts_text(fixed) + "\n"
+        )
     return (
         "EL PLAN APROBADO PARA ESTE CRITERIO (lo decidió el planificador, lo "
         "dimensionó el muestreo y lo aprobó una persona; no lo cambies).\n"
         f"Qué se prueba: {decision.get('que_se_prueba') or '(no dice)'}\n"
+        f"{extra}"
         f"En qué pantallas del recorrido: {where}\n"
         f"Esta prueba se va a ejecutar {len(cells) or 1} vez/veces, una por celda:\n"
         f"{listing or '  1. única'}\n\n"
@@ -851,7 +1307,28 @@ _STATE_LABEL = {
     NECESITA_ESTUDIO: "Necesita un estudio",
     NO_SE_PUEDE_MEDIR: "No se puede medir",
     FALTA_RECORRER: "Indefinido: falta recorrer",
+    FUERA_DE_ALCANCE: "Fuera de alcance: rol del docente",
+    MAL_LOCALIZADO: "Mal localizado: otro país o materia",
 }
+
+_FICHA_LABELS = (
+    ("stress_test", "1. Qué se le pone a la plataforma"),
+    ("como_se_juzga", "2. Cómo se juzga"),
+    ("rol_y_superficie", "3. De quién es el rol y dónde aparece"),
+    ("hechos_localizados", "4. Hechos por país, materia o currículo"),
+    ("que_falta", "5. Qué falta si no es observable"),
+)
+
+
+def _ficha_table(c: dict) -> str:
+    card = c.get("ficha") or {}
+    if not card:
+        return ""
+    rows = "".join(
+        f"<tr><th>{_e(label)}</th><td>{_e(card.get(key) or '(sin dato)')}</td></tr>"
+        for key, label in _FICHA_LABELS
+    )
+    return f"<table class='ficha'>{rows}</table>"
 
 _CSS = """
 :root{--ink:#1c2430;--mute:#5b6675;--line:#d9dee5;--ok:#1f7a4d;--okbg:#e6f4ec;
@@ -877,6 +1354,8 @@ th{background:#eef0f3;font-size:12px;text-transform:uppercase;letter-spacing:.03
 .t-ok{background:var(--okbg);color:var(--ok)}.t-no{background:var(--nobg);color:var(--no)}
 .t-un{background:var(--unbg);color:var(--un)}.t-doc{background:var(--docbg);color:var(--doc)}
 .t-role{background:#eef0f3;color:var(--mute)}
+.t-out{background:#ece7f6;color:#4b3a86}.c-out{background:#ece7f6;color:#4b3a86}
+table.ficha{margin:8px 0}table.ficha th{width:230px;text-transform:none;letter-spacing:0;font-size:13px;color:var(--ink)}
 img.thumb{width:150px;border:1px solid var(--line);border-radius:4px;display:block}
 .noshot{width:150px;height:84px;border:2px dashed var(--no);border-radius:4px;color:var(--no);
 display:flex;align-items:center;justify-content:center;font-size:12px;text-align:center;padding:6px}
@@ -892,7 +1371,8 @@ code{background:#eef0f3;padding:1px 5px;border-radius:3px;font-size:13px}
 
 
 def _tag(state: str) -> str:
-    cls = {"se_prueba": "t-ok", "no_se_puede": "t-no", "indefinido": "t-un", "documento": "t-doc"}
+    cls = {"se_prueba": "t-ok", "no_se_puede": "t-no", "indefinido": "t-un", "documento": "t-doc",
+           "fuera_de_alcance": "t-out"}
     return f'<span class="tag {cls.get(BUCKET.get(state, state), "t-un")}">{_e(_STATE_LABEL.get(state, state))}</span>'
 
 
@@ -953,6 +1433,11 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
     w(f"<div class='count c-ok'><b>{counts.get('se_prueba', 0)}</b>criterios se prueban</div>")
     w(f"<div class='count c-no'><b>{counts.get('no_se_puede', 0)}</b>no se pueden evaluar</div>")
     w(f"<div class='count c-un'><b>{counts.get('indefinido', 0)}</b>indefinidos (para corregir)</div>")
+    if counts.get("fuera_de_alcance"):
+        w(
+            f"<div class='count c-out'><b>{counts['fuera_de_alcance']}</b>fuera del alcance "
+            "de la plataforma (rol del docente o de otro contexto)</div>"
+        )
     w(
         f"<div class='count c-doc'><b>{counts.get('documentos', 0)}</b>documentos necesarios "
         f"({counts.get('criterios_con_documento', 0)} criterios)</div>"
@@ -963,6 +1448,42 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         f"unos {rules.get('tiempo_estimado_min', 0)} min</div>"
     )
     w("</div></header><main>")
+
+    # --- el supuesto de toda la evaluación: cómo se usa la plataforma ---
+    use = plan.get("modelo_de_uso") or {}
+    w("<h2>Modelo de uso y contexto<small>lo que declara el config de la plataforma</small></h2>")
+    if not use.get("declarado"):
+        w(
+            "<div class='alert bad'><b>Nadie declaró cómo se usa esta plataforma ni en qué país "
+            "y materia.</b> El plan supone que la plataforma enseña sola y que los datos de cada "
+            "criterio (líneas de crisis, currículo, idioma) son los de este contexto. Si el "
+            "docente hace una parte, o si el banco de criterios se escribió para otro país, "
+            "declárelo en el config (<code>modelo_de_uso</code> y <code>contexto</code>) antes "
+            "de aprobar: de lo contrario un criterio del docente puede terminar como una falla "
+            "de la plataforma.</div>"
+        )
+    else:
+        model_text = usage_mod._MODEL_TEXT.get(use.get("modelo") or "", "no declarado")
+        w(f"<p><b>Modelo de uso:</b> {_e(model_text)}.</p>")
+        if use.get("quien_hace_que"):
+            w(f"<p><b>Quién hace qué:</b> {_e(use['quien_hace_que'])}</p>")
+        if use.get("documento"):
+            w(f"<p class='small'>Documento de uso previsto: {_e(use['documento'])}</p>")
+        ctx = use.get("contexto") or []
+        if ctx:
+            w("<p><b>Contexto:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in ctx) + "</ul>")
+        else:
+            w("<div class='alert'>No se declaró el contexto (país, materia, líneas de crisis): "
+              "los hechos localizados de los criterios quedan sin contrastar.</div>")
+        cubes = counts.get("cubos") or {}
+        if cubes:
+            w(
+                "<p><b>Alcance de los " + str(counts.get("criterios", 0)) + " criterios:</b> "
+                f"{cubes.get(CUBO_PLATAFORMA, 0)} son trabajo de la plataforma, "
+                f"{cubes.get(CUBO_DOC_ESTUDIO, 0)} piden un documento o un estudio, "
+                f"{cubes.get(CUBO_DOCENTE, 0)} miran algo que hace el docente y "
+                f"{cubes.get(CUBO_MAL_LOCALIZADO, 0)} dependen de hechos de otro país o materia.</p>"
+            )
 
     # --- autochequeo del recorrido ---
     w("<h2>0. ¿El recorrido miró todo?<small>autochequeo, hecho por el código</small></h2>")
@@ -1038,6 +1559,7 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         mark = " · revisar" if c.get("revisar") else ""
         w(f"<details><summary>{_e(c['id'])} · {_e(c['nombre'])} · n = {c.get('n', 0)}{mark}</summary>")
         w(f"<p>{_e(c.get('que_se_prueba'))}</p>")
+        w(_ficha_table(c))
         w(f"<p class='small'>Por qué se puede probar: {_e(c.get('motivo'))}</p>")
         if c.get("celdas"):
             sens = "sensible al tema" if c.get("sensible_al_tema") else "no depende del tema"
@@ -1081,6 +1603,25 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         w("</table>")
     else:
         w("<p>Ninguno.</p>")
+
+    # --- fuera del alcance de la plataforma ---
+    outside = [c for c in criteria if c["cubeta"] == "fuera_de_alcance"]
+    if outside or use.get("declarado"):
+        w(f"<h2>4b. Fuera del alcance de la plataforma<small>{len(outside)} criterios: "
+          "no se prueban y no pueden terminar como una falla de la plataforma</small></h2>")
+        w("<p class='lead'>Son del docente según el modelo de uso declarado, o su regla depende de "
+          "un dato de otro país o de otra materia. Quedan sin evaluar, con lo que haría falta. "
+          "Si alguno está mal clasificado, es el lugar para vetarlo.</p>")
+        if outside:
+            for c in outside:
+                w(f"<details open><summary>{_e(c['id'])} · {_e(c['nombre'])} · {_tag(c['estado'])}</summary>")
+                w(f"<p>{_e(c.get('motivo'))}</p>")
+                w(_ficha_table(c))
+                for note in c.get("advertencias") or []:
+                    w(f"<div class='alert'>{_e(note)}</div>")
+                w("</details>")
+        else:
+            w("<p>Ninguno.</p>")
 
     # --- 5. documentos ---
     docs = plan.get("documentos_necesarios") or []
@@ -1140,7 +1681,11 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
     w("<p>Tres respuestas posibles, por superficie o por criterio:</p><ul>"
       "<li><b>Eso sí existe:</b> indique dónde (una dirección o el camino de toques). El recorrido vuelve a esa parte y el plan se rehace.</li>"
       "<li><b>Falta esta parte:</b> nómbrela y diga cómo se llega.</li>"
-      "<li><b>Cambiar el tamaño:</b> más o menos pruebas en un criterio, otros temas, o quitar un criterio.</li></ul>"
+      "<li><b>Cambiar el tamaño:</b> más o menos pruebas en un criterio, otros temas, o quitar un criterio.</li>"
+      "<li><b>Vetar el alcance:</b> si un criterio figura como del docente y es de la plataforma (o al revés), "
+      "o si figura como de otro contexto y sí aplica, dígalo por criterio (corrección de tipo "
+      "<code>alcance</code>, con <code>rol</code> o <code>localizacion</code>). Lo que fija una persona manda "
+      "sobre lo que clasificó el modelo.</li></ul>"
       "<p>Las correcciones se guardan como datos junto al plan (<code>correcciones</code> en <code>plan.json</code>) "
       "y la versión siguiente muestra solo lo que cambió.</p></div>")
     w("</main></body></html>")

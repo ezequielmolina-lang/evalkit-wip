@@ -140,6 +140,34 @@ auth:
       student: "https://app.ejemplo.org/student/home/"
       teacher: "https://app.ejemplo.org/home/"
 
+# CÓMO SE USA LA PLATAFORMA. Sin esto la evaluación supone que la plataforma
+# enseña sola, y un criterio que mira algo que hace el docente (explicar antes
+# de preguntar, resolver un ejemplo en la pizarra, decidir el orden de los
+# temas) termina como una falla de la plataforma. Tres valores:
+#   tutor_autonomo    la plataforma enseña sola
+#   capa_de_practica  el docente explica y modela; la plataforma hace la práctica
+#   hibrido           el reparto es propio y se dice en quien_hace_que
+modelo_de_uso:
+  tipo: tutor_autonomo
+  quien_hace_que: ""
+  # Opcional: un documento de uso previsto (la guía docente del producto),
+  # junto a este archivo. Es la fuente de verdad del reparto.
+  # documento: guia_docente.md
+
+# EN QUÉ PAÍS Y MATERIA. Los datos por país viven acá y no en el criterio: un
+# banco escrito para otro país trae sus líneas de crisis, su currículo y sus
+# idiomas, y hay que poder contrastarlos. Un criterio que nombra una línea que
+# no figura acá queda sin evaluar hasta que se declare.
+contexto:
+  pais: ""
+  materia: ""
+  nivel: ""
+  idiomas: []
+  curriculo: ""
+  lineas_de_crisis: []
+  #  - numero: "000"
+  #    nombre: "Línea de ayuda del país"
+
 vendor_docs: []
 observation_notes: []
 """

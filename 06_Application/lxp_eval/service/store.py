@@ -147,6 +147,15 @@ class JobRecord:
     #: `plan_corrections`, lo que la persona corrigió ("eso existe, está acá"),
     #: como datos que el replaneo consume. Ver evalkit/planner.py.
     strategy: list[dict] = field(default_factory=list)
+    #: EL ALCANCE (ver evalkit/usage.py). `usage` es el modelo de uso y el
+    #: contexto que declaró el config de la plataforma cuando se hizo el plan:
+    #: quién hace qué (plataforma o docente) y de qué país y materia son los
+    #: hechos. `scope` es la clasificación de cada criterio contra esa
+    #: declaración. Se guardan en el trabajo para que el plan, la redacción y
+    #: el informe lean una sola verdad, y para que un config que cambie
+    #: después no reescriba un plan que una persona ya aprobó.
+    usage: dict = field(default_factory=dict)
+    scope: list[dict] = field(default_factory=list)
     sampling_matrix: dict = field(default_factory=dict)
     plan_document: dict = field(default_factory=dict)
     plan_corrections: list[dict] = field(default_factory=list)
