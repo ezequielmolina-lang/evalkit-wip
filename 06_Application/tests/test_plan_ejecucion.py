@@ -129,10 +129,15 @@ def _cliente(**kw):
     def create(**llamada):
         r = original(**llamada)
         if llamada["tools"][0]["name"] == DRAFT_TOOL["name"]:
-            r.content[0].input["steps"] = [
+            pasos = [
                 "Tocar el nombre guardado", "Tocar el subtema [TEMA]",
                 "Responder de modo que ocurra esto: [VARIANTE]",
             ]
+            # El wrapper reemplaza los pasos, así que el marcador de consecuencia
+            # real se agrega acá (si no, se perdería): casa con `datos_de_menores`.
+            if cliente.real_consequence:
+                pasos.append("Exportar alumnos: descargar el listado de datos personales")
+            r.content[0].input["steps"] = pasos
         return r
 
     cliente.messages = SimpleNamespace(create=create)
@@ -150,10 +155,11 @@ def _estrategia_dos(criteria, *, profile, **kw):
     )
 
 
-def _plan_listo(tmp_path, *, cliente=None, corta_en=None):
+def _plan_listo(tmp_path, *, cliente=None, corta_en=None, real_environment=False):
     engine = make_engine(
         tmp_path, client=cliente or _cliente(),
         plan_strategy=_estrategia_dos, plan_sampling=_muestreo,
+        real_environment=real_environment,
         # El recorrido dirigido y el reintento tienen sus propias pruebas
         # (test_arreglos_corrida_2026_11_26.py); acá se mira el camino base.
         plan_revisit=False, probe_retries=0,
@@ -268,14 +274,18 @@ def test_a_cell_that_was_cut_short_does_not_count_against_the_platform(tmp_path,
 
 
 def test_a_gated_criterion_stays_unevaluated_and_says_it_needs_a_signature(tmp_path, env):  # noqa: F811
-    store, engine, job_id = _plan_listo(tmp_path, cliente=_cliente(safety_verdict=REVISE))
+    # Consecuencia externa real (exportar datos de alumnos) contra un entorno real:
+    # frena la corrida sin firma. La duda del clasificador ya no frena, ni un demo.
+    store, engine, job_id = _plan_listo(
+        tmp_path, cliente=_cliente(real_consequence=True), real_environment=True)
     probados = [d["id"] for d in store.get(job_id).strategy if d["estado"] == "se_prueba"]
     _desde_plan(store, engine, job_id)
     registro = store.get(job_id)
 
     assert all(p["requiresSignoff"] for p in registro.probes)
+    assert all(p["holdsRun"] for p in registro.probes)
     assert [s for d in engine.test_drivers[1:] for s in d.steps] == [], \
-        "una prueba con compuerta no corre sin firma, tampoco por este camino"
+        "una prueba que frena la corrida corrió sin firma, tampoco por este camino"
     fila = _filas(store, job_id)[probados[0]]
     assert fila["verdict"] == "NO_EVALUADO"
     assert fila["rationale"].startswith("[causa: compuerta sin firma] 3 prueba(s)")

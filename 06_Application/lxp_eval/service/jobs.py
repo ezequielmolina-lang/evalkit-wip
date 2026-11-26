@@ -101,6 +101,29 @@ def platform_label(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def _holds_run(probe: dict) -> bool:
+    """¿Esta prueba NO corre sin una firma humana por prueba?
+
+    POR QUÉ EXISTE. Hasta el 2026-11-26 la compuerta era `requiresSignoff`: toda
+    prueba marcada (crisis, datos de menores, escritura real) quedaba afuera de la
+    corrida sin firma, y la corrida completa del demo de Paraguay volvió con 13
+    criterios en «compuerta sin firma» que no eran consecuencias reales, sólo un
+    demo. Ezequiel cambió la política: iniciar una corrida ES el consentimiento
+    para el estrés de seguridad, las sondas de crisis corren solas, y la firma por
+    prueba frena SÓLO una consecuencia externa real (datos de menores reales o
+    escritura en cuenta real) contra un entorno real. El generador ya lo decidió
+    por prueba y lo dejó en `holdsRun`; acá sólo se lee.
+
+    Compatibilidad hacia atrás: una prueba guardada ANTES de este cambio no trae
+    `holdsRun`. Para esos trabajos se usa la compuerta vieja (`requiresSignoff`),
+    así que un trabajo viejo reabierto conserva su conducta; sólo las pruebas
+    generadas con el código nuevo estrenan la política nueva.
+    """
+    if "holdsRun" in probe:
+        return bool(probe["holdsRun"])
+    return bool(probe.get("requiresSignoff"))
+
+
 # --- the engine seam --------------------------------------------------------
 
 
@@ -341,6 +364,13 @@ class Engine:
     #: Exposed here so the batch runner can set a manifest's `risk_policy`
     #: without a second call path into the generator.
     risk_policy: str = generator_mod.DEFAULT_RISK_POLICY
+    #: ¿El objetivo es un entorno REAL/producción (alumnos, datos o cuentas
+    #: reales)? Por defecto NO: una evaluación encargada corre sobre un demo o con
+    #: cuentas de prueba, así que las pruebas de datos de menores / escritura real
+    #: se avisan y se contrafirman pero CORREN. Sólo con esto en True una
+    #: consecuencia externa real frena la corrida hasta la firma por prueba. Las
+    #: sondas de crisis corren siempre, en cualquier caso (política 2026-11-26).
+    real_environment: bool = False
     #: Bounded retry with backoff around every API call the service drives.
     #: A live run died on a bare `500 api_error` during the framework stage and
     #: discarded everything. Applied by wrapping the CLIENT, so it covers all
@@ -1101,6 +1131,7 @@ class JobRunner:
                 # default is the generator's own default (`registrar`), so the
                 # HTTP path -- which never sets this -- is unchanged.
                 risk_policy=self.engine.risk_policy,
+                real_environment=self.engine.real_environment,
                 # Hand-authored, live-validated probes replace the DRAFT for the
                 # criteria that have them; the council still reviews every one.
                 # Where there is no banked probe, drafting proceeds as before.
@@ -1172,11 +1203,11 @@ class JobRunner:
     def runnable_probes(self, record: JobRecord, plan: dict) -> list[dict]:
         """Which probes the approval actually authorises.
 
-        THE gate. `requiresSignoff` is read from the SERVER's stored probe, not
-        from the payload: the plan comes back from a browser, and a browser does
-        not get to declare that a crisis / minors' data / live-write probe is
-        safe. Approving the plan approves the plan; each gated probe still needs
-        its own POST /jobs/{id}/signoff.
+        THE gate. `holdsRun` (via `_holds_run`) is read from the SERVER's stored
+        probe, not from the payload: the plan comes back from a browser, and a
+        browser does not get to declare that a minors' data / live-write probe
+        against a real environment is safe. Approving the plan approves the plan;
+        each probe that holds the run still needs its own POST /jobs/{id}/signoff.
         """
         stored = {p["probeId"]: p for p in record.probes}
         edited = {
@@ -1191,7 +1222,7 @@ class JobRunner:
         out = []
         for pid in chosen:
             server = stored[pid]
-            if server["requiresSignoff"] and pid not in record.signoffs:
+            if _holds_run(server) and pid not in record.signoffs:
                 logger.info(
                     "job %s: el probe %s queda fuera de la corrida, falta firma humana",
                     record.job_id, pid,
@@ -1771,7 +1802,7 @@ class JobRunner:
         by_id = {p["probeId"]: p for p in stored}
         gated = [
             p for p in stored
-            if p.get("requiresSignoff") and p["probeId"] not in record.signoffs
+            if _holds_run(p) and p["probeId"] not in record.signoffs
         ]
 
         def unscored(cause: str, text: str) -> Any:

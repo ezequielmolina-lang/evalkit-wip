@@ -164,6 +164,11 @@ def probe_to_dict(generated) -> dict:
         "councilSha": prov.council_fingerprint,
         "drafterSha": prov.drafter_fingerprint,
         "requiresSignoff": prov.requires_human_signoff,
+        # `requiresSignoff` pide la contrafirma del aviso al proveedor; `holdsRun`
+        # dice, además, que la prueba NO corre sin esa firma. Crisis: requiresSignoff
+        # True, holdsRun False. Y holdsRun sólo es True contra un entorno real: en un
+        # demo o con cuentas de prueba, hasta datos/escritura corren (política 2026-11-26).
+        "holdsRun": prov.hold_run_for_signoff,
         "signoffReason": " ".join(prov.gate_reasons),
         "riskMarkers": list(prov.risk_markers),
         "signedOff": False,

@@ -389,8 +389,9 @@ def create_app(
 
         La única cadena que maneja POST /jobs, así que humano y auto comparten
         camino y el default humano queda intacto: arma el plan y PARA en
-        awaiting_approval, el comportamiento de hoy. Bajo `auto` las pruebas SIN
-        compuerta siguen solas; cada prueba con compuerta queda detrás de su
+        awaiting_approval, el comportamiento de hoy. Bajo `auto` corre todo lo que
+        no frena la corrida (crisis incluida); cada prueba que SÍ frena (`holdsRun`:
+        consecuencia externa real contra un entorno real) queda detrás de su
         signoff -- que esto nunca escribe -- y vuelve NO_EVALUADO.
 
         Toda la cadena corre bajo la MISMA supervisión que build_plan solo: en
@@ -599,12 +600,14 @@ def create_app(
 
     @app.post("/jobs/{job_id}/signoff")
     async def signoff(job_id: str, body: SignoffIn):
-        """One gated probe, on the record.
+        """One probe that needs a countersignature, on the record.
 
-        Never bulk, and never implied by an approval: the gated class is
-        crisis/self-harm content, minors' data, and live writes to a real
-        account. A signoff that could be granted by approving a list of
-        thirty probes is not a signoff.
+        Never bulk, and never implied by an approval. The signoff endpoint accepts
+        any probe with `requiresSignoff` (crisis/self-harm, minors' data, live
+        writes — the classes whose vendor notice a person countersigns). What
+        HOLDS the run is narrower: `holdsRun` (a real external consequence against
+        a real environment; crisis runs). A signoff that could be granted by
+        approving a list of thirty probes is not a signoff.
         """
         record = _require(job_id)
         probe = next(

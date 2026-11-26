@@ -1169,6 +1169,13 @@ class Provenance:
     #: stays True if the panel approved. Under `bloquear` it accompanies
     #: `blocked` and `approved` is False.
     requires_human_signoff: bool
+    #: Además de pedir contrafirma, FRENA la corrida hasta que firme una persona.
+    #: True sólo cuando la clase es consecuencia externa real (datos de menores,
+    #: escritura en cuenta real), propia o heredada, NO de crisis, Y el trabajo
+    #: corre contra un entorno real (`real_environment`). En un demo o con cuentas
+    #: de prueba es False y la prueba corre. Crisis: `requires_human_signoff=True`,
+    #: `hold_run_for_signoff=False` (política de Ezequiel, 2026-11-26).
+    hold_run_for_signoff: bool = False
     risk_markers: list[str] = field(default_factory=list)
     gate_reasons: list[str] = field(default_factory=list)
     #: WHICH layer stopped this probe: marcador / transitivo /
@@ -1242,6 +1249,7 @@ class Provenance:
             "approved": self.approved,
             "panel_approved": self.panel_approved,
             "requires_human_signoff": self.requires_human_signoff,
+            "hold_run_for_signoff": self.hold_run_for_signoff,
             "risk_policy": self.risk_policy,
             "flagged": self.flagged,
             "blocked": self.blocked,
@@ -1965,6 +1973,30 @@ SIGNAL_CLASSIFIER = "clasificador_de_riesgo"
 #: Kept so nothing importing the old name breaks. Same token, one object.
 SIGNAL_JUDGE = SIGNAL_CLASSIFIER
 
+#: Las clases de riesgo cuyo freno de la corrida tiene sentido SÓLO si hay una
+#: consecuencia externa real: tocar datos de menores reales o escribir en la
+#: cuenta real de un tercero (incluye mover plata o publicar en una clase viva).
+#:
+#: POR QUÉ ESTA LISTA, Y POR QUÉ NO ALCANZA SOLA. El 2026-11-26 Ezequiel fijó la
+#: política: iniciar una corrida ES el consentimiento para el estrés completo, y
+#: la firma humana POR PRUEBA (la que FRENA la corrida) queda sólo para una
+#: consecuencia externa REAL. Dos cosas que esto implica y que cuestan si se
+#: olvidan:
+#:   1. CRISIS NUNCA FRENA. Una sonda de crisis trae el marcador de "escritura
+#:      en cuenta real" porque su criterio de éxito es que la PLATAFORMA avise a
+#:      un adulto / escale al docente: eso es comportamiento de la plataforma que
+#:      se evalúa, no una escritura del evaluador. Si una sonda es de crisis, no
+#:      frena, aunque también traiga el marcador de escritura.
+#:   2. "REAL" ES DEL ENTORNO, NO DEL TEXTO. El marcador salta por el texto de la
+#:      prueba, pero en una evaluación encargada sobre un demo o con cuentas de
+#:      prueba (el caso normal) NO hay datos ni cuentas reales, así que no hay qué
+#:      frenar. El freno se arma sólo cuando el trabajo declara que el objetivo es
+#:      un entorno real/producción (`real_environment=True`). Por defecto, no.
+#: `requires_human_signoff` (contrafirmar el aviso al proveedor) sigue existiendo
+#: para crisis/menores/escritura en cualquier caso; esta lista decide algo más
+#: angosto: cuándo, ADEMÁS, la prueba no corre sin esa firma.
+REAL_CONSEQUENCE_MARKERS = frozenset({"datos_de_menores", "escritura_en_cuenta_real"})
+
 #: Fewest hyphen-separated segments an id-alias may have. Criterion ids read
 #: `PT-D9-S1` and probes cite them in shorthand ("la sonda D9-S1"), so `D9-S1`
 #: has to match. `S1` alone does not: one segment is a word, not a citation.
@@ -1980,6 +2012,13 @@ class GateDecision:
     signals: list[str]
     reasons: list[str]
     references: list[str]
+    #: `gated` dice que hay firma (contrafirma del aviso). `hard_hold` dice que la
+    #: CLASE es de consecuencia externa real (datos de menores / escritura en
+    #: cuenta real), propia o heredada por cita, y NO de crisis. Si además el
+    #: trabajo corre contra un entorno real, esta clase frena la corrida sin firma;
+    #: en un demo o con cuentas de prueba no frena (ver `_apply_policy`). Una sonda
+    #: de crisis es `gated=True, hard_hold=False`: se avisa, se contrafirma y corre.
+    hard_hold: bool = False
 
 
 def _risk_blobs(test: CriterionTest, probe: Probe, policy: RiskPolicy) -> list[str]:
@@ -2089,12 +2128,19 @@ def _direct_gate(
                 "al proveedor."
             )
 
+    _ids = [m.id for m in matched]
     return GateDecision(
         gated=bool(reasons),
-        marker_ids=[m.id for m in matched],
+        marker_ids=_ids,
         signals=signals,
         reasons=reasons,
         references=[],
+        # Clase de consecuencia real, env-independiente. Crisis nunca frena,
+        # aunque traiga el marcador de escritura (ese marcador describe lo que la
+        # plataforma debería hacer, no una escritura del evaluador). La duda del
+        # clasificador y la precondición declarada son señales de seguridad, no
+        # consecuencias reales: tampoco frenan.
+        hard_hold=any(mid in REAL_CONSEQUENCE_MARKERS for mid in _ids) and "crisis" not in _ids,
     )
 
 
@@ -2139,10 +2185,23 @@ def gate_probe_set(
                     continue
                 if _cites(haystacks[i], other_probe_id) or _cites(haystacks[i], other_test_id):
                     new_refs.append(other_probe_id)
-            if not new_refs:
+            all_refs = [*d.references, *new_refs]
+            # La clase de consecuencia real se hereda por cita y a cualquier
+            # profundidad: si A cita a B y B a C (cuenta real), A también es de la
+            # clase que frena. Se recalcula desde TODAS las referencias en cada
+            # barrido, no sólo las nuevas, para que suba por la cadena aunque B se
+            # marque después de que A ya lo citara. Pero crisis nunca frena: si el
+            # propio texto de A es de crisis, A no hereda el freno.
+            ref_hold = any(
+                decisions[k].hard_hold
+                for k, (pid, _) in enumerate(ids)
+                if pid in all_refs
+            )
+            hard_hold = (d.hard_hold or ref_hold) and "crisis" not in d.marker_ids
+            if not new_refs and hard_hold == d.hard_hold:
                 continue
             signals = list(d.signals)
-            if SIGNAL_TRANSITIVE not in signals:
+            if new_refs and SIGNAL_TRANSITIVE not in signals:
                 signals.append(SIGNAL_TRANSITIVE)
             reasons = list(d.reasons)
             for ref in new_refs:
@@ -2157,7 +2216,8 @@ def gate_probe_set(
                 marker_ids=d.marker_ids,
                 signals=signals,
                 reasons=reasons,
-                references=[*d.references, *new_refs],
+                references=all_refs,
+                hard_hold=hard_hold,
             )
             changed = True
         if not changed:
@@ -2195,8 +2255,14 @@ def _apply_policy(
     notice_context: dict,
     *,
     approved_by_panel: bool,
+    real_environment: bool = False,
 ) -> Provenance:
-    """Turn a classification into a record, a notice, and (only if asked) a refusal."""
+    """Turn a classification into a record, a notice, and (only if asked) a refusal.
+
+    `real_environment` es lo que convierte la CLASE de consecuencia real
+    (`decision.hard_hold`) en un FRENO de la corrida: sólo un objetivo
+    real/producción frena; en un demo o con cuentas de prueba la prueba corre
+    igual (se avisa y se contrafirma, pero no se frena)."""
     flagged = decision.gated
     blocked = flagged and risk_policy == POLICY_BLOCK
     notice = (
@@ -2209,6 +2275,7 @@ def _apply_policy(
         approved=approved_by_panel and not blocked,
         panel_approved=approved_by_panel,
         requires_human_signoff=flagged,
+        hold_run_for_signoff=decision.hard_hold and real_environment,
         risk_policy=risk_policy,
         flagged=flagged,
         blocked=blocked,
@@ -2573,6 +2640,7 @@ def reclassify(
     policy: RiskPolicy | None = None,
     risk_policy: str | None = None,
     notice_context: dict | None = None,
+    real_environment: bool = False,
 ) -> GeneratedProbe:
     """Re-run the TEXT-derived risk signals over a probe's current text.
 
@@ -2598,6 +2666,10 @@ def reclassify(
                 r for r in prov.gate_reasons if SIGNAL_TRANSITIVE in r
             ]],
             references=list(prov.gate_references),
+            # Un probe con cita heredada que además pisó una clase real (o que ya
+            # frenaba) sigue en la clase que frena; crisis nunca frena.
+            hard_hold=(decision.hard_hold or prov.hold_run_for_signoff)
+            and "crisis" not in decision.marker_ids,
         )
     return GeneratedProbe(
         probe=generated.probe,
@@ -2605,6 +2677,7 @@ def reclassify(
             prov, decision, test, generated.probe, policy, risk_policy,
             dict(notice_context or {}),
             approved_by_panel=prov.panel_approved,
+            real_environment=real_environment,
         ),
     )
 
@@ -2669,6 +2742,7 @@ def generate_probes(
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     objective: str | None = None,
     risk_policy: str = DEFAULT_RISK_POLICY,
+    real_environment: bool = False,
     notice_context: dict | None = None,
     probe_bank: Any = None,
     surfaces: dict | None = None,
@@ -2853,6 +2927,7 @@ def generate_probes(
             provenance=_apply_policy(
                 base, decision, test, probe, policy, risk_policy, notice_context,
                 approved_by_panel=panel.unanimous_approval,
+                real_environment=real_environment,
             ),
         ))
 

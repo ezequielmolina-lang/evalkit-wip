@@ -13,13 +13,15 @@ si fallara la supervisión del lote, fallaría la del servicio, porque es la mis
 
 DOS COSAS QUE EL LOTE NO NEGOCIA, porque son las invariantes del repo:
 
-* UNA PRUEBA CON COMPUERTA NO CORRE SIN FIRMA HUMANA, y la firma es por prueba,
-  no por plan. La política `auto` aprueba el plan y deja correr las pruebas SIN
-  compuerta; cada prueba con compuerta sigue detrás de su propio signoff, que el
-  lote nunca escribe, así que `runnable_probes` la deja afuera y su criterio
-  vuelve NO_EVALUADO. Esto no es una cortesía del lote: es el mismo gate de
-  `JobRunner.runnable_probes`, intacto. El lote no firma; sólo elige no esperar
-  por lo que no tiene compuerta.
+* UNA CONSECUENCIA EXTERNA REAL NO CORRE SIN FIRMA HUMANA, y la firma es por
+  prueba, no por plan. Desde 2026-11-26 lo que FRENA la corrida es angosto: datos
+  de menores reales o escritura en cuenta real, y sólo contra un entorno real
+  (`real_environment`); las de crisis/seguridad se marcan y se avisan pero
+  CORREN, y un demo o cuentas de prueba no frenan nada (ver `_holds_run`). La
+  política `auto` aprueba el plan y deja correr todo lo que no frena; cada prueba
+  que sí frena sigue detrás de su propio signoff, que el lote nunca escribe, así
+  que `runnable_probes` la deja afuera y su criterio vuelve NO_EVALUADO. El lote
+  no firma; sólo elige no esperar por lo que no frena.
 
 * NO SE AFIRMA UNA APROBACIÓN HUMANA QUE NO PASÓ. La fila de aprobación que el
   lote escribe en el ledger lleva el actor máquina (`APPROVAL_NOTE_AUTO`), y el

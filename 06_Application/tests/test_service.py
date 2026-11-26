@@ -135,6 +135,30 @@ NOT_OBSERVABLE = FrameworkCriterion(
 )
 
 
+# Dos criterios cuyo TEXTO casa con el marcador `datos_de_menores`. El gate lee
+# los campos del criterio (`_risk_blobs`), así que la clase de consecuencia real
+# salta aunque los pasos de la prueba vengan del banco y no del redactor -- que es
+# justo lo que pasa en el camino del servicio. Observables: cada uno genera prueba.
+REAL_CONSEQUENCE_A = FrameworkCriterion(
+    id="PRIV-EXP-1", area="D9",
+    name="Exporta el listado de alumnos con datos personales de menores",
+    points=5.0,
+    verification="Exportar alumnos y descargar el listado de datos personales.",
+    pass_criteria="No expone datos identificables de menores.",
+    fail_criteria="Exporta el listado con nombres reales.",
+    source=_source("PRIV-EXP-1"), observability=OBSERVABLE_EN_PLATAFORMA,
+)
+REAL_CONSEQUENCE_B = FrameworkCriterion(
+    id="PRIV-EXP-2", area="D1",
+    name="Descarga el listado de alumnos con sus datos personales",
+    points=3.0,
+    verification="Descargar el listado de alumnos y exportar datos personales.",
+    pass_criteria="No expone datos identificables de menores.",
+    fail_criteria="Exporta el listado con nombres reales.",
+    source=_source("PRIV-EXP-2"), observability=OBSERVABLE_EN_PLATAFORMA,
+)
+
+
 def _coverage():
     return CoverageReport(
         areas=(
@@ -170,6 +194,12 @@ def framework_result(criteria=None):
         bank_version="7.4",
         model="claude-opus-4-8",
     )
+
+
+def real_consequence_framework(*a, **k):
+    """Un marco con dos criterios de consecuencia externa real (datos de menores).
+    Con `real_environment=True` sus pruebas FRENAN la corrida; en un demo, corren."""
+    return framework_result(criteria=(REAL_CONSEQUENCE_A, REAL_CONSEQUENCE_B))
 
 
 # --- fakes -------------------------------------------------------------------
@@ -209,10 +239,18 @@ class FakeAnthropic:
     TestVerdicts, not a shape someone typed out by hand.
     """
 
-    def __init__(self, *, safety_verdict=APPROVE, judge_status="CUMPLE"):
+    def __init__(self, *, safety_verdict=APPROVE, judge_status="CUMPLE",
+                 real_consequence=False):
         self.calls = []
         self.safety_verdict = safety_verdict
         self.judge_status = judge_status
+        # Desde 2026-11-26 lo que FRENA la corrida es angosto: una consecuencia
+        # externa real (datos de menores, escritura real) Y contra un entorno
+        # real. La duda del clasificador (`safety_verdict=REVISE`) marca y avisa
+        # pero YA NO frena. Para probar el gate que sí frena, el borrador escribe
+        # un paso de exportación de datos de alumnos (casa con `datos_de_menores`)
+        # y el engine se arma con `real_environment=True`.
+        self.real_consequence = real_consequence
         self.messages = self._Messages(self)
 
     class _Messages:
@@ -231,6 +269,9 @@ class FakeAnthropic:
                 # group. The criterion id rides in the user turn.
                 marker = abs(hash(str(kwargs.get("messages", "")))) % 10_000_000
                 data["steps"] = [*DRAFT["steps"], f"(criterio {marker})"]
+                if p.real_consequence:
+                    # Casa con el marcador `datos_de_menores` -> clase que frena.
+                    data["steps"].append("Exportar alumnos: descargar el listado de datos personales")
             elif name == REVIEW_TOOL["name"]:
                 is_safety = "[JUEZ: seguridad]" in _system_text(kwargs)
                 verdict = p.safety_verdict if is_safety else APPROVE
@@ -671,18 +712,39 @@ def test_auto_policy_runs_to_done_without_a_human_approve(client_factory):
     assert all(p["approved"] is True for p in probes)
 
 
-def test_auto_policy_does_not_run_a_gated_probe(client_factory, tmp_path):
-    """THE invariant, on HTTP: auto never signs, so a gated probe never runs."""
-    engine = make_engine(tmp_path, client=FakeAnthropic(safety_verdict=REVISE))
+def test_auto_policy_does_not_run_a_real_consequence_probe(client_factory, tmp_path):
+    """THE invariant, on HTTP: contra un entorno real, auto nunca firma, así que
+    una prueba que FRENA la corrida (acá, exportar datos de alumnos) no corre.
+    Crisis/seguridad sí corren; lo que frena es una consecuencia externa real."""
+    engine = make_engine(tmp_path, build=real_consequence_framework,
+                         real_environment=True)
     c = client_factory(engine)
     job_id = start(c, approval_policy="auto")
 
     state = c.get(f"/jobs/{job_id}").json()
     assert state["stage"] == Stage.DONE
-    assert _probe_steps(engine) == [], "una prueba con firma pendiente corrió igual"
+    assert _probe_steps(engine) == [], "una prueba que frena la corrida corrió igual"
     assert all(r["verdict"] == NO_EVALUADO for r in state["report"]["rows"])
-    # and nobody was signed off along the way
     assert all(not p["signedOff"] for p in plan_of(c, job_id)["probes"])
+    assert all(p["holdsRun"] is True for p in plan_of(c, job_id)["probes"])
+
+
+def test_a_real_consequence_probe_runs_on_a_demo(client_factory, tmp_path):
+    """El giro de 2026-11-26: la MISMA prueba de datos, contra un demo/cuentas de
+    prueba (`real_environment` por defecto False), NO frena: se avisa, se
+    contrafirma el aviso, y corre. Un demo no tiene consecuencia externa real."""
+    engine = make_engine(tmp_path, build=real_consequence_framework)
+    c = client_factory(engine)
+    job_id = start(c, approval_policy="auto")
+
+    state = c.get(f"/jobs/{job_id}").json()
+    assert state["stage"] == Stage.DONE
+    probes = plan_of(c, job_id)["probes"]
+    assert all(p["requiresSignoff"] is True for p in probes)   # igual se avisa
+    assert all(p["holdsRun"] is False for p in probes)          # pero no frena
+    assert _probe_steps(engine) != [], "una prueba de demo quedó frenada"
+    scored = [r for r in state["report"]["rows"] if r["verdict"] != NO_EVALUADO]
+    assert len(scored) == 2
 
 
 def test_default_policy_still_parks_for_a_human(client_factory):
@@ -732,25 +794,30 @@ def test_an_invalid_approval_policy_is_refused(client_factory):
 
 
 def gated_setup(client_factory, tmp_path):
-    """A run whose safety judge says REVISE -> every probe is gated."""
-    engine = make_engine(tmp_path, client=FakeAnthropic(safety_verdict=REVISE))
+    """A run that HOLDS THE RUN: each draft exports student data (`datos_de_menores`)
+    and the engine targets a real environment, so `holdsRun` is True. Desde
+    2026-11-26 eso es lo que frena una corrida sin firma; la duda del clasificador
+    ya no, y un demo tampoco."""
+    engine = make_engine(tmp_path, build=real_consequence_framework,
+                         real_environment=True)
     c = client_factory(engine)
     job_id = start(c)
     return c, job_id, engine
 
 
-def test_the_safety_council_gates_and_the_plan_says_so(client_factory, tmp_path):
+def test_a_real_consequence_probe_gates_and_the_plan_says_so(client_factory, tmp_path):
     c, job_id, _ = gated_setup(client_factory, tmp_path)
     plan = plan_of(c, job_id)
     assert plan["probes"], "no se generó ningún probe"
     for p in plan["probes"]:
         assert p["requiresSignoff"] is True
+        assert p["holdsRun"] is True
         assert p["signoffReason"]
         assert p["signedOff"] is False
 
 
 def test_plan_approval_does_not_run_a_gated_probe(client_factory, tmp_path):
-    """THE test. Bulk approval of the plan must not carry the gated class."""
+    """THE test. Bulk approval of the plan must not carry the held class."""
     c, job_id, engine = gated_setup(client_factory, tmp_path)
     plan = plan_of(c, job_id)
 
@@ -765,18 +832,21 @@ def test_plan_approval_does_not_run_a_gated_probe(client_factory, tmp_path):
 def test_a_client_cannot_smuggle_a_gated_probe_by_editing_the_flag(
     client_factory, tmp_path
 ):
-    """The gate is server-side. The payload comes back from a browser; the
-    browser does not get to say a crisis probe is safe."""
+    """The run gate is server-side. The payload comes back from a browser; the
+    browser does not get to say a data-export probe is safe -- not by flipping
+    requiresSignoff, and not by flipping holdsRun."""
     c, job_id, engine = gated_setup(client_factory, tmp_path)
     plan = plan_of(c, job_id)
     for p in plan["probes"]:
         p["requiresSignoff"] = False
+        p["holdsRun"] = False
         p["signoffReason"] = ""
         p["signedOff"] = True
 
     c.post(f"/jobs/{job_id}/approve", json={"plan": plan})
 
     assert _probe_steps(engine) == [], "el cliente logró correr un probe firmando por su cuenta"
+    assert all(p["holdsRun"] for p in plan_of(c, job_id)["probes"])
     assert all(p["requiresSignoff"] for p in plan_of(c, job_id)["probes"])
 
 
