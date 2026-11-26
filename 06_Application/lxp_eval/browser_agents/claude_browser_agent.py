@@ -385,8 +385,8 @@ class ClaudeBrowserAgent:
         model: str | None = None,
         max_iterations: int = 25,
         cost_cap_usd: float = 5.0,
-        price_per_m_input: float = DEFAULT_PRICE_PER_M_INPUT,
-        price_per_m_output: float = DEFAULT_PRICE_PER_M_OUTPUT,
+        price_per_m_input: float | None = None,
+        price_per_m_output: float | None = None,
         transcript_dir: Path | None = None,
     ) -> None:
         self.driver = driver
@@ -405,6 +405,12 @@ class ClaudeBrowserAgent:
         # (una acción y un `done`); un informe del recorrido necesita más, y
         # `AgentDriver.explore` lo sube mientras dura la exploración.
         self.max_tokens = 2048
+        # Cuánto esfuerzo se le pide al modelo (`output_config.effort`), o None
+        # para no mandarlo. Lo pone `AgentDriver.do` mientras dura un paso: ver
+        # ahí por qué un paso no necesita el esfuerzo por defecto.
+        self.effort: str | None = None
+        # None = el precio del modelo que se esté usando (pricing.prices_for).
+        # Un valor explícito manda, para quien corre con una tarifa propia.
         self.price_per_m_input = price_per_m_input
         self.price_per_m_output = price_per_m_output
         self.transcript_dir = transcript_dir
@@ -450,6 +456,7 @@ class ClaudeBrowserAgent:
         # None): forzarle un `done` a un paso que no terminó sería inventarle un
         # resultado, y ese paso tiene que seguir fallando ruidosamente.
         closing = getattr(self, "closing_tool", None)
+        nudged = False
 
         for iteration in range(self.max_iterations):
             result.turns = iteration + 1
@@ -458,6 +465,11 @@ class ClaudeBrowserAgent:
             forced: dict[str, Any] = {}
             if closing and remaining == 0:
                 forced = {"tool_choice": {"type": "tool", "name": closing}}
+            effort = getattr(self, "effort", None)
+            if effort:
+                # Por `extra_body` y no como argumento: el SDK instalado puede
+                # ser anterior a `output_config`, y así el pedido sale igual.
+                forced["extra_body"] = {"output_config": {"effort": effort}}
 
             try:
                 # PROMPT CACHING. This loop runs up to 20 turns per step and
@@ -530,12 +542,50 @@ class ClaudeBrowserAgent:
                         "name": getattr(block, "name", ""),
                         "input": getattr(block, "input", {}),
                     })
+                elif btype in ("thinking", "redacted_thinking"):
+                    # LOS BLOQUES DE PENSAMIENTO VUELVEN TAL CUAL. Con Opus 4.8
+                    # este agente no los recibía (no pide pensar). Sonnet 5.5 y
+                    # Haiku 5.5 piensan por defecto y la API espera el bloque,
+                    # sin tocar, en el turno siguiente; este bucle reconstruía
+                    # el turno sólo con texto y herramientas y lo habría
+                    # perdido. Van en su lugar, en el orden en que llegaron.
+                    assistant_content.append(_block_as_dict(block))
             messages.append({"role": "assistant", "content": assistant_content})
 
             if text_blocks:
                 logger.info("Claude said: %s", " | ".join(t.strip()[:200] for t in text_blocks if t.strip()))
 
             stop_reason = getattr(response, "stop_reason", None)
+
+            if stop_reason == "refusal":
+                # Los modelos nuevos pueden negarse con un 200 y este motivo.
+                # Sin esta rama caía en "no llamó herramientas" y el paso se
+                # cortaba con "terminó sin declarar", que no dice qué pasó.
+                details = getattr(response, "stop_details", None)
+                category = getattr(details, "category", None) or "sin categoría"
+                logger.error("el modelo se negó a seguir (categoría: %s)", category)
+                result.blocked = True
+                result.block_reason = f"el modelo se negó a seguir (refusal: {category})"
+                break
+
+            if (
+                not tool_uses and not nudged and stop_reason == "end_turn"
+                and assistant_content and remaining > 0
+                and any(t.get("name") == "done" for t in self.tools)
+            ):
+                # CERRÓ HABLANDO EN VEZ DE LLAMAR A `done`. En la prueba de la
+                # API con Sonnet 5.5 (2026-11-25), ante un botón deshabilitado
+                # el modelo explicó en texto por qué no podía y terminó el
+                # turno. Para este bucle eso es "terminó sin declarar": un paso
+                # cortado sin motivo legible, o peor, un paso HECHO que se da
+                # por no hecho. Se le pide una vez que lo diga con `done`.
+                nudged = True
+                messages.append({"role": "user", "content": (
+                    "No llamaste a ninguna herramienta. Si el paso ya ocurrió o "
+                    "no se puede hacer, cerralo ahora llamando a `done` y decí "
+                    "cuál de las dos cosas pasó."
+                )})
+                continue
 
             if not tool_uses:
                 # No tools called — Claude is done talking. Treat as soft end.
@@ -808,9 +858,14 @@ class ClaudeBrowserAgent:
         The arithmetic lives in `evalkit.pricing.cost_usd`; this keeps its own
         signature and prices so every existing caller is undisturbed.
         """
+        price_in, price_out, price_read = _pricing.prices_for(getattr(self, "model", None))
+        if getattr(self, "price_per_m_input", None) is not None:
+            price_in, price_read = self.price_per_m_input, None
+        if getattr(self, "price_per_m_output", None) is not None:
+            price_out = self.price_per_m_output
         return _pricing.cost_usd(
             in_tok, out_tok, cache_read, cache_write,
-            price_in=self.price_per_m_input, price_out=self.price_per_m_output,
+            price_in=price_in, price_out=price_out, price_cache_read=price_read,
         )
 
     def _maybe_save_transcript(self, result: AgentRunResult) -> None:
@@ -839,6 +894,16 @@ def _short_json(obj: Any, n: int = 120) -> str:
     except Exception:  # noqa: BLE001
         s = str(obj)
     return s if len(s) <= n else s[:n] + "…"
+
+
+def _block_as_dict(block: Any) -> dict:
+    """Un bloque de la respuesta, como el diccionario que la API devolvió."""
+    if isinstance(block, dict):
+        return dict(block)
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True)
+    return {k: v for k, v in vars(block).items() if v is not None}
 
 
 def _safe_messages(messages: list[Any]) -> list[Any]:

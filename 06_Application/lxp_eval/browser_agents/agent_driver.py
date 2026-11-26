@@ -40,7 +40,8 @@ import logging
 import os
 from typing import Any
 
-from ..evalkit.steps import NOT_FOUND, is_observation, split_marks
+from ..config import CONFIG
+from ..evalkit.steps import DIRECT, NOT_FOUND, is_observation, split_marks
 from ..evalkit.errors import EvalkitError
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,8 @@ DEFAULT_MAX_ITERATIONS_PER_STEP = int(os.getenv("LXP_MAX_ITERS_PER_STEP", "20"))
 
 #: Topes más bajos para los dos pasos que no actúan sobre la página: el que sólo
 #: mira y el que puede no aplicar. Ver AgentDriver._turns_for.
+#: Salida por turno durante un paso (ver AgentDriver.do).
+STEP_MAX_OUTPUT_TOKENS = int(os.getenv("LXP_STEP_MAX_OUTPUT_TOKENS", "8192"))
 OBSERVE_MAX_ITERATIONS = int(os.getenv("LXP_OBSERVE_MAX_ITERS", "5"))
 OPTIONAL_MAX_ITERATIONS = int(os.getenv("LXP_OPTIONAL_MAX_ITERS", "8"))
 
@@ -481,9 +484,33 @@ class AgentDriver:
         max_iterations_per_step: int = DEFAULT_MAX_ITERATIONS_PER_STEP,
         cost_cap_usd_per_step: float = DEFAULT_COST_CAP_USD_PER_STEP,
         platform_url: str = "",
+        step_model: str | None = None,
+        step_effort: str | None = None,
+        direct_observation: bool | None = None,
     ) -> None:
         self._agent = agent
         self._driver = driver
+        # CON QUÉ MODELO SE EJECUTA UN PASO. Leer la página, tocar un control y
+        # decir si el paso ocurrió no pide el modelo que redacta y juzga, y en
+        # la corrida del 2026-11-25 eso era cerca del 70% del gasto, todo a
+        # precio de Opus. Un paso usa el modelo liviano; el recorrido
+        # (`explore`) sigue con el del agente, porque entender una plataforma
+        # que nadie describió sí es razonar, y porque su cierre obligatorio usa
+        # una herramienta forzada que los modelos 5.5 rechazan con un 400.
+        self.step_model = step_model or os.getenv("LXP_MODEL_STEPS") or CONFIG.model_light
+        # El esfuerzo que se le pide al modelo en un paso. `medium` es el punto
+        # de partida publicado para uso de herramientas en varios pasos; con el
+        # valor por defecto (`high`) piensa más de lo que un clic necesita.
+        # Vacío = no mandarlo (para un modelo que no lo acepte).
+        self.step_effort = (
+            step_effort if step_effort is not None else os.getenv("LXP_STEP_EFFORT", "medium")
+        )
+        # Un paso que sólo mira se guarda sin llamar al modelo (ver `do`).
+        self.direct_observation = (
+            direct_observation if direct_observation is not None
+            else os.getenv("LXP_DIRECT_OBSERVATION", "1") != "0"
+        )
+        self.steps_direct = 0
         #: Dónde está la plataforma. Viaja en cada paso (ver `_step_task`).
         self.platform_url = platform_url
         self.max_iterations_per_step = max_iterations_per_step
@@ -616,16 +643,42 @@ class AgentDriver:
         """
         logger.info("agente ejecutando paso: %s", step)
         _, optional, long = split_marks(step)
+        if self.direct_observation and not optional and is_observation(step):
+            # UN PASO QUE SÓLO MIRA NO NECESITA UN MODELO. "Guardar captura y
+            # texto de la tercera pregunta" no pide hacer nada: la captura la
+            # toma el runner apenas esto devuelve. Hasta el 2026-11-25 cada uno
+            # de estos pasos pagaba una conversación con el modelo (leer la
+            # página, a veces una captura, cerrar), y en las pruebas largas son
+            # cerca de la mitad de los pasos. Lo que se pierde es que alguien
+            # confirme que la pantalla muestra lo que el paso nombra; por eso
+            # la nota de la captura lo dice (runner._note) y el juez decide con
+            # el texto guardado. Un paso [SI APARECE] que mira NO entra acá:
+            # decidir si algo apareció sí necesita leer la pantalla.
+            self.steps_direct += 1
+            logger.info("paso de sólo mirar: captura directa, sin modelo")
+            return DIRECT
         # Un objetivo de varias interacciones recibe el doble de turnos, y sólo
         # él: subir el tope para todos fue lo que dejó a quince pruebas gastar
         # 30 turnos cada una buscando algo que no existía.
+        before = (
+            getattr(self._agent, "model", None),
+            getattr(self._agent, "effort", None),
+            getattr(self._agent, "max_tokens", 2048),
+        )
         self._agent.max_iterations = self._turns_for(step, optional=optional, long=long)
+        self._agent.model = self.step_model
+        self._agent.effort = self.step_effort or None
+        # Pensar cuenta contra `max_tokens`, y los modelos livianos piensan por
+        # defecto: con 2048 un turno podía cortarse antes de llamar a la
+        # herramienta. Es un techo, no un gasto.
+        self._agent.max_tokens = max(int(before[2] or 0), STEP_MAX_OUTPUT_TOKENS)
         try:
             result = await self._agent.run(
                 system=STEP_SYSTEM, user_task=_step_task(step, self.platform_url)
             )
         finally:
             self._agent.max_iterations = self.max_iterations_per_step
+            self._agent.model, self._agent.effort, self._agent.max_tokens = before
 
         step_cost = float(getattr(result, "estimated_cost_usd", 0.0) or 0.0)
         self.spend_usd += step_cost

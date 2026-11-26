@@ -79,7 +79,13 @@ class Config:
     # `claude-opus-4-7-20260101` default was a stale, date-suffixed placeholder
     # that would 404).
     model_heavy: str = field(default_factory=lambda: os.getenv("LXP_MODEL_HEAVY", "claude-opus-4-8"))
-    model_light: str = field(default_factory=lambda: os.getenv("LXP_MODEL_LIGHT", "claude-opus-4-8"))
+    # EL LIVIANO MANEJA EL NAVEGADOR. Hasta el 2026-11-25 los dos apuntaban a
+    # Opus, y ejecutar los pasos (leer la página, tocar, escribir) era cerca
+    # del 70% del gasto de una corrida. Opus queda para lo que razona: el
+    # recorrido, el plan, redactar y juzgar. Sonnet 5.5 cuesta 2,5 veces menos
+    # por token; Haiku 5.5 mucho menos todavía, pero hay que medir que no corte
+    # más pruebas antes de bajarlo (ver agent_driver.AgentDriver).
+    model_light: str = field(default_factory=lambda: os.getenv("LXP_MODEL_LIGHT", "claude-sonnet-5-5"))
 
     # Behaviour
     dry_run: bool = field(default_factory=lambda: os.getenv("LXP_DRY_RUN", "false").lower() == "true")

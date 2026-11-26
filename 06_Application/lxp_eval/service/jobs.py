@@ -833,6 +833,12 @@ class JobRunner:
                 ),
             )
             return record
+        # Un plan guardado antes de la regla del cronómetro puede traer como
+        # "se prueba" un criterio que sólo se decide midiendo tiempos: se
+        # reclasifica acá, antes de pagar su redacción (ver planner.needs_stopwatch).
+        moved = planner_mod.reclassify_unmeasurable(record.strategy, record.criteria)
+        if moved:
+            logger.info("criterios que piden cronómetro, pasan a no medibles: %s", ", ".join(moved))
         decisions = {d["id"]: d for d in record.strategy}
         chosen = [
             d for d in record.strategy

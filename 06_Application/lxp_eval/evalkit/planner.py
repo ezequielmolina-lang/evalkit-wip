@@ -41,6 +41,7 @@ import base64
 import html
 import io
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -206,6 +207,59 @@ def _default_state(criterion: dict) -> tuple[str, str]:
     return FALTA_RECORRER, "el planificador no emitió una decisión para este criterio"
 
 
+#: Un criterio que pide un cronómetro: lo dice su verificación ("cronometrar")
+#: o su umbral está en segundos o milisegundos ("<1s", "200 ms"). Un umbral en
+#: minutos u horas NO entra: "el docente lo ve en menos de 5 minutos" se
+#: comprueba recargando la pantalla, sin medir nada.
+_STOPWATCH = re.compile(
+    r"cronometr|milisegund|medir (el tiempo|la latencia)|"
+    r"(?<![\w.,])\d+(?:[.,]\d+)?\s*(ms|s|seg|segundos?)\b",
+    re.IGNORECASE,
+)
+
+STOPWATCH_REASON = (
+    "pide cronometrar o un umbral en segundos, y quien ejecuta no mide tiempos: "
+    "opera la página y guarda captura y texto"
+)
+
+
+def needs_stopwatch(criterion: dict) -> bool:
+    """¿Este criterio sólo se puede decidir midiendo tiempos?
+
+    POR QUÉ. En la corrida completa del 2026-11-25 el criterio "Latencia <1s"
+    (verificación: "cronometrar respuesta a feedback") quedó como `se_prueba`,
+    se redactaron dos pruebas que pedían grabar la pantalla y las dos se
+    cortaron: gasto seguro, veredicto imposible. El planificador tiene la regla
+    escrita en su prompt; acá va la parte que el código puede comprobar solo.
+    """
+    text = " | ".join(
+        str(criterion.get(k) or "") for k in ("verification", "passCriteria", "failCriteria")
+    )
+    return bool(_STOPWATCH.search(text))
+
+
+def reclassify_unmeasurable(decisions: list[dict], criteria: list[dict]) -> list[str]:
+    """Pasa a `no_se_puede_medir` lo que `needs_stopwatch` detecta. En el lugar.
+
+    Sirve para un plan que ya está guardado (hecho antes de esta regla): se
+    llama al redactar desde el plan, así no se pagan pruebas que mueren seguro.
+    Devuelve los ids que cambió.
+    """
+    by_id = {str(c.get("id")): c for c in criteria or []}
+    changed: list[str] = []
+    for d in decisions or []:
+        if d.get("estado") != SE_PRUEBA or not needs_stopwatch(by_id.get(str(d.get("id")), {})):
+            continue
+        d["estado"] = NO_SE_PUEDE_MEDIR
+        d["cubeta"] = BUCKET[NO_SE_PUEDE_MEDIR]
+        d["motivo"] = STOPWATCH_REASON
+        d.setdefault("advertencias", []).append(
+            "decía 'se prueba', pero " + STOPWATCH_REASON + ": pasa a no se puede medir"
+        )
+        changed.append(str(d.get("id")))
+    return changed
+
+
 def validate_strategy(decisions: Any, criteria: list[dict], profile: dict | None) -> list[dict]:
     """Las decisiones del modelo, pasadas por lo que el código no le cree.
 
@@ -259,6 +313,12 @@ def validate_strategy(decisions: Any, criteria: list[dict], profile: dict | None
                     "decía 'se prueba' sin una pantalla del recorrido que lo "
                     "respalde: pasa a indefinido hasta que alguien diga dónde está"
                 )
+        if decision["estado"] == SE_PRUEBA and needs_stopwatch(criterion):
+            decision["estado"] = NO_SE_PUEDE_MEDIR
+            decision["motivo"] = STOPWATCH_REASON
+            notes.append(
+                "decía 'se prueba', pero " + STOPWATCH_REASON + ": pasa a no se puede medir"
+            )
         # Un pedido de documento sin decir CUÁL no se le puede mandar a nadie.
         # Vale también para el criterio que heredó su estado del marco.
         if decision["estado"] == NECESITA_DOCUMENTO and not decision["documento"]:

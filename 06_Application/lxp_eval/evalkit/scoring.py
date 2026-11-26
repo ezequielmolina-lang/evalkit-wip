@@ -124,7 +124,10 @@ JUDGE_SYSTEM = (
     "ocurrió. Una nota que dice [NO SE ENCONTRÓ, EL PASO NO SE HIZO] avisa "
     "además que quien ejecuta lo buscó sin encontrarlo y pudo haber tocado la "
     "pantalla: si la captura no muestra lo que el paso siguiente supone, esa "
-    "prueba no sirve para la regla y el veredicto es NO_EVALUADO."
+    "prueba no sirve para la regla y el veredicto es NO_EVALUADO. Una nota que "
+    "dice [CAPTURA DIRECTA] avisa que la pantalla se guardó tal como estaba, "
+    "sin que nadie comprobara que muestra lo que el paso nombra: lo que vale "
+    "es el texto y la imagen guardados, no el nombre del paso."
 )
 
 _CHECK_TOOL_NAME = "emitir_chequeo"

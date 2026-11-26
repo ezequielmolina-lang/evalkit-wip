@@ -43,6 +43,11 @@ MARKS = (OPTIONAL_MARK, LONG_MARK)
 #: quien miró la pantalla (ver runner._note y agent_driver.do).
 NOT_FOUND = "SIN ENCONTRAR: "
 
+#: Lo que devuelve quien ejecuta cuando un paso que sólo mira se resolvió sin
+#: llamar al modelo: el runner guarda la pantalla tal como está y lo dice en la
+#: nota (ver agent_driver.do para el porqué y runner._note).
+DIRECT = "CAPTURA DIRECTA"
+
 #: Más de esta fracción de pasos opcionales y la prueba puede terminar sin
 #: haber hecho nada: deja de ser una prueba.
 MAX_OPTIONAL_SHARE = 0.5

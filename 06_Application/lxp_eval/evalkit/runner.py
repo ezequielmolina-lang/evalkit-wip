@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .steps import NOT_FOUND, split_marks
+from .steps import DIRECT, NOT_FOUND, split_marks
 from .ledger import EvidenceLedger
 from .probes import Probe
 from .session import SessionExpired
@@ -98,7 +98,15 @@ def _note(
     evidencia de algo que no pasó.
     """
     note = f"paso {index}: {split_marks(step)[0]}"
-    if skipped.startswith(NOT_FOUND):
+    if skipped == DIRECT:
+        # El paso sólo pedía mirar y se guardó la pantalla sin que un modelo la
+        # leyera antes. La nota lo dice porque nadie confirmó que la pantalla
+        # muestre lo que el paso nombra: eso lo ve el juez en el texto guardado.
+        note += (
+            " [CAPTURA DIRECTA: se guardó la pantalla tal como estaba, sin "
+            "comprobar que muestre lo que el paso nombra]"
+        )
+    elif skipped.startswith(NOT_FOUND):
         # No es lo mismo "no apareció" (lo dijo quien ejecuta, mirando la
         # pantalla) que "se quedó sin turnos buscándolo": la nota no afirma lo
         # que nadie comprobó.

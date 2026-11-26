@@ -236,7 +236,8 @@ def test_a_step_that_only_looks_gets_few_turns_and_is_told_not_to_count(tmp_path
     """Con 20 turnos, un paso de mirar que dudó de "la tercera pregunta" los
     gastó todos respondiendo preguntas para llegar a una que ya tenía delante."""
     agente = _Agente([_res(), _res(), _res()])
-    driver = ad.AgentDriver(agente, _Navegador(tmp_path), max_iterations_per_step=20)
+    driver = ad.AgentDriver(agente, _Navegador(tmp_path), max_iterations_per_step=20,
+                            direct_observation=False)
     asyncio.run(driver.do("Guardar captura y texto de la tercera pregunta tal como aparece."))
     asyncio.run(driver.do(f"{st.OPTIONAL_MARK} Confirmar con el tutor el error que propone."))
     asyncio.run(driver.do("Tocar una opción."))
@@ -245,6 +246,178 @@ def test_a_step_that_only_looks_gets_few_turns_and_is_told_not_to_count(tmp_path
     tarea = ad._step_task("Guardar captura y texto de la tercera pregunta tal como aparece.")
     assert "OBSERVACIÓN" in tarea and "No la verifiques contra indicadores de avance" in tarea
     assert "OBSERVACIÓN" not in ad._step_task("Tocar una opción.")
+
+
+# --- ronda de costo: modelo liviano, captura directa, cronómetro ---------------
+
+
+def test_a_step_that_only_looks_is_captured_without_calling_the_model(tmp_path):
+    """En las pruebas largas cerca de la mitad de los pasos sólo miran, y cada
+    uno pagaba una conversación con el modelo. Ahora el runner guarda la
+    pantalla y la nota dice que nadie comprobó qué muestra."""
+    agente = _Agente([_res(), _res(accomplished=False, not_present=True, done_reason="no hay recuadro")])
+    driver = ad.AgentDriver(agente, _Navegador(tmp_path), platform_url="https://p.test/")
+    ledger = EvidenceLedger(tmp_path / "ledger.jsonl")
+    probe = _probe([
+        "Tocar una opción incorrecta.",
+        "Guardar captura y texto de la pregunta que quedó en pantalla.",
+        f"{st.OPTIONAL_MARK} Capturar el recuadro de sugerencia de repaso y guardar su texto.",
+    ])
+    asyncio.run(run_probe(probe, driver, ledger, platform="p.test", text_dir=tmp_path / "txt"))
+
+    assert len(agente.topes) == 2, "el paso 2 no llamó al modelo; el opcional sí"
+    assert driver.steps_direct == 1
+    notas = [r["note"] for r in ledger.read_all()]
+    del_paso_2 = [n for n in notas if n.startswith("paso 2:")]
+    assert del_paso_2 and all("[CAPTURA DIRECTA:" in n for n in del_paso_2)
+    assert all("CAPTURA DIRECTA" not in n for n in notas if not n.startswith("paso 2:"))
+    assert any("NO APARECIÓ" in n for n in notas if n.startswith("paso 3:"))
+    assert "[CAPTURA DIRECTA]" in sc.JUDGE_SYSTEM
+
+
+def test_a_step_runs_on_the_light_model_and_the_agent_gets_its_own_back(tmp_path):
+    """Ejecutar pasos era cerca del 70% del gasto, a precio del modelo que
+    juzga. El paso usa el liviano; el recorrido sigue con el del agente."""
+    vistos: list[tuple] = []
+
+    class _Espia(_Agente):
+        async def run(self, *, system, user_task):
+            vistos.append((self.model, self.effort, self.max_tokens))
+            return await super().run(system=system, user_task=user_task)
+
+    agente = _Espia([_res()])
+    agente.model, agente.effort, agente.max_tokens = "modelo-que-juzga", None, 2048
+    driver = ad.AgentDriver(agente, _Navegador(tmp_path), step_model="modelo-liviano",
+                            step_effort="medium")
+    asyncio.run(driver.do("Tocar una opción."))
+    assert vistos == [("modelo-liviano", "medium", ad.STEP_MAX_OUTPUT_TOKENS)]
+    assert (agente.model, agente.effort, agente.max_tokens) == ("modelo-que-juzga", None, 2048)
+
+
+def test_the_light_model_is_not_the_one_that_judges():
+    from lxp_eval.config import Config
+
+    limpio = Config()
+    import os
+    if not os.getenv("LXP_MODEL_LIGHT") and not os.getenv("LXP_MODEL_HEAVY"):
+        assert limpio.model_light == "claude-sonnet-5-5"
+        assert limpio.model_light != limpio.model_heavy
+
+
+def test_a_step_is_priced_at_the_rate_of_the_model_that_ran_it():
+    """Con una sola constante de precio, un paso hecho con Sonnet se habría
+    informado a precio de Opus y la comparación de costos habría salido falsa."""
+    from lxp_eval.browser_agents.claude_browser_agent import ClaudeBrowserAgent
+    from lxp_eval.evalkit import pricing
+
+    agente = object.__new__(ClaudeBrowserAgent)
+    agente.price_per_m_input = agente.price_per_m_output = None
+    agente.model = "claude-sonnet-5-5"
+    sonnet = agente._cost(1_000_000, 1_000_000, cache_read=1_000_000, cache_write=1_000_000)
+    assert sonnet == pytest.approx(2.0 + 10.0 + 0.10 + 2.50)
+    agente.model = "claude-opus-4-8"
+    assert agente._cost(1_000_000, 1_000_000) == pytest.approx(30.0)
+    agente.model = "un-modelo-que-nadie-cargó"
+    assert agente._cost(1_000_000, 0) == pytest.approx(pricing.DEFAULT_PRICE_PER_M_INPUT)
+
+
+def test_thinking_blocks_go_back_in_the_next_turn_untouched(monkeypatch):
+    """Sonnet 5.5 y Haiku 5.5 piensan por defecto y la API espera el bloque,
+    sin tocar, en el turno siguiente. El bucle armaba el turno sólo con texto y
+    herramientas."""
+    from lxp_eval.browser_agents import claude_browser_agent as cba
+
+    pedidos: list[dict] = []
+    pensamiento = SimpleNamespace(
+        type="thinking", thinking="", signature="firma-opaca",
+        model_dump=lambda exclude_none=True: {"type": "thinking", "thinking": "", "signature": "firma-opaca"},
+    )
+    respuestas = [
+        SimpleNamespace(content=[pensamiento, SimpleNamespace(type="tool_use", id="t1", name="wait",
+                                                              input={"seconds": 0})],
+                        stop_reason="tool_use", usage=None),
+        SimpleNamespace(content=[SimpleNamespace(type="tool_use", id="t2", name="done",
+                                                 input={"summary": "listo"})],
+                        stop_reason="tool_use", usage=None),
+    ]
+
+    def create(**kw):
+        pedidos.append(kw)
+        return respuestas.pop(0)
+
+    class _Driver:
+        state = SimpleNamespace(screenshots_taken=[])
+
+        async def wait(self, seconds):
+            return None
+
+    monkeypatch.setattr(cba.CONFIG, "dry_run", False)
+    agente = object.__new__(cba.ClaudeBrowserAgent)
+    agente.driver, agente.model, agente.max_iterations = _Driver(), "claude-sonnet-5-5", 5
+    agente.cost_cap_usd, agente.tools, agente.closing_tool = 5.0, cba.BROWSER_TOOLS, None
+    agente.max_tokens, agente.effort, agente.transcript_dir = 2048, "medium", None
+    agente.price_per_m_input = agente.price_per_m_output = None
+    agente.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    asyncio.run(agente.run(system="s", user_task="t"))
+
+    assert pedidos[0]["extra_body"] == {"output_config": {"effort": "medium"}}
+    turno = pedidos[1]["messages"][1]
+    assert turno["role"] == "assistant"
+    assert turno["content"][0] == {"type": "thinking", "thinking": "", "signature": "firma-opaca"}
+    assert turno["content"][1]["type"] == "tool_use"
+
+
+def test_a_model_that_ends_talking_is_asked_once_to_close_with_done(monkeypatch):
+    """Prueba de la API con Sonnet 5.5: ante un botón deshabilitado explicó en
+    texto por qué no podía y terminó el turno, sin llamar a `done`."""
+    from lxp_eval.browser_agents import claude_browser_agent as cba
+
+    pedidos: list[dict] = []
+    respuestas = [
+        SimpleNamespace(content=[SimpleNamespace(type="text", text="El botón está deshabilitado.")],
+                        stop_reason="end_turn", usage=None),
+        SimpleNamespace(content=[SimpleNamespace(type="tool_use", id="t1", name="done",
+                                                 input={"accomplished": False, "reason": "deshabilitado"})],
+                        stop_reason="tool_use", usage=None),
+    ]
+
+    def create(**kw):
+        pedidos.append(kw)
+        return respuestas.pop(0)
+
+    monkeypatch.setattr(cba.CONFIG, "dry_run", False)
+    agente = object.__new__(cba.ClaudeBrowserAgent)
+    agente.driver = SimpleNamespace(state=SimpleNamespace(screenshots_taken=[]))
+    agente.model, agente.max_iterations, agente.cost_cap_usd = "claude-sonnet-5-5", 5, 5.0
+    agente.tools, agente.closing_tool, agente.max_tokens = list(ad.STEP_TOOLS), None, 2048
+    agente.effort, agente.transcript_dir = None, None
+    agente.price_per_m_input = agente.price_per_m_output = None
+    agente.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    resultado = asyncio.run(agente.run(system="s", user_task="t"))
+
+    assert len(pedidos) == 2, "se le pidió una vez que cerrara"
+    assert "llamando a `done`" in pedidos[1]["messages"][-1]["content"][0]["text"]
+    assert resultado.accomplished is False and resultado.done_reason == "deshabilitado"
+
+
+def test_a_criterion_that_needs_a_stopwatch_is_not_tested():
+    """"Latencia <1s, cronometrar respuesta a feedback" quedó como "se prueba"
+    en la corrida completa: dos pruebas redactadas, las dos cortadas."""
+    criterios = [
+        {"id": "PT-D4-01", "name": "Latencia <1s", "verification": "Cronometrar respuesta→feedback",
+         "passCriteria": "<1s", "failCriteria": ">5s"},
+        {"id": "PT-D10-02", "name": "Latencia <5 min", "verification": "Estudiante responde; docente refresca",
+         "passCriteria": "<5 min", "failCriteria": ">24h"},
+        {"id": "PT-D5-06", "name": "Paso del error", "verification": "Provocar un error",
+         "passCriteria": "Identifica el paso 3", "failCriteria": "Sólo dice que está mal"},
+    ]
+    assert [pl.needs_stopwatch(c) for c in criterios] == [True, False, False]
+
+    decisiones = [{"id": c["id"], "estado": pl.SE_PRUEBA, "cubeta": "se_prueba", "motivo": ""}
+                  for c in criterios]
+    assert pl.reclassify_unmeasurable(decisiones, criterios) == ["PT-D4-01"]
+    assert decisiones[0]["estado"] == pl.NO_SE_PUEDE_MEDIR and decisiones[0]["advertencias"]
+    assert decisiones[1]["estado"] == decisiones[2]["estado"] == pl.SE_PRUEBA
 
 
 def test_an_optional_step_that_runs_out_of_turns_is_skipped_and_says_so(tmp_path):
