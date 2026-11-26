@@ -637,11 +637,18 @@ VOTING_JUDGES = tuple(j for j in COUNCIL if j.voting)
 #: después cortaron 50 ejecuciones (ver evalkit/steps.py), así que el consejo
 #: completo costaba sin proteger. Con un plan aprobado ya decidieron una
 #: persona y el planificador QUÉ se prueba y DÓNDE; lo que queda por revisar es
-#: si la prueba mide el criterio (coherencia_criterio), si se puede ejecutar en
-#: esta plataforma (realismo) y qué riesgo tiene (seguridad, que no vota y es la
-#: que alimenta la compuerta: no se saca nunca). Los otros cuatro asientos se
-#: sientan sólo si alguno de estos objeta o si hay riesgo: `escalate_to`.
-REDUCED_SEATS = ("coherencia_criterio", "realismo", "seguridad")
+#: si la prueba mide el criterio (coherencia_criterio) y qué riesgo tiene
+#: (seguridad, que no vota y es la que alimenta la compuerta: no se saca nunca).
+#: Los otros cinco asientos se sientan sólo si el juez objeta o si hay riesgo:
+#: `escalate_to`.
+#:
+#: UN JUEZ, NO TRES. La primera versión dejaba también a `realismo` ("¿se puede
+#: ejecutar en esta plataforma?"). Se sacó del asiento fijo porque lo que
+#: realismo miraba ya lo cubre código que no cuesta: la forma de los pasos la
+#: revisa `steps.lint_steps` antes del consejo, y el dónde lo fija el inventario
+#: de contenidos. Lo que el código no ve (un paso que supone un control que esta
+#: plataforma no tiene) lo sigue viendo realismo cuando el juez objeta.
+REDUCED_SEATS = ("coherencia_criterio", "seguridad")
 REDUCED_COUNCIL = tuple(j for j in COUNCIL if j.name in REDUCED_SEATS)
 assert {j.name for j in REDUCED_COUNCIL} == set(REDUCED_SEATS)
 

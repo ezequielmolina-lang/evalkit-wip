@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .steps import split_marks
+from .steps import NOT_FOUND, split_marks
 from .ledger import EvidenceLedger
 from .probes import Probe
 from .session import SessionExpired
@@ -98,7 +98,12 @@ def _note(
     evidencia de algo que no pasó.
     """
     note = f"paso {index}: {split_marks(step)[0]}"
-    if skipped:
+    if skipped.startswith(NOT_FOUND):
+        # No es lo mismo "no apareció" (lo dijo quien ejecuta, mirando la
+        # pantalla) que "se quedó sin turnos buscándolo": la nota no afirma lo
+        # que nadie comprobó.
+        note += f" [NO SE ENCONTRÓ, EL PASO NO SE HIZO: {skipped[len(NOT_FOUND):][:400]}]"
+    elif skipped:
         note += f" [NO APARECIÓ, EL PASO NO SE HIZO: {skipped[:400]}]"
     if kind == PAGE_TEXT and getattr(driver, "last_read_truncated", False):
         full = getattr(driver, "last_read_full_chars", 0)

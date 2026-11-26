@@ -247,6 +247,47 @@ def test_a_step_that_only_looks_gets_few_turns_and_is_told_not_to_count(tmp_path
     assert "OBSERVACIÓN" not in ad._step_task("Tocar una opción.")
 
 
+def test_an_optional_step_that_runs_out_of_turns_is_skipped_and_says_so(tmp_path):
+    """Verificación en vivo del 2026-11-25: el diálogo que el paso nombraba ya
+    había pasado, el agente lo buscó hasta el tope y la prueba se cortó con lo
+    que el criterio preguntaba en pantalla. Ahora la prueba sigue, y la nota no
+    dice "no apareció" (nadie lo comprobó): dice que no se encontró."""
+    agente = _Agente([
+        _res(),
+        _res(blocked=True, accomplished=None, block_reason="max_iterations (8) reached", turns=8),
+        _res(),
+    ])
+    driver = ad.AgentDriver(agente, _Navegador(tmp_path), platform_url="https://p.test/")
+    ledger = EvidenceLedger(tmp_path / "ledger.jsonl")
+    probe = _probe([
+        "Tocar una opción incorrecta.",
+        f"{st.OPTIONAL_MARK} Confirmar con el tutor el error que propone.",
+        "Capturar la pantalla tal como quede.",
+    ])
+    asyncio.run(run_probe(probe, driver, ledger, platform="p.test", text_dir=tmp_path / "txt"))
+
+    notas = [r["note"] for r in ledger.read_all()]
+    del_paso_2 = [n for n in notas if n.startswith("paso 2:")]
+    assert del_paso_2 and all("NO SE ENCONTRÓ, EL PASO NO SE HIZO" in n for n in del_paso_2)
+    assert all("NO APARECIÓ" not in n and st.NOT_FOUND not in n for n in notas)
+    assert any(n.startswith("paso 3:") for n in notas), "la prueba siguió"
+    assert "[NO SE ENCONTRÓ, EL PASO NO SE HIZO]" in sc.JUDGE_SYSTEM
+
+
+def test_only_the_turn_cap_skips_an_optional_step_and_a_plain_step_is_never_skipped(tmp_path):
+    """Un error de la API o el tope de costo no dicen nada del paso: cortan. Y
+    un paso común que agota sus turnos corta como siempre."""
+    agente = _Agente([
+        _res(blocked=True, accomplished=None, block_reason="APIError: 500"),
+        _res(blocked=True, accomplished=None, block_reason="max_iterations (20) reached"),
+    ])
+    driver = ad.AgentDriver(agente, _Navegador(tmp_path), platform_url="https://p.test/")
+    with pytest.raises(EvalkitError):
+        asyncio.run(driver.do(f"{st.OPTIONAL_MARK} Confirmar con el tutor el error que propone."))
+    with pytest.raises(EvalkitError):
+        asyncio.run(driver.do("Tocar el botón Empezar."))
+
+
 def test_the_drafter_is_told_a_capture_step_does_not_assume_a_shape():
     assert "sin suponer su forma" in gen.DRAFT_SYSTEM
 
@@ -356,8 +397,9 @@ def test_the_planner_is_told_what_the_executor_cannot_do():
 def test_the_reduced_council_keeps_the_risk_classifier():
     """El asiento de seguridad no vota, pero es el que alimenta la compuerta."""
     nombres = {j.name for j in gen.REDUCED_COUNCIL}
-    assert nombres == {"coherencia_criterio", "realismo", "seguridad"}
+    assert nombres == {"coherencia_criterio", "seguridad"}, "un juez que vota y el clasificador"
     assert gen.CLASSIFIER_JUDGE in nombres
+    assert [j.name for j in gen.REDUCED_COUNCIL if j.voting] == ["coherencia_criterio"]
 
 
 class _Cliente:
@@ -407,7 +449,7 @@ def test_a_bad_draft_goes_back_to_the_drafter_before_the_council_is_paid():
         _criterios(), client=cliente, council=gen.REDUCED_COUNCIL, max_rounds=1,
     )
     assert cliente.redacciones == 2, "una vuelta por el lint"
-    assert len(cliente.jueces) == 3, "el consejo vio UN borrador, el limpio"
+    assert len(cliente.jueces) == 2, "el juez y el clasificador vieron UN borrador, el limpio"
     assert resultado.probes[0].probe.steps[0].startswith(st.OPTIONAL_MARK)
 
 
@@ -415,9 +457,9 @@ def test_the_rest_of_the_council_sits_only_when_someone_objects():
     tranquilo = _Cliente([])
     gen.generate_probes(_criterios(), client=tranquilo, council=gen.REDUCED_COUNCIL,
                         escalate_to=gen.COUNCIL, max_rounds=1)
-    assert len(tranquilo.jueces) == 3
+    assert sorted(tranquilo.jueces) == ["coherencia_criterio", "seguridad"]
 
-    discutido = _Cliente([], objeta={"realismo"})
+    discutido = _Cliente([], objeta={"coherencia_criterio"})
     gen.generate_probes(_criterios(), client=discutido, council=gen.REDUCED_COUNCIL,
                         escalate_to=gen.COUNCIL, max_rounds=1)
     assert sorted(discutido.jueces) == sorted(j.name for j in gen.COUNCIL)

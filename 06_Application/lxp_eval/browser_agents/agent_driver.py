@@ -40,7 +40,7 @@ import logging
 import os
 from typing import Any
 
-from ..evalkit.steps import is_observation, split_marks
+from ..evalkit.steps import NOT_FOUND, is_observation, split_marks
 from ..evalkit.errors import EvalkitError
 
 logger = logging.getLogger(__name__)
@@ -443,9 +443,12 @@ def _step_task(step: str, platform_url: str = "") -> str:
     if optional:
         extra += (
             "\n\nEste paso está marcado [SI APARECE]: depende de algo que la "
-            "plataforma puede mostrar o no. Si aparece, hacelo. Si NO aparece, "
-            "no lo busques ni lo fuerces: llamá a `done` con accomplished=false "
-            "y no_aparecio=true, y contá en `reason` qué había en pantalla. La "
+            "plataforma puede mostrar o no. Leé la página UNA vez. Si lo que el "
+            "paso nombra está a la vista, hacelo. Si NO está a la vista en esa "
+            "lectura, no lo busques ni lo fuerces, y no toques ningún otro "
+            "control para hacerlo aparecer (puede ser que la plataforma ya haya "
+            "pasado ese momento): llamá a `done` con accomplished=false y "
+            "no_aparecio=true, y contá en `reason` qué había en pantalla. La "
             "prueba sigue."
         )
     if long:
@@ -588,6 +591,11 @@ class AgentDriver:
             return min(base, OPTIONAL_MAX_ITERATIONS)
         return base
 
+    @staticmethod
+    def _agent_turns(result: Any) -> str:
+        turns = getattr(result, "turns", None)
+        return str(turns) if turns else "sus"
+
     # --- the one method that needs the LLM --------------------------------
 
     async def do(self, step: str) -> str | None:
@@ -636,6 +644,21 @@ class AgentDriver:
 
         if getattr(result, "blocked", False):
             reason = getattr(result, "block_reason", None) or "sin motivo informado"
+            if optional and str(reason).startswith("max_iterations"):
+                # UN PASO OPCIONAL QUE AGOTA SUS TURNOS SE SALTEA. En la
+                # verificación en vivo del 2026-11-25 un paso [SI APARECE]
+                # ("confirmar la hipótesis que propone el tutor") cayó cuando la
+                # plataforma ya había mostrado la solución: el diálogo no estaba,
+                # y en vez de decirlo el agente lo buscó hasta el tope y la
+                # prueba se cortó con lo que el criterio preguntaba ya en
+                # pantalla. Sólo el tope de turnos: un error de la API o el tope
+                # de costo siguen cortando, porque no dicen nada del paso.
+                logger.info("paso opcional sin encontrar: %s", reason)
+                return NOT_FOUND + (
+                    f"quien ejecuta no encontró lo que el paso nombra en "
+                    f"{self._agent_turns(result)} turnos y no llegó a decirlo; "
+                    "pudo haber tocado la pantalla buscándolo"
+                )
             raise self._not_done(step, reason)
 
         accomplished = getattr(result, "accomplished", True)

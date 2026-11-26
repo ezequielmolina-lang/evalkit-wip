@@ -38,6 +38,11 @@ OPTIONAL_MARK = "[SI APARECE]"
 LONG_MARK = "[VARIOS TURNOS]"
 MARKS = (OPTIONAL_MARK, LONG_MARK)
 
+#: Con esto empieza lo que devuelve quien ejecuta cuando un paso [SI APARECE] se
+#: quedó sin turnos: el runner lo anota distinto de un "no apareció" dicho por
+#: quien miró la pantalla (ver runner._note y agent_driver.do).
+NOT_FOUND = "SIN ENCONTRAR: "
+
 #: Más de esta fracción de pasos opcionales y la prueba puede terminar sin
 #: haber hecho nada: deja de ser una prueba.
 MAX_OPTIONAL_SHARE = 0.5
