@@ -98,6 +98,19 @@ def criteria_out(criteria: list[dict]) -> list[dict]:
     return [{**c, "source": _source_out(c.get("source"))} for c in criteria]
 
 
+#: El esquema del plan aprobado cuando trae lecturas congeladas (ver
+#: `with_frozen_readings`). Un plan aprobado sin la clave `esquema` es anterior:
+#: no trae lecturas y se puntúa con la lectura generada en el momento.
+PLAN_SCHEMA = 2
+
+
+def readings_out(readings: dict | None) -> list[dict]:
+    """Las lecturas de un trabajo como las ve la web, en el orden en que se guardaron."""
+    from ..evalkit import lectura as lectura_mod
+
+    return [lectura_mod.public_view(cid, entry) for cid, entry in (readings or {}).items()]
+
+
 def with_frozen_readings(plan: dict, record: Any) -> dict:
     """El plan aprobado, con las lecturas congeladas si el trabajo las tiene.
 
@@ -117,6 +130,7 @@ def with_frozen_readings(plan: dict, record: Any) -> dict:
         plan.get("criteria") or criteria_out(record.criteria), record.objective
     )
     plan["lecturas"] = lectura_mod.freeze(readings, criteria.all_tests())
+    plan["esquema"] = PLAN_SCHEMA
     return plan
 
 

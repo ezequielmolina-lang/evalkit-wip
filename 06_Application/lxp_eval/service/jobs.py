@@ -1522,6 +1522,7 @@ class JobRunner:
             for cid, own in drafted.items():
                 if cid in record.readings:
                     record.readings[cid]["artefactos_requeridos"] = lectura_mod.required_artifacts(own)
+            self._plan_document_with_readings(record)
         record.sampling = dict(serialize.DEFAULT_SAMPLING)
         # KEEP THE NOTICE. It is rendered here and needed at signoff, which is
         # a different moment and a different screen; dropping it meant the
@@ -1555,6 +1556,36 @@ class JobRunner:
         return record
 
     # --- la lectura de la regla, corregida por una persona ------------------
+
+    def _plan_document_with_readings(self, record: JobRecord) -> None:
+        """Pone las lecturas en el documento del plan que quedó en disco (plan.json y plan.html).
+
+        El documento se armó antes de redactar las pruebas, sin lecturas (ver
+        planner.with_readings). Es el MISMO plan, misma versión, con la lectura
+        de cada criterio: quien lo abre antes de aprobar ve con qué se va a
+        juzgar. Es un documento derivado: si no se puede reescribir se avisa
+        en el log y la etapa sigue, porque las lecturas ya están en el registro
+        del trabajo, que es de donde las toma la aprobación.
+        """
+        path = self.store.dir_of(record.job_id) / "plan.json"
+        if not record.readings or not path.exists():
+            return
+        try:
+            import json
+
+            plan = planner_mod.with_readings(
+                json.loads(path.read_text(encoding="utf-8")), record.readings
+            )
+            path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            (path.parent / "plan.html").write_text(
+                planner_mod.render_plan_html(plan, self.store.artifacts_dir(record.job_id)),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001 -- documento derivado, ver el docstring
+            logger.warning(
+                "job %s: no se pudo poner las lecturas en el documento del plan",
+                record.job_id, exc_info=True,
+            )
 
     @staticmethod
     def _note_reading(record: JobRecord, decision: dict) -> None:
@@ -1638,6 +1669,7 @@ class JobRunner:
                 self._note_reading(fresh, d)
         self._fold_client_spend(fresh, client, "redaccion")
         self.store.save(fresh)
+        self._plan_document_with_readings(fresh)
         record.readings, record.strategy = fresh.readings, fresh.strategy
         record.spend_usd, record.spend_by_stage = fresh.spend_usd, fresh.spend_by_stage
         return fresh

@@ -641,6 +641,35 @@ NO_LEIDA = "no se pudo leer la regla"
 SIN_TIPO = "falta el tipo de evidencia"
 
 
+# --- lo que ve una persona ----------------------------------------------------
+
+
+def public_view(criterion_id: str, entry: dict) -> dict:
+    """La lectura de un criterio como la ve quien revisa el plan: en la web y en el documento.
+
+    Una sola forma para los dos lugares. `lectura` viene sólo si se puede
+    congelar: una muestra que no coincidió con la otra no se ofrece como "la
+    lectura" en ninguna pantalla, se muestra entre las `muestras`, que es lo
+    que es. `aviso` es lo que hay que mirar antes de aprobar ("" si nada).
+    """
+    ok = freezable(entry)
+    return {
+        "criterio": criterion_id,
+        "estado": entry.get("estado"),
+        "congelable": ok,
+        "lectura": copy.deepcopy(entry.get("lectura")) if ok else None,
+        "muestras": copy.deepcopy(entry.get("muestras") or []),
+        "acuerdo": copy.deepcopy(entry.get("acuerdo")),
+        "vaguedad": copy.deepcopy(entry.get("vaguedad")),
+        "aviso": review_note(entry),
+        "hash_lectura": str(entry.get("hash_lectura") or ""),
+        "editada_por": str(entry.get("editada_por") or ""),
+        "editada_en": str(entry.get("editada_en") or ""),
+        "artefactos_requeridos": [str(a) for a in (entry.get("artefactos_requeridos") or DEFAULT_ARTIFACTS)],
+        "versiones_anteriores": len(entry.get("historial") or []),
+    }
+
+
 # --- la compuerta por TIPO de artefacto --------------------------------------
 
 

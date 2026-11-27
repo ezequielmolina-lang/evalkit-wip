@@ -7,6 +7,8 @@
  * poll. Nothing here blocks on a long request.
  */
 
+import type { ReadingEdit } from "./types";
+
 // Port 8811, not the conventional 8080: a llama.cpp server already listens on
 // 8080 on this machine (the offline-model work). Defaulting there meant the web
 // would happily talk to llama.cpp and report its 404s as engine failures.
@@ -108,6 +110,19 @@ export const signoffProbe = (id: string, probeId: string) =>
   call<JobState>(`/jobs/${id}/signoff`, {
     method: "POST",
     body: JSON.stringify({ probe_id: probeId }),
+  });
+
+/**
+ * A person corrects the reading of ONE criterion's rule, or picks one of its
+ * samples. Only before the plan is approved; it does not touch the probes.
+ * The engine answers 422 with the reason when the correction makes no sense
+ * (an unknown field, a reading left without an end, no name) and 409 when the
+ * plan was approved meanwhile.
+ */
+export const editReading = (id: string, criterionId: string, edit: ReadingEdit) =>
+  call<JobState>(`/jobs/${id}/lecturas/${encodeURIComponent(criterionId)}`, {
+    method: "POST",
+    body: JSON.stringify(edit),
   });
 
 export const getReport = (id: string) => call<unknown>(`/jobs/${id}/report`);

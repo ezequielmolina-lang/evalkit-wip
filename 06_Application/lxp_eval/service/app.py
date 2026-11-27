@@ -70,7 +70,7 @@ from .ledger_decisions import (  # noqa: F401 -- _slug/_ledger_decision re-expor
     _slug,
     auto_approve,
 )
-from .models import ApiKeyIn, ApproveIn, SignoffIn, StartJobIn
+from .models import ApiKeyIn, ApproveIn, ReadingEditIn, SignoffIn, StartJobIn
 from .settings import SettingsStore
 from .store import JobRecord, JobStore, now
 from .watchdog import Clock, Supervisor, reconcile
@@ -183,6 +183,11 @@ def _plan_of(record: JobRecord) -> dict | None:
         "probes": probes,
         "sampling": record.sampling or dict(serialize.DEFAULT_SAMPLING),
         "coverage": record.coverage,
+        # La lectura de la regla de cada criterio, para revisarla y corregirla
+        # antes de aprobar (ver evalkit/lectura.py). Lista vacía en un trabajo
+        # hecho con el contrato apagado, o anterior a él.
+        "lecturas": serialize.readings_out(record.readings),
+        "esquema": serialize.PLAN_SCHEMA,
     }
 
 
@@ -594,6 +599,36 @@ def create_app(
         _ledger_the_approval(store, record)
 
         record = await _drive(runner.execute, record)
+        return _public_state(store.get(job_id) or record, store)
+
+    # --- la lectura de la regla, corregida por una persona -------------------
+
+    @app.post("/jobs/{job_id}/lecturas/{criterion_id}")
+    async def edit_reading(job_id: str, criterion_id: str, body: ReadingEditIn):
+        """Corrige la lectura de la regla de UN criterio, o elige una de sus muestras.
+
+        Es un camino aparte del de aprobar el plan y del de editar una prueba:
+        no toca las pruebas ni vuelve a sentar al consejo (ver
+        `JobRunner.edit_reading`). Sólo antes de aprobar: 409 si el plan ya se
+        aprobó o cambió mientras tanto. 422, con el motivo, si la corrección no
+        se entiende (un campo que no existe, un valor que no es texto, una
+        lectura que queda sin un extremo, sin nombre de quien corrige) o no
+        cambia nada.
+        """
+        record = _require(job_id)
+        if criterion_id not in (record.readings or {}):
+            raise HTTPException(
+                404, f'el trabajo "{job_id}" no tiene una lectura para "{criterion_id}"',
+            )
+        try:
+            record = await runner.edit_reading(
+                record, criterion_id, body.changes, by=body.by, sample=body.sample,
+            )
+        except ServiceError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:      # incluye una lectura que queda sin un extremo
+            raise HTTPException(422, str(exc)) from exc
+        logger.info("job %s: lectura de %s corregida por una persona", job_id, criterion_id)
         return _public_state(store.get(job_id) or record, store)
 
     # --- signoff -----------------------------------------------------------

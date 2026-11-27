@@ -1454,6 +1454,69 @@ def _tag(state: str) -> str:
     return f'<span class="tag {cls.get(BUCKET.get(state, state), "t-un")}">{_e(_STATE_LABEL.get(state, state))}</span>'
 
 
+#: El esquema del plan cuando trae las lecturas de la regla. Un plan sin esta
+#: clave es del esquema anterior: no tiene lecturas y se puntúa con la lectura
+#: generada en el momento.
+SCHEMA_WITH_READINGS = 2
+
+
+def with_readings(plan: dict, readings: dict | None) -> dict:
+    """El documento del plan, con la lectura de la regla de cada criterio. Devuelve un plan NUEVO.
+
+    POR QUÉ ES UNA FUNCIÓN APARTE Y NO UN PARÁMETRO DE `build_plan`. El
+    documento se arma (`build_plan`) cuando el plan queda listo para revisar,
+    ANTES de redactar las pruebas; la lectura se escribe después, en la etapa
+    de generación, que es la que tiene cliente. `build_plan` no puede recibir
+    lo que todavía no existe, y hacerle llamar al modelo rompería que sea una
+    función pura. Así que la lectura entra al documento como dato, cuando ya
+    existe: mismo plan, misma versión, con un campo más por criterio.
+
+    Sin lecturas devuelve el plan igual, sin marcar el esquema.
+    """
+    if not readings:
+        return plan
+    from . import lectura as lectura_mod
+
+    out = dict(plan)
+    out["esquema"] = SCHEMA_WITH_READINGS
+    out["criterios"] = [
+        {**c, "lectura": lectura_mod.public_view(str(c.get("id")), readings[str(c.get("id"))])}
+        if str(c.get("id")) in readings else c
+        for c in plan.get("criterios") or []
+    ]
+    return out
+
+
+def _reading_block(view: dict) -> str:
+    """La lectura de un criterio, en el documento: la vara con la que se va a juzgar."""
+    rows = []
+    labels = (
+        ("pregunta", "Qué pregunta la regla"), ("definiciones", "Definiciones"),
+        ("cumple", "CUMPLE si se observa"), ("parcial", "PARCIAL si se observa"),
+        ("no_cumple", "NO_CUMPLE si se observa"), ("no_alcanza", "No alcanza para decidir"),
+    )
+    if view.get("lectura"):
+        for key, label in labels:
+            if view["lectura"].get(key):
+                rows.append(f"<tr><th>{_e(label)}</th><td>{_e(view['lectura'][key])}</td></tr>")
+        by = f", decidida por {_e(view['editada_por'])}" if view.get("editada_por") else ""
+        head = f"<p><b>Lectura de la regla</b> ({_e(view.get('estado'))}{by}). Con esto se va a juzgar.</p>"
+        body = "<table class='cells'>" + "".join(rows) + "</table>"
+    else:
+        head = (
+            "<p><b>Lectura de la regla</b>: todavía no hay una. Si se aprueba así, "
+            "este criterio queda sin puntuar.</p>"
+        )
+        body = ""
+        for i, sample in enumerate(view.get("muestras") or [], start=1):
+            inner = "".join(
+                f"<tr><th>{_e(label)}</th><td>{_e(sample.get(key))}</td></tr>"
+                for key, label in labels if sample.get(key)
+            )
+            body += f"<p class='small'>Muestra {i}</p><table class='cells'>{inner}</table>"
+    return head + body
+
+
 def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str:
     """El plan como un documento que se abre con doble clic.
 
@@ -1667,6 +1730,8 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         w(f"<p>{_e(c.get('que_se_prueba'))}</p>")
         w(_ficha_table(c))
         w(f"<p class='small'>Por qué se puede probar: {_e(c.get('motivo'))}</p>")
+        if c.get("lectura"):
+            w(_reading_block(c["lectura"]))
         if c.get("celdas"):
             sens = "sensible al tema" if c.get("sensible_al_tema") else "no depende del tema"
             w(f"<p><b>Muestreo</b> ({sens}). {_e(c.get('motivo_muestreo', ''))}</p>")

@@ -108,10 +108,80 @@ export interface SamplingPlan {
   rationale: string;
 }
 
+/**
+ * How the rule of ONE criterion is read: the yardstick the judge applies.
+ * `pregunta`, `cumple` and `no_cumple` are always there; the rest may be empty
+ * (a rule with no intermediate state has no `parcial`).
+ */
+export interface RuleReading {
+  pregunta: string;
+  definiciones: string;
+  cumple: string;
+  parcial: string;
+  no_cumple: string;
+  no_alcanza: string;
+}
+
+/** The engine's check on whether a reading leaves something to be decided by eye. */
+export interface ReadingVagueness {
+  vaga: boolean;
+  parcial_definido: boolean;
+  anclas_contables: boolean;
+  objeciones: string[];
+  /** Whose text was checked: the model's, or a person's. */
+  sobre: string;
+}
+
+/**
+ * The reading of a criterion as the review screen receives it (engine:
+ * `lectura.public_view`). It is written while the probes are drafted, sampled
+ * twice, and frozen into the approved plan.
+ *
+ * `lectura` is null unless it can be frozen: two samples that agreed
+ * ("estable"), or a person's decision ("adjudicada" / "editada"). When it is
+ * null the criterion will NOT be scored if the plan is approved as is, and
+ * `muestras` holds what a person has to choose from or rewrite.
+ */
+export interface ReadingEntry {
+  criterio: string;
+  estado: "estable" | "requiere_adjudicacion" | "no_disponible" | "adjudicada" | "editada";
+  congelable: boolean;
+  lectura: RuleReading | null;
+  muestras: RuleReading[];
+  acuerdo: { equivalentes: boolean; diferencias: string } | null;
+  vaguedad: ReadingVagueness | null;
+  /** What a person must look at before approving; "" when nothing. */
+  aviso: string;
+  hash_lectura: string;
+  editada_por: string;
+  editada_en: string;
+  artefactos_requeridos: string[];
+  versiones_anteriores: number;
+}
+
+/**
+ * A person's correction of a reading. Either `changes` (the fields that change;
+ * null clears an optional one) or `sample` (which sample stands, from 1).
+ * `by` is required: the person who decides the yardstick signs it.
+ */
+export interface ReadingEdit {
+  by: string;
+  changes?: Partial<Record<keyof RuleReading, string | null>>;
+  sample?: number;
+}
+
 export interface EvalPlan {
   criteria: Criterion[];
   probes: Probe[];
   sampling: SamplingPlan;
+  /**
+   * One entry per criterion that has a reading. Empty (or absent, from an
+   * older engine) when the job was made without frozen readings: those are
+   * scored with a reading generated at scoring time.
+   */
+  lecturas?: ReadingEntry[];
+  /** 2 when the plan can carry readings; absent on plans from before that. */
+  esquema?: number;
 }
 
 export function scoredPoints(cs: Criterion[]) {
