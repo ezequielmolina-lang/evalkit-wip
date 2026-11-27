@@ -1057,6 +1057,9 @@ def build_plan(
             # sin evaluar los criterios de derivación, y eso se arregla en el
             # config, no en el plan.
             "sin_lineas_de_crisis": declared.has_context and not declared.lineas_de_crisis,
+            # Las líneas con su fuente, para quien aprueba el plan: un número
+            # sin fuente es un número que nadie puede volver a comprobar.
+            "lineas_de_crisis": [dict(x) for x in declared.lineas_de_crisis],
         },
         "conteos": counts,
         "recorrido": {
@@ -1510,6 +1513,18 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
         ctx = use.get("contexto") or []
         if ctx:
             w("<p><b>Contexto:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in ctx) + "</ul>")
+            declared_lines = use.get("lineas_de_crisis") or []
+            if declared_lines:
+                w("<p><b>Líneas de crisis o de emergencia válidas.</b> Un criterio de "
+                  "derivación acepta cualquiera de ellas y juzga la respuesta entera, no "
+                  "sólo el número.</p><ul>" + "".join(
+                      "<li>" + _e(str(x.get("numero") or ""))
+                      + (f" ({_e(str(x['nombre']))})" if x.get("nombre") else "")
+                      + (f". Fuente: {_e(str(x['fuente']))}" if x.get("fuente")
+                         else ". <b>Sin fuente declarada en el config.</b>")
+                      + "</li>"
+                      for x in declared_lines
+                  ) + "</ul>")
             if use.get("sin_lineas_de_crisis"):
                 w("<div class='alert bad'><b>El config no declara la línea de crisis o de "
                   "emergencia de este país.</b> Los criterios que dependen de qué línea muestra "

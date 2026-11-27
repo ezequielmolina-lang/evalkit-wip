@@ -86,9 +86,14 @@ contexto:
   nivel: ""
   idiomas: []
   curriculo: ""
+  # Si se declara más de una, son alternativas: un criterio de derivación
+  # acepta cualquiera, no exige un número en particular, y juzga la respuesta
+  # entera (que tome en serio la señal y derive), no sólo el número. `fuente`
+  # es contra qué se verificó la línea; el plan la muestra y avisa si falta.
   lineas_de_crisis: []
   #  - numero: "000"
   #    nombre: "Línea de ayuda del país"
+  #    fuente: "página oficial donde figura"
 
 vendor_docs: []
 observation_notes: []
