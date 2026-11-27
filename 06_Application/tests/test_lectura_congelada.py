@@ -396,3 +396,68 @@ def test_readings_of_a_second_drafting_add_to_the_first(tmp_path, env):  # noqa:
 
     probados = [d["id"] for d in record.strategy if d["estado"] == "se_prueba"]
     assert set(record.readings) == set(probados) | {"OTRO-99"}
+
+
+# --- Tarea 3: una lectura objetada sienta al consejo completo ----------------
+
+
+def test_a_vague_reading_seats_the_whole_council_even_if_no_seat_objected():
+    """El asiento nuevo: nadie del consejo reducido objetó, y el consejo igual se amplía."""
+    from lxp_eval.evalkit import generator as gen
+    from tests.test_arreglos_corrida_completa import _Cliente, _criterios
+
+    objetada = _Cliente([])
+    gen.generate_probes(_criterios(), client=objetada, council=gen.REDUCED_COUNCIL,
+                        escalate_to=gen.COUNCIL, max_rounds=1, escalate_for={"PT-D4-05"})
+    assert sorted(objetada.jueces) == sorted(j.name for j in gen.COUNCIL)
+
+    de_otro = _Cliente([])
+    gen.generate_probes(_criterios(), client=de_otro, council=gen.REDUCED_COUNCIL,
+                        escalate_to=gen.COUNCIL, max_rounds=1, escalate_for={"OTRO-01"})
+    assert sorted(de_otro.jueces) == ["coherencia_criterio", "seguridad"], \
+        "la objeción a la lectura de OTRO criterio no amplía el consejo de este"
+
+
+def _con_espia_del_consejo(tmp_path, vaga, **kw):
+    from lxp_eval.evalkit import generator as gen
+
+    pedidos: list[dict] = []
+
+    def generate(criteria, **llamada):
+        pedidos.append(llamada)
+        return gen.generate_probes(criteria, **llamada)
+
+    def check(test, reading, client, *, model=None):
+        return {"vaga": vaga, "parcial_definido": not vaga, "anclas_contables": True,
+                "objeciones": ["PARCIAL se decide a ojo"] if vaga else [], "sobre": lec.SOBRE_MODELO}
+
+    store, engine, job_id = _plan(
+        tmp_path, generate_probes=generate, check_reading=check,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        **kw,
+    )
+    return _generar(store, engine, job_id), pedidos
+
+
+def test_the_reading_check_runs_before_approval_and_escalates_when_it_objects(tmp_path, env):  # noqa: F811
+    record, pedidos = _con_espia_del_consejo(tmp_path, vaga=True, frozen_readings=True)
+
+    probados = {d["id"] for d in record.strategy if d["estado"] == "se_prueba"}
+    assert record.stage == Stage.AWAITING_APPROVAL, "todo esto pasa antes de la aprobación"
+    assert set(pedidos[0]["escalate_for"]) == probados
+    assert all(p["consejo"] == "ampliado" for p in record.probes)
+
+
+def test_a_clean_reading_keeps_the_reduced_council(tmp_path, env):  # noqa: F811
+    record, pedidos = _con_espia_del_consejo(tmp_path, vaga=False, frozen_readings=True)
+
+    assert set(pedidos[0]["escalate_for"]) == set()
+    assert all(p["consejo"] == "reducido" for p in record.probes)
+
+
+def test_with_the_contract_off_the_council_is_asked_exactly_as_before(tmp_path, env):  # noqa: F811
+    record, pedidos = _con_espia_del_consejo(tmp_path, vaga=True)
+
+    assert "escalate_for" not in pedidos[0]
+    assert all(p["consejo"] == "reducido" for p in record.probes)

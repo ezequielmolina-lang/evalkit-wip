@@ -2751,6 +2751,7 @@ def generate_probes(
     max_workers: int = DEFAULT_PROBE_WORKERS,
     plan_guidance: dict[str, str] | None = None,
     escalate_to: Sequence[Judge] | None = None,
+    escalate_for: Iterable[str] | None = None,
 ) -> ProbeSet:
     """Draft and review one probe per criteria test.
 
@@ -2785,6 +2786,14 @@ def generate_probes(
     `client` is injected so tests run against a fake with no API call. `council`
     and each judge's `model` are configurable so a second model family can take
     a seat -- nothing here calls a non-Anthropic API.
+
+    `escalate_for` son los criterios cuyo consejo se amplía a `escalate_to`
+    aunque ningún asiento del consejo reducido haya objetado. Es el lugar del
+    chequeo de vaguedad de la LECTURA de la regla (ver evalkit/lectura.py): ese
+    chequeo no es un asiento del consejo (su prompt no entra en
+    `council_fingerprint`), pero si objeta la lectura de un criterio, la prueba
+    de ese criterio la mira el consejo completo, igual que cuando objeta un
+    asiento.
     """
     if model is None:
         from ..config import CONFIG
@@ -2804,6 +2813,7 @@ def generate_probes(
     all_rounds: list[tuple[ReviewRound, ...]] = []
     tests = list(criteria.all_tests())
     total = len(tests)
+    flagged = {str(x) for x in (escalate_for or ())}
 
     def _one_probe(test: CriterionTest):
         """Redacta y hace juzgar UNA probe. Sin estado compartido a propósito:
@@ -2844,7 +2854,7 @@ def generate_probes(
         # aprobó: desacuerdo o materia sensible. El resto de las pruebas no
         # paga siete jueces.
         extra = [j for j in (escalate_to or ()) if j.name not in {c.name for c in council}]
-        if extra and any(v.verdict != APPROVE for v in panel.verdicts):
+        if extra and (test.id in flagged or any(v.verdict != APPROVE for v in panel.verdicts)):
             more = _review(
                 client, extra, model, test, probe, platform_kind, panel.index,
                 objective, criteria.name, policy, platform_profile,

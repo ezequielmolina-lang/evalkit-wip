@@ -1423,6 +1423,15 @@ class JobRunner:
                 "council": generator_mod.REDUCED_COUNCIL,
                 "escalate_to": generator_mod.COUNCIL,
             }
+            if self.engine.frozen_readings:
+                # EL CHEQUEO DE LA LECTURA SE SUMA A LOS ASIENTOS REDUCIDOS. Si
+                # la lectura de un criterio quedó objetada (vaga, o no salió
+                # igual dos veces, o no salió), su prueba la revisa el consejo
+                # completo aunque los dos asientos reducidos la aprueben.
+                council_kw["escalate_for"] = {
+                    cid for cid, entry in (record.readings or {}).items()
+                    if lectura_mod.review_note(entry)
+                }
         try:
             probeset = await asyncio.to_thread(
                 self.engine.generate_probes,
