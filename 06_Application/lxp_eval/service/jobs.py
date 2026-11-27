@@ -1526,6 +1526,50 @@ class JobRunner:
         )
         return record
 
+    # --- la lectura de la regla, corregida por una persona ------------------
+
+    async def edit_reading(
+        self, record: JobRecord, criterion_id: str, fields: dict | None = None,
+        *, by: str, sample: int | None = None,
+    ) -> JobRecord:
+        """Una persona corrige la lectura de un criterio, o elige una de sus muestras, ANTES de aprobar.
+
+        Es un camino aparte del de editar una prueba (ver lectura.edit_reading,
+        con el porqué): no toca `record.probes` ni vuelve a sentar al consejo.
+        Con `sample` se elige una de las muestras; con `fields`, se corrigen
+        campos.
+
+        Sólo en `awaiting_approval`. Aprobado el plan la lectura ya está
+        congelada en él, y cambiarla después sería cambiar la vara con la que
+        se aprobó correr: hay que volver a redactar y aprobar.
+        """
+        if record.stage != Stage.AWAITING_APPROVAL:
+            raise ServiceError(
+                "la lectura de la regla sólo se corrige antes de aprobar el plan "
+                f"(este trabajo está en {record.stage})"
+            )
+        entry = (record.readings or {}).get(criterion_id)
+        if entry is None:
+            raise ServiceError(f"este trabajo no tiene una lectura para {criterion_id}")
+        test = self._criterion_test(record, criterion_id)
+        if test is None:
+            raise ServiceError(f"no se encontró el criterio {criterion_id} en este trabajo")
+        client = self._client()
+        if sample is not None:
+            new = await asyncio.to_thread(
+                lectura_mod.adjudicate_reading, entry, test, sample, by=by,
+                client=client, model=self.engine.model, check=self.engine.check_reading,
+            )
+        else:
+            new = await asyncio.to_thread(
+                lectura_mod.edit_reading, entry, test, fields or {}, by=by,
+                client=client, model=self.engine.model, check=self.engine.check_reading,
+            )
+        record.readings = {**record.readings, criterion_id: new}
+        self._fold_client_spend(record, client, "redaccion")
+        self.store.save(record)
+        return record
+
     # --- the gate ----------------------------------------------------------
 
     def runnable_probes(self, record: JobRecord, plan: dict) -> list[dict]:

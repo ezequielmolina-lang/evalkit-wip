@@ -530,3 +530,143 @@ def test_with_the_contract_off_a_new_drafting_drops_the_old_readings_of_those_cr
     record = _generar(store, engine, job_id)
 
     assert set(record.readings) == {"OTRO-99"}, "se va la del criterio vuelto a redactar; la de otro queda"
+
+
+# --- Tarea 4: la persona edita la lectura por un camino propio ---------------
+
+
+def _estable(**cambios):
+    entrada = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": _lectura(),
+        compare=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check=lambda *a, **k: {"vaga": False, "parcial_definido": True, "anclas_contables": True,
+                               "objeciones": [], "sobre": lec.SOBRE_MODELO},
+    )["X-01"]
+    entrada.update(cambios)
+    return entrada
+
+
+def _chequeo_que_anota(vistas, vaga=False):
+    def check(test, reading, client, *, model=None, sobre=lec.SOBRE_MODELO):
+        vistas.append((reading, sobre))
+        return {"vaga": vaga, "parcial_definido": not vaga, "anclas_contables": True,
+                "objeciones": ["PARCIAL se decide a ojo"] if vaga else [], "sobre": sobre}
+    return check
+
+
+def test_edicion_humana_de_lectura_rehashea_y_rechequea():
+    antes = _estable()
+    vistas = []
+    despues = lec.edit_reading(
+        antes, _criterio(), {"cumple": "Tres o menos."}, by="E. M.",
+        client=None, check=_chequeo_que_anota(vistas, vaga=True), now="2026-11-27T20:00:00+00:00",
+    )
+
+    assert despues["lectura"]["cumple"] == "Tres o menos."
+    assert despues["lectura"]["no_cumple"] == antes["lectura"]["no_cumple"], "sólo cambia el campo editado"
+    assert despues["estado"] == lec.EDITADA and lec.freezable(despues)
+    assert (despues["editada_por"], despues["editada_en"]) == ("E. M.", "2026-11-27T20:00:00+00:00")
+    assert despues["hash_lectura"] != antes["hash_lectura"], "se vuelve a hashear"
+    assert despues["hash_lectura"] == lec.reading_hash(despues["lectura"])
+
+    abajo = despues["historial"][-1]
+    assert abajo["lectura"] == antes["lectura"] and abajo["hash_lectura"] == antes["hash_lectura"]
+    assert abajo["estado"] == lec.ESTABLE, "la lectura anterior y su huella quedan debajo"
+
+    assert vistas == [(scoring.RuleReading.from_dict(despues["lectura"]), lec.SOBRE_PERSONA)], \
+        "el chequeo de vaguedad corre de nuevo, sobre el texto de la persona, y lo dice"
+    assert despues["vaguedad"]["sobre"] == lec.SOBRE_PERSONA and despues["vaguedad"]["vaga"] is True
+    assert antes["estado"] == lec.ESTABLE and "historial" not in antes, "no se toca el registro que entró"
+
+
+def test_an_objection_to_a_persons_text_is_shown_but_does_not_undo_their_decision():
+    despues = lec.edit_reading(
+        _estable(), _criterio(), {"parcial": "Algo intermedio."}, by="E. M.",
+        client=None, check=_chequeo_que_anota([], vaga=True),
+    )
+    assert lec.freezable(despues), "la persona decide; la objeción queda a la vista"
+    assert "decidir a ojo" in lec.review_note(despues)
+
+
+def test_a_person_can_write_the_reading_nobody_agreed_on():
+    sin_acuerdo = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": _lectura(),
+        compare=lambda *a, **k: {"equivalentes": False, "diferencias": "otro umbral"},
+    )["X-01"]
+    assert not lec.freezable(sin_acuerdo)
+
+    escrita = lec.edit_reading(sin_acuerdo, _criterio(), _lectura(cumple="Tres o menos.").as_dict(),
+                               by="E. M.", client=None, check=_chequeo_que_anota([]))
+    assert escrita["estado"] == lec.EDITADA and lec.freezable(escrita)
+    assert escrita["historial"][-1]["estado"] == lec.REQUIERE_ADJUDICACION
+    assert len(escrita["muestras"]) == 2, "las muestras quedan: son lo que la persona tuvo delante"
+
+
+def test_an_edit_that_leaves_the_reading_without_an_end_is_refused():
+    antes = _estable()
+    with pytest.raises(scoring.ReadingUnavailable):
+        lec.edit_reading(antes, _criterio(), {"cumple": "  "}, by="E. M.", client=None,
+                         check=_chequeo_que_anota([]))
+
+
+def test_an_edit_needs_a_name():
+    with pytest.raises(ValueError):
+        lec.edit_reading(_estable(), _criterio(), {"cumple": "Tres."}, by=" ", client=None,
+                         check=_chequeo_que_anota([]))
+
+
+def test_a_person_can_pick_one_of_the_samples():
+    muestras = iter([_lectura(), _lectura(cumple="Tres o menos.")])
+    sin_acuerdo = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": next(muestras),
+        compare=lambda *a, **k: {"equivalentes": False, "diferencias": "otro umbral"},
+    )["X-01"]
+    vistas = []
+    elegida = lec.adjudicate_reading(sin_acuerdo, _criterio(), 2, by="E. M.", client=None,
+                                     check=_chequeo_que_anota(vistas))
+
+    assert elegida["estado"] == lec.ADJUDICADA and lec.freezable(elegida)
+    assert elegida["lectura"]["cumple"] == "Tres o menos." and elegida["muestra_elegida"] == 2
+    assert vistas[0][1] == lec.SOBRE_MODELO, "el texto elegido lo escribió el modelo"
+    with pytest.raises(ValueError):
+        lec.adjudicate_reading(sin_acuerdo, _criterio(), 3, by="E. M.", client=None,
+                               check=_chequeo_que_anota([]))
+
+
+def test_the_service_edits_a_reading_before_approval_and_leaves_the_probes_alone(tmp_path, env):  # noqa: F811
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check_reading=_chequeo_que_anota([]),
+    )
+    record = _generar(store, engine, job_id)
+    cid = next(d["id"] for d in record.strategy if d["estado"] == "se_prueba")
+    pruebas = [dict(p) for p in record.probes]
+
+    runner = JobRunner(store, engine, None)
+    asyncio.run(runner.edit_reading(record, cid, {"cumple": "Tres o menos."}, by="E. M."))
+
+    guardado = store.get(job_id)
+    assert guardado.readings[cid]["estado"] == lec.EDITADA
+    assert guardado.readings[cid]["lectura"]["cumple"] == "Tres o menos."
+    assert guardado.readings[cid]["editada_por"] == "E. M."
+    assert guardado.probes == pruebas, "editar la lectura no toca las pruebas ni las vuelve a revisar"
+
+
+def test_the_service_refuses_to_edit_a_reading_once_the_plan_is_approved(tmp_path, env):  # noqa: F811
+    from lxp_eval.service.crypto import ServiceError
+
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+    )
+    _correr(store, engine, job_id)
+    record = store.get(job_id)
+    cid = next(iter(record.readings))
+    with pytest.raises(ServiceError):
+        asyncio.run(JobRunner(store, engine, None).edit_reading(record, cid, {"cumple": "Tres."}, by="E. M."))

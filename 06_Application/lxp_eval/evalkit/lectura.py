@@ -27,9 +27,13 @@ decide contra veredictos de personas, y hasta entonces se puntúa como siempre.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Sequence
 
 from . import scoring
@@ -57,9 +61,14 @@ REQUIERE_ADJUDICACION = "requiere_adjudicacion"
 #: Alguna muestra no salió (ver scoring.read_rule): no hay con qué comparar.
 NO_DISPONIBLE = "no_disponible"
 
+#: Una persona eligió una de las muestras que no coincidían.
+ADJUDICADA = "adjudicada"
+#: Una persona escribió o corrigió la lectura.
+EDITADA = "editada"
+
 #: Los estados con los que una lectura se puede congelar. Nunca una muestra
 #: sola: o coincidieron dos, o la decidió una persona (ver `freezable`).
-FREEZABLE = (ESTABLE,)
+FREEZABLE = (ESTABLE, ADJUDICADA, EDITADA)
 
 
 def freezable(entry: dict | None) -> bool:
@@ -349,6 +358,120 @@ def review_note(entry: dict | None) -> str:
     return ""
 
 
+# --- la huella de una lectura y su edición por una persona -------------------
+
+
+def reading_hash(reading: dict | RuleReading | None) -> str:
+    """sha256 de los campos de una lectura, en un orden fijo. "" si no hay lectura.
+
+    Cambia si cambia un campo y no cambia si no cambió nada: es lo que deja
+    decir, debajo de una lectura editada, cuál era la anterior.
+    """
+    if not reading:
+        return ""
+    fields = reading.as_dict() if isinstance(reading, RuleReading) else RuleReading.from_dict(reading).as_dict()
+    payload = json.dumps(fields, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _decided_by_a_person(
+    entry: dict, test: CriterionTest, reading: RuleReading, *, state: str, by: str,
+    client: Any, model: str | None, check: Callable[..., dict] | None, sobre: str, now: str | None,
+) -> dict:
+    """El registro nuevo: la lectura decidida arriba, la anterior y su huella debajo."""
+    who = str(by or "").strip()
+    if not who:
+        # Una lectura que decide una persona lleva su nombre: es quien responde
+        # por la vara con la que se juzga.
+        raise ValueError("la edición de una lectura necesita decir quién la hizo")
+    out = copy.deepcopy(entry)
+    history = list(out.get("historial") or [])
+    history.append({
+        "lectura": out.get("lectura"),
+        "hash_lectura": out.get("hash_lectura") or reading_hash(out.get("lectura")),
+        "estado": out.get("estado"),
+        "vaguedad": out.get("vaguedad"),
+        "editada_por": out.get("editada_por", ""),
+        "editada_en": out.get("editada_en", ""),
+    })
+    out.update({
+        "historial": history,
+        "lectura": reading.as_dict(),
+        "hash_lectura": reading_hash(reading),
+        "estado": state,
+        "motivo": "",
+        "editada_por": who,
+        "editada_en": now or _now(),
+        "vaguedad": check(test, reading, client, model=model, sobre=sobre) if check is not None else None,
+    })
+    return out
+
+
+def edit_reading(
+    entry: dict, test: CriterionTest, fields: dict, *, by: str, client: Any,
+    model: str | None = None, check: Callable[..., dict] | None = check_reading,
+    now: str | None = None,
+) -> dict:
+    """La lectura corregida o escrita por una persona. Devuelve un registro NUEVO.
+
+    POR QUÉ UN CAMINO PROPIO. La edición humana que ya existía
+    (`generator.with_human_edit`) edita una PRUEBA y se niega a propósito a
+    volver a revisar texto escrito por una persona; y la lectura no es un
+    campo de la prueba: es del criterio, y la comparten todas sus pruebas.
+    Acá la persona corrige la vara, no los pasos.
+
+    `fields` son los campos que cambia; los demás quedan como estaban. Si no
+    había una lectura (las muestras no coincidieron, o no salió), `fields`
+    tiene que traerla entera. La lectura anterior, su huella y su estado
+    quedan en `historial`; la nueva se vuelve a hashear y queda en estado
+    EDITADA, que se puede congelar.
+
+    El chequeo de vaguedad corre DE NUEVO sobre el texto de la persona y el
+    registro dice que corrió sobre ese texto. Si objeta, la objeción queda a
+    la vista y la decisión sigue siendo de la persona: no se le devuelve la
+    lectura para que la reescriba un modelo.
+
+    Una edición que deja la lectura sin la pregunta o sin un extremo levanta
+    `ReadingUnavailable` y no cambia nada. Sin nombre, `ValueError`.
+    """
+    known = {k for k, _ in scoring.READING_FIELDS}
+    base = dict(entry.get("lectura") or {})
+    for key, value in (fields or {}).items():
+        if key in known:
+            base[key] = str(value or "")
+    reading = RuleReading.from_dict(base)
+    return _decided_by_a_person(
+        entry, test, reading, state=EDITADA, by=by, client=client, model=model,
+        check=check, sobre=SOBRE_PERSONA, now=now,
+    )
+
+
+def adjudicate_reading(
+    entry: dict, test: CriterionTest, sample: int, *, by: str, client: Any,
+    model: str | None = None, check: Callable[..., dict] | None = check_reading,
+    now: str | None = None,
+) -> dict:
+    """Una persona elige cuál de las muestras vale (`sample` desde 1). Devuelve un registro NUEVO.
+
+    Es la salida de REQUIERE_ADJUDICACION sin escribir nada: las dos lecturas
+    no coincidían y alguien decide cuál se congela. El chequeo de vaguedad
+    corre sobre la elegida, que es texto del modelo.
+    """
+    samples = entry.get("muestras") or []
+    if not isinstance(sample, int) or not 1 <= sample <= len(samples):
+        raise ValueError(f"no hay una muestra {sample}: este criterio tiene {len(samples)}")
+    out = _decided_by_a_person(
+        entry, test, RuleReading.from_dict(samples[sample - 1]), state=ADJUDICADA, by=by,
+        client=client, model=model, check=check, sobre=SOBRE_MODELO, now=now,
+    )
+    out["muestra_elegida"] = sample
+    return out
+
+
 # --- escribir las lecturas de un plan ----------------------------------------
 
 
@@ -389,6 +512,7 @@ def _one(
     if entry["acuerdo"]["equivalentes"]:
         entry["estado"] = ESTABLE
         entry["lectura"] = taken[0].as_dict()
+        entry["hash_lectura"] = reading_hash(taken[0])
         # El chequeo de vaguedad queda EN la lectura, como campo: quien la
         # aprueba, la edita o la congela lo tiene delante, no en un log.
         if check is not None:
