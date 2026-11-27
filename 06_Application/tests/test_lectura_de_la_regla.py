@@ -91,7 +91,7 @@ _COMPLETA = {
 
 def test_a_field_glued_inside_another_is_put_back_where_it_belongs():
     modelo = _Modelo(_PEGADA)
-    reading = scoring.read_rule(_criterio(), modelo, model="m")
+    reading = str(scoring.read_rule(_criterio(), modelo, model="m"))
 
     assert "- CUMPLE si se observa: Se cuentan cuatro o menos." in reading
     assert "- PARCIAL si se observa: No aplica." in reading
@@ -113,7 +113,7 @@ def test_everything_glued_into_one_field_is_still_a_whole_reading():
             '<parameter name="no_alcanza">Que el banco rote.</parameter>\n</invoke>'
         ),
     })
-    reading = scoring.read_rule(_criterio(), modelo, model="m")
+    reading = str(scoring.read_rule(_criterio(), modelo, model="m"))
 
     assert "- Definiciones: Cambia: sube o baja." in reading
     assert "- CUMPLE si se observa: Cambia en tres pares." in reading
@@ -124,7 +124,7 @@ def test_everything_glued_into_one_field_is_still_a_whole_reading():
 def test_a_real_key_is_never_overwritten_by_a_glued_one():
     data = dict(_COMPLETA)
     data["definiciones"] = 'Cada botón cuenta.</parameter>\n<parameter name="cumple">OTRA COSA.'
-    reading = scoring.read_rule(_criterio(), _Modelo(data), model="m")
+    reading = str(scoring.read_rule(_criterio(), _Modelo(data), model="m"))
 
     assert "- CUMPLE si se observa: Cuatro o menos." in reading
     assert "OTRA COSA" not in reading, "lo pegado que repite una clave que sí llegó se descarta"
@@ -133,7 +133,7 @@ def test_a_real_key_is_never_overwritten_by_a_glued_one():
 
 def test_a_reading_that_is_still_incomplete_is_asked_again_once():
     modelo = _Modelo({"pregunta": "¿Cuántas?", "no_cumple": "Cinco o más."}, _COMPLETA)
-    reading = scoring.read_rule(_criterio(), modelo, model="m")
+    reading = str(scoring.read_rule(_criterio(), modelo, model="m"))
 
     assert "- CUMPLE si se observa: Cuatro o menos." in reading
     assert len(modelo.calls) == 2

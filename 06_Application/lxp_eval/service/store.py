@@ -171,6 +171,12 @@ class JobRecord:
     spend_by_stage: dict = field(default_factory=dict)
     #: The reviewed plan exactly as the human approved it.
     approved_plan: dict | None = None
+    #: criterio -> su registro de lectura (ver evalkit/lectura.py): las
+    #: muestras escritas al generar, si coincidieron, y en qué estado quedó.
+    #: Vacío en un trabajo hecho con el contrato de la lectura congelada
+    #: apagado, y en todos los anteriores a él: esos se puntúan con la lectura
+    #: generada en el momento, como siempre.
+    readings: dict = field(default_factory=dict)
     approved_at: str = ""
     report: dict | None = None
 

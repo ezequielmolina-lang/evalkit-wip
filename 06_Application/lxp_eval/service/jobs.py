@@ -45,6 +45,7 @@ from urllib.parse import urlparse
 from ..evalkit import framework as framework_mod
 from ..evalkit import generator as generator_mod
 from ..evalkit import inventory as inventory_mod
+from ..evalkit import lectura as lectura_mod
 from ..evalkit import planner as planner_mod
 from ..evalkit import repair as repair_mod
 from ..evalkit import sampling as sampling_mod
@@ -401,6 +402,21 @@ class Engine:
     #: Exposed here so the batch runner can set a manifest's `risk_policy`
     #: without a second call path into the generator.
     risk_policy: str = generator_mod.DEFAULT_RISK_POLICY
+    #: EL CONTRATO DE LA LECTURA CONGELADA, APAGADO POR DEFECTO. Encendido, la
+    #: lectura de la regla de cada criterio se escribe en la etapa de
+    #: generación, muestreada (ver evalkit/lectura.py), para que una persona la
+    #: vea antes de gastar y quede congelada en el plan. Apagado, nada cambia:
+    #: no se lee nada al generar y se puntúa con `read_rule` como siempre.
+    #: Está apagado porque que una lectura sea reproducible no dice que sea la
+    #: correcta, y eso se decide contra veredictos de personas en una
+    #: aceptación que todavía no corrió. Se enciende con
+    #: EVALKIT_LECTURA_CONGELADA=1 o por parámetro.
+    frozen_readings: bool = os.getenv("EVALKIT_LECTURA_CONGELADA", "0") == "1"
+    #: Quién escribe las lecturas al generar y quién dice si dos muestras
+    #: coinciden. El lector de cada muestra es `read_rule`, el mismo que al
+    #: puntuar: una sola forma de leer una regla.
+    write_readings: Callable[..., Any] = staticmethod(lectura_mod.write_readings)
+    compare_readings: Callable[..., Any] = staticmethod(lectura_mod.compare_readings)
     #: ¿El objetivo es un entorno REAL/producción (alumnos, datos o cuentas
     #: reales)? Por defecto NO: una evaluación encargada corre sobre un demo o con
     #: cuentas de prueba, así que las pruebas de datos de menores / escritura real
@@ -1333,6 +1349,45 @@ class JobRunner:
                 # El loop se está cerrando (shutdown, cancelación): el latido es
                 # best-effort y perderlo no puede matar la etapa.
                 pass
+
+        # LA LECTURA DE LA REGLA SE ESCRIBE ACÁ, no al armar el documento del
+        # plan (`planner.build_plan` es una función pura, sin cliente) ni al
+        # puntuar (ya es tarde: la persona aprobó sin verla). Esta etapa tiene
+        # cliente y corre vigilada, y termina en `awaiting_approval`, que es
+        # donde una persona revisa lo que se va a ejecutar. Sólo con el
+        # contrato encendido (ver Engine.frozen_readings).
+        if self.engine.frozen_readings and self.engine.read_rule is not None:
+            tests = list(criteria.all_tests())
+
+            def _reading_done(done: int, of: int) -> None:
+                def _tick() -> None:
+                    self._progress(
+                        record, Stage.PROBES,
+                        done=0, total=max(1, total),
+                        message=f"Lectura de la regla: {done} de {of} criterios",
+                    )
+
+                try:
+                    loop.call_soon_threadsafe(_tick)
+                except RuntimeError:
+                    pass
+
+            said = {str(d.get("id")): str(d.get("que_se_prueba") or "") for d in record.strategy}
+            try:
+                record.readings = await asyncio.to_thread(
+                    self.engine.write_readings,
+                    tests,
+                    client=client,
+                    model=self.engine.model,
+                    contexts={t.id: said.get(t.id, "") for t in tests},
+                    reader=self.engine.read_rule,
+                    compare=self.engine.compare_readings,
+                    on_done=_reading_done,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                self._fail(record, Stage.PROBES, "", exc)
+                return record
+            self.store.save(record)
 
         # CON UN PLAN APROBADO, CONSEJO REDUCIDO (ver generator.REDUCED_COUNCIL).
         council_kw: dict = {}

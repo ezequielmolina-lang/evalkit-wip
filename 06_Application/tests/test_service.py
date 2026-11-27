@@ -4501,3 +4501,32 @@ def test_not_knowing_is_not_the_same_as_no_divergence():
     probes = [{"probeId": "PB-1", "steps": [{"n": 1, "action": "abrir el curso"}]}]
     assert serialize.steps_divergence_line(probes, {}) == ""
     assert serialize.steps_divergence_line(probes, None) == ""
+
+
+def test_lectura_inaccesible_no_puntua(tmp_path, env):
+    """Regresión del 2026-11-27 (commit 51af111): sin lectura de la regla no se puntúa en silencio.
+
+    En 48 de 172 juicios de criterio la lectura llegó vacía y el criterio se
+    juzgó igual, sin decirlo. Si `read_rule` no puede fijar la lectura, el
+    criterio queda NO_EVALUADO con su causa y el juez no se llama. El detalle
+    del caso está en test_lectura_de_la_regla.py.
+    """
+    juzgados = []
+
+    def read(test, client, *, model=None, context=""):
+        raise scoring_mod.ReadingUnavailable(f"la lectura de {test.id} llegó sin: cumple")
+
+    def score(test, rows, client, **kw):
+        juzgados.append(test.id)
+        return scoring_mod.score_test(test, rows, client, **kw)
+
+    from tests.test_arreglos_corrida_2026_11_26 import _correr, _fila, _plan
+
+    store, engine, job_id = _plan(tmp_path, read_rule=read, score_test=score)
+    probados = [d["id"] for d in store.get(job_id).strategy if d["estado"] == "se_prueba"]
+    _correr(store, engine, job_id)
+
+    fila = _fila(store, job_id, probados[0])
+    assert fila["verdict"] == "NO_EVALUADO"
+    assert fila["rationale"].startswith("[causa: no se pudo leer la regla]")
+    assert juzgados == []

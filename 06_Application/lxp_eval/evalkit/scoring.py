@@ -223,6 +223,61 @@ class ReadingUnavailable(EvalkitError):
     """No se pudo fijar la lectura de la regla de un criterio (ver `read_rule`)."""
 
 
+#: Los campos de una lectura, en el orden en que el juez los lee, con su rótulo.
+READING_FIELDS = (
+    ("pregunta", "Qué pregunta la regla"),
+    ("definiciones", "Definiciones"),
+    ("cumple", "CUMPLE si se observa"),
+    ("parcial", "PARCIAL si se observa"),
+    ("no_cumple", "NO_CUMPLE si se observa"),
+    ("no_alcanza", "NO alcanza para decidir (es NO_EVALUADO)"),
+)
+
+
+@dataclass(frozen=True)
+class RuleReading:
+    """La lectura de la regla de un criterio, CAMPO POR CAMPO.
+
+    Hasta el 2026-11-27 `read_rule` devolvía el texto ya armado. Alcanzaba
+    mientras la lectura sólo viajaba al juez. Dejó de alcanzar cuando hubo que
+    mostrársela a una persona antes de gastar, dejarla corregir un campo,
+    revisar si el PARCIAL quedó definido y guardar una huella que cambie si
+    cambia un campo: nada de eso se hace sobre un texto pegado.
+
+    `str(lectura)` da EXACTAMENTE el texto de antes, que es lo que recibe el
+    juez (`score_test(reading=...)`): el instrumento no cambia. `parcial`,
+    `definiciones` y `no_alcanza` pueden faltar (hay reglas sin estado
+    intermedio); la pregunta y los dos extremos, nunca.
+    """
+
+    pregunta: str
+    cumple: str
+    no_cumple: str
+    definiciones: str = ""
+    parcial: str = ""
+    no_alcanza: str = ""
+
+    def as_dict(self) -> dict:
+        return {k: getattr(self, k) for k, _ in READING_FIELDS}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "RuleReading":
+        """Arma la lectura desde sus campos; sin la pregunta o un extremo, no hay lectura."""
+        data = data if isinstance(data, dict) else {}
+        clean = {k: str(data.get(k) or "").strip() for k, _ in READING_FIELDS}
+        missing = [k for k in _READING_NEEDS if not clean[k]]
+        if missing:
+            raise ReadingUnavailable("a la lectura le falta: " + ", ".join(missing))
+        return cls(**clean)
+
+    def as_text(self) -> str:
+        return "\n".join(
+            f"- {human}: {getattr(self, key)}" for key, human in READING_FIELDS if getattr(self, key)
+        )
+
+    __str__ = as_text
+
+
 def _recover_glued_fields(data: dict, known: tuple[str, ...]) -> dict:
     """Devuelve a su clave cada campo que el modelo dejó pegado dentro de otro.
 
@@ -259,42 +314,32 @@ def _recover_glued_fields(data: dict, known: tuple[str, ...]) -> dict:
     return out
 
 
-def _reading_of(response: Any) -> tuple[str, str]:
-    """(la lectura como texto, "") o ("", por qué esta respuesta no es una lectura)."""
+def _reading_of(response: Any) -> "tuple[RuleReading | None, str]":
+    """(la lectura, "") o (None, por qué esta respuesta no es una lectura)."""
     try:
         data = _extract_tool_input(response, _READING_TOOL_NAME)
     except (ValueError, TypeError, AttributeError):
-        return "", "la respuesta no trae la herramienta de lectura"
+        return None, "la respuesta no trae la herramienta de lectura"
     if not isinstance(data, dict):
-        return "", "la respuesta no trae la herramienta de lectura"
-    fields = (
-        ("pregunta", "Qué pregunta la regla"),
-        ("definiciones", "Definiciones"),
-        ("cumple", "CUMPLE si se observa"),
-        ("parcial", "PARCIAL si se observa"),
-        ("no_cumple", "NO_CUMPLE si se observa"),
-        ("no_alcanza", "NO alcanza para decidir (es NO_EVALUADO)"),
-    )
-    data = _recover_glued_fields(data, tuple(k for k, _ in fields))
+        return None, "la respuesta no trae la herramienta de lectura"
+    data = _recover_glued_fields(data, tuple(k for k, _ in READING_FIELDS))
     # Sin la pregunta y los dos extremos no hay lectura que valga la pena mandar.
     missing = [k for k in _READING_NEEDS if not str(data.get(k) or "").strip()]
     if missing:
-        return "", (
+        return None, (
             "llegó sin: " + ", ".join(missing)
             + " (llegaron: " + (", ".join(sorted(str(k) for k in data)) or "ninguna clave") + ")"
         )
-    lines = []
-    for key, human in fields:
-        value = str(data.get(key) or "").strip()
-        if value:
-            lines.append(f"- {human}: {value}")
-    return "\n".join(lines), ""
+    return RuleReading.from_dict(data), ""
 
 
 def read_rule(
     test: CriterionTest, client: Any, *, model: str | None = None, context: str = "",
-) -> str:
+) -> RuleReading:
     """Cómo se lee la regla de UN criterio, fijado antes de juzgar. Una llamada.
+
+    Devuelve la lectura con sus campos (`RuleReading`); `str()` de eso es el
+    texto que recibe el juez.
 
     POR QUÉ. En la corrida completa del 2026-11-26 cinco criterios (16 pruebas
     que habían llegado al final) quedaron sin veredicto por "juicio en duda".

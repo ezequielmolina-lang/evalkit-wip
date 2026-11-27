@@ -604,7 +604,7 @@ def test_the_rule_is_read_once_and_comes_back_as_text():
         "cumple": "Cuatro o menos.", "no_cumple": "Cinco o más.",
         "no_alcanza": "Una pantalla que no es la primera de un contenido.",
     })
-    reading = scoring.read_rule(_test_obj(), client, model="m", context="abrir un contenido nuevo")
+    reading = str(scoring.read_rule(_test_obj(), client, model="m", context="abrir un contenido nuevo"))
     assert "incluye los botones de ayuda" in reading
     assert "CUMPLE si se observa: Cuatro o menos." in reading
     assert "abrir un contenido nuevo" in client.calls[0]["messages"][0]["content"][0]["text"]
