@@ -152,6 +152,13 @@ async def _run_once(
         await driver.assert_session_alive()
         await _refuse_if_logged_out(driver, probe, 0, "(antes del primer paso)")
 
+    # Quien ejecuta guarda memoria de UN paso al siguiente (qué se escribió, qué
+    # informó el paso anterior); esa memoria es de una prueba y no pasa a la
+    # otra (ver AgentDriver.begin_probe). Un driver sin esa operación no se toca.
+    begin = getattr(driver, "begin_probe", None)
+    if callable(begin):
+        begin()
+
     capture = set(probe.capture)
     artifacts: list[Path] = []
     # Criteria that share this exact capture. Their steps are identical, so the

@@ -38,10 +38,19 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from ..config import CONFIG
-from ..evalkit.steps import DEVIATION, DIRECT, NOT_FOUND, is_observation, split_marks
+from ..evalkit.steps import (
+    DEVIATION,
+    DIRECT,
+    NOT_FOUND,
+    is_observation,
+    is_send,
+    is_write,
+    split_marks,
+)
 from ..evalkit.errors import EvalkitError
 from ..evalkit.repair import StepNotDone
 
@@ -223,7 +232,28 @@ STEP_SYSTEM = (
     "todavía está trabajando (pensando, escribiendo, cargando, generando, "
     "preparando), esperá con `wait` y volvé a leer hasta que la respuesta esté "
     "completa. La captura se toma apenas llamás a `done`: si llamás antes, se "
-    "guarda la espera y no la respuesta."
+    "guarda la espera y no la respuesta.\n\n"
+    # Agregado tras la corrida completa del 2026-11-27 (trabajo
+    # 3e932ff1d50c4a30): 5 de las 10 pruebas cortadas. Después de un error la
+    # plataforma preguntaba si el error había sido el que ella suponía y no
+    # mostraba nada más hasta que se tocaba uno de sus botones. El paso pedía
+    # "en la nueva pregunta que aparezca, tocar una opción" o "abrir la
+    # conversación con el tutor", y el agente escribió, las cinco veces, alguna
+    # forma de "no la respondí porque el paso no lo pedía". (Cuando el config
+    # declara la pregunta, el código la despeja aunque el agente no lo haga:
+    # ver AgentDriver._clear_blocker. La regla es para la plataforma que
+    # todavía no la declaró.)
+    "LO QUE LA PLATAFORMA EXIGE ANTES DE DEJARTE SEGUIR ES PARTE DE LLEGAR. Si "
+    "lo que el paso pide no se puede hacer porque la plataforma tiene pendiente "
+    "una pregunta de confirmación o de reflexión sobre lo que ya pasó (los "
+    "controles que el paso necesita están deshabilitados o no aparecen, y un "
+    "aviso o unos botones piden responder antes de seguir), respondela con la "
+    "opción que confirma lo que la plataforma propone o, si ninguna lo hace "
+    "claramente, con la primera; después hacé el paso. Contalo en `desvio`, "
+    "con el texto de la pregunta y el del botón que tocaste. Esto NO vale si "
+    "responder exige escribir un texto, enviar un mensaje, aceptar condiciones "
+    "o pagar, ni en un paso marcado [SI APARECE]: en esos casos terminá con "
+    "accomplished=false y decí qué pedía la plataforma."
 )
 
 
@@ -464,7 +494,61 @@ def _step_tools() -> list[dict[str, Any]]:
 STEP_TOOLS: list[dict[str, Any]] = _step_tools()
 
 
-def _step_task(step: str, platform_url: str = "") -> str:
+def _norm(text: Any) -> str:
+    """Para comparar un texto del config con uno de la pantalla o de un paso."""
+    return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+
+
+def _names_blocker(step: str, blocker: dict) -> bool:
+    """¿El paso trata de esta pregunta? Entonces la responde el paso, no el código.
+
+    Un paso que nombra la pregunta o cualquiera de sus botones ("Tocar 'Hice
+    otra cosa'") quiere responderla a su manera, y despejarla con el botón
+    declarado le cambiaría el camino a la prueba.
+    """
+    text = _norm(split_marks(step)[0])
+    names = [blocker.get("pregunta"), blocker.get("se_despeja_con")]
+    names += list(blocker.get("opciones") or [])
+    return any(_norm(n) and _norm(n) in text for n in names)
+
+
+def _on_screen(page: str, blocker: dict) -> bool:
+    """La pregunta Y el control que la despeja están a la vista."""
+    text = _norm(page)
+    return bool(
+        _norm(blocker.get("pregunta")) and _norm(blocker.get("pregunta")) in text
+        and _norm(blocker.get("se_despeja_con")) in text
+    )
+
+
+def _blockers_note(step: str, blockers: list[dict]) -> str:
+    """Los bloqueos declarados, dichos a quien ejecuta un paso que no trata de ellos."""
+    lines = []
+    for b in blockers:
+        if _names_blocker(step, b):
+            continue
+        when = str(b.get("aparece") or "").strip()
+        lines.append(
+            "- " + (f"{when}: " if when else "")
+            + f"«{b.get('pregunta')}». Se despeja con «{b.get('se_despeja_con')}»."
+        )
+    if not lines:
+        return ""
+    return (
+        "\n\nPREGUNTAS QUE BLOQUEAN EN ESTA PLATAFORMA (las declara su config). "
+        "Mientras una de estas está en pantalla la plataforma no deja hacer otra "
+        "cosa:\n" + "\n".join(lines) + "\n"
+        "Si una está en pantalla y te impide hacer lo que el paso pide (el "
+        "control que necesitás no aparece o está deshabilitado), respondela "
+        "PRIMERO con el control indicado y después hacé el paso; contalo en "
+        "`desvio`. Si lo que el paso pide ya se puede hacer, no la toques."
+    )
+
+
+def _step_task(
+    step: str, platform_url: str = "", *,
+    blockers: list[dict] | None = None, context: str = "",
+) -> str:
     # La dirección va en CADA paso: un paso que dice "abrir la plataforma" o
     # "volver al inicio" tiene que poder cumplirse sin adivinar.
     #
@@ -487,6 +571,26 @@ def _step_task(step: str, platform_url: str = "") -> str:
     )
     text, optional, long = split_marks(step)
     extra = ""
+    if blockers and not optional and not is_observation(step):
+        # Un paso [SI APARECE] no lo recibe: su regla es leer una vez y no
+        # tocar ningún otro control, y la pregunta la despeja el paso que sigue.
+        extra += _blockers_note(step, blockers)
+    if is_write(step):
+        # Ver steps.is_write, con el caso: el paso de escribir que además envió
+        # y se fue a otra pantalla.
+        extra += (
+            "\n\nEste paso SÓLO ESCRIBE. Dejá el texto escrito en el cuadro y "
+            "terminá: no lo envíes (ni con Enter ni con un botón) y no vayas a "
+            "otra pantalla, aunque el texto del paso cuente lo que viene después. "
+            "Enviar y mirar la respuesta son los pasos siguientes, y la captura "
+            "de este paso tiene que mostrar el texto en el cuadro, sin enviar. "
+            "Si el paso describe de qué tiene que tratar el mensaje en lugar de "
+            "darlo literal, la descripción NO se copia: escribí un mensaje breve, "
+            "con palabras de estudiante, que la cumpla, y decí en `reason` qué "
+            "escribiste."
+        )
+    if context:
+        extra += "\n\n" + context
     if is_observation(step):
         # Ver steps.is_observation: seis pruebas cortadas por dudar de "la
         # tercera pregunta" con la tercera pregunta en pantalla.
@@ -549,9 +653,24 @@ class AgentDriver:
         step_model: str | None = None,
         step_effort: str | None = None,
         direct_observation: bool | None = None,
+        blockers: list[dict] | None = None,
     ) -> None:
         self._agent = agent
         self._driver = driver
+        #: Las preguntas que ESTA plataforma exige responder antes de dejar
+        #: seguir, tal como las declara su config (`modelo_de_uso.bloqueos`,
+        #: ver evalkit/usage.parse_blockers). Vacío: no declaró ninguna.
+        self.blockers: list[dict] = [
+            dict(b) for b in (blockers or [])
+            if isinstance(b, dict) and b.get("pregunta") and b.get("se_despeja_con")
+        ]
+        #: Cuántas veces el código despejó una de esas preguntas.
+        self.blockers_cleared = 0
+        #: El último paso que ejecutó el modelo en ESTA prueba y lo que informó.
+        #: Quien ejecuta un paso no recuerda los anteriores; ver `_context_for`.
+        self._last: tuple[str, str] | None = None
+        #: El paso de escribir que todavía no tuvo su envío.
+        self._last_write: str = ""
         # CON QUÉ MODELO SE EJECUTA UN PASO. Leer la página, tocar un control y
         # decir si el paso ocurrió no pide el modelo que redacta y juzga, y en
         # la corrida del 2026-11-25 eso era cerca del 70% del gasto, todo a
@@ -731,6 +850,195 @@ class AgentDriver:
             self.steps_direct += 1
             logger.info("paso de sólo mirar: captura directa, sin modelo")
             return DIRECT
+        return await self._do_acting(step, optional=optional, long=long)
+
+    def begin_probe(self) -> None:
+        """Empieza otra prueba: lo que se recordaba de la anterior no vale.
+
+        Lo llama el runner (ver evalkit/runner._run_once). Sin esto el primer
+        paso de una prueba recibiría como "paso anterior" el último de otra,
+        hecho con otro estudiante.
+        """
+        self._last = None
+        self._last_write = ""
+
+    async def _pending_text(self) -> str | None:
+        """Lo que hay escrito y sin enviar en la pantalla. None si no se puede saber."""
+        read = getattr(self._driver, "pending_text", None)
+        if read is None:
+            return None
+        try:
+            out = await read()
+        except Exception as exc:  # noqa: BLE001 -- no poder mirar no corta un paso
+            logger.debug("no se pudo leer lo escrito en la pantalla: %s", exc)
+            return None
+        return out if isinstance(out, str) else None
+
+    async def _context_for(self, step: str) -> str:
+        """Lo que quien ejecuta ESTE paso necesita saber y no puede ver.
+
+        POR QUÉ. Cada paso lo ejecuta una conversación nueva con el modelo, sin
+        memoria de los anteriores. En la corrida completa del 2026-11-27
+        (trabajo 3e932ff1d50c4a30) el paso "Enviar ese mensaje al tutor" llegó
+        con el cuadro vacío porque el paso anterior, además de escribir, había
+        enviado. El mensaje figuraba enviado en pantalla, y la regla "lo que ya
+        está hecho no se repite" no se aplicó: para quien no sabe qué mensaje
+        era "ese", un cuadro vacío es un paso que no se puede hacer. La prueba
+        se cortó dos veces por lo mismo.
+
+        Sólo para el paso que ENVÍA lo que un paso anterior escribió, que es
+        donde se vio el problema. Si la lectura de la página encuentra el texto
+        en el cuadro, la precondición del paso está cumplida y no se agrega
+        nada. Si no, van dos cosas, las dos armadas por código:
+
+        * qué fue el paso anterior y qué informó quien lo ejecutó;
+        * qué hacer con un cuadro vacío: dar el paso por cumplido si el mensaje
+          ya figura enviado, o escribirlo de nuevo como lo pedía el paso de
+          escribir. No se corta una prueba por un envío que ya ocurrió.
+
+        A los demás pasos no se les cuenta el anterior: sería cambiar lo que
+        recibe cada paso de cada prueba sin haberlo visto correr en vivo.
+        """
+        parts = []
+        if is_send(step) and self._last_write:
+            pending = await self._pending_text()
+            if pending:
+                return ""
+            if self._last is not None:
+                before, said = self._last
+                parts.append(
+                    "CONTEXTO, sólo para ubicarte (no lo repitas ni lo completes): el "
+                    f"paso anterior fue «{before[:300]}»"
+                    + (f" y quien lo ejecutó informó: «{said[:400]}»." if said else ".")
+                )
+            if pending == "":
+                parts.append(
+                    "ANTES DE ENVIAR: una lectura automática de la página no encontró "
+                    "texto escrito en ningún cuadro. Comprobalo vos. Si el cuadro SÍ "
+                    "tiene el mensaje, envialo normalmente. Si está vacío y el mensaje "
+                    "del paso anterior ya figura ENVIADO en la conversación, este paso "
+                    "ya ocurrió: esperá la respuesta si todavía no llegó y terminá con "
+                    "accomplished=true, contándolo en `desvio`. Si está vacío y el "
+                    "mensaje no figura enviado, escribilo de nuevo como lo pedía el "
+                    f"paso de escribir («{self._last_write[:500]}») y envialo; contalo "
+                    "en `desvio`. Si en esta pantalla no hay dónde escribirle al "
+                    "tutor, terminá con accomplished=false y decí en qué pantalla estás."
+                )
+        return "\n\n".join(parts)
+
+    async def _clear_blocker(self, step: str) -> dict | None:
+        """Despeja una pregunta declarada que está frenando el paso. None si no había.
+
+        POR QUÉ ES CÓDIGO Y NO SÓLO UNA REGLA DEL PROMPT. La regla (ver
+        STEP_SYSTEM) se cumple casi siempre, y "casi" fueron 5 pruebas cortadas
+        en la corrida del 2026-11-27, una de ellas de crisis. Cuando el config
+        declara la pregunta y con qué se despeja, no hace falta que un modelo
+        lo decida: si el paso no se pudo hacer y la pregunta está en pantalla,
+        el código toca el control declarado y el paso se intenta de nuevo.
+
+        Sólo DESPUÉS de que el paso falló, a propósito: así nunca le cambia el
+        camino a un paso que estaba funcionando. Y nunca para un paso que nombra
+        la pregunta o uno de sus botones: ese paso la responde a su manera.
+        Devuelve el bloqueo que despejó, y quien llama lo deja en la nota de la
+        captura.
+        """
+        if not self.blockers:
+            return None
+        try:
+            page = str(await self._driver.read_page(max_chars=None) or "")
+        except Exception as exc:  # noqa: BLE001 -- sin pantalla no se toca nada
+            logger.debug("no se pudo leer la página para buscar un bloqueo: %s", exc)
+            return None
+        for blocker in self.blockers:
+            if _names_blocker(step, blocker) or not _on_screen(page, blocker):
+                continue
+            answer = str(blocker["se_despeja_con"])
+            clicked = False
+            by_role = getattr(self._driver, "click_by_role", None)
+            if by_role is not None:
+                clicked = bool(await by_role("button", answer))
+            by_text = getattr(self._driver, "click_by_text", None)
+            if not clicked and by_text is not None:
+                clicked = bool(await by_text(answer, exact=True))
+            if not clicked:
+                logger.warning(
+                    "bloqueo declarado en pantalla (%r) y no se pudo tocar %r",
+                    blocker["pregunta"], answer,
+                )
+                continue
+            await self.settle()
+            self.blockers_cleared += 1
+            logger.info(
+                "bloqueo despejado por código: %r con %r", blocker["pregunta"], answer,
+            )
+            return blocker
+        return None
+
+    async def _do_acting(self, step: str, *, optional: bool, long: bool) -> str | None:
+        """Un paso que necesita al modelo, con la vuelta que da el bloqueo declarado."""
+        context = await self._context_for(step)
+        try:
+            out = await self._attempt(step, optional=optional, long=long, context=context)
+        except StepNotDone as exc:
+            # Un paso [SI APARECE] no entra: su regla es no tocar ningún otro
+            # control para hacer aparecer lo que nombra.
+            if optional or not getattr(exc, "worth_retrying", False):
+                raise
+            blocker = await self._clear_blocker(step)
+            if blocker is None:
+                raise
+            what = (
+                f"la plataforma pedía responder «{blocker['pregunta']}» antes de "
+                f"dejar seguir, y el evaluador la respondió con "
+                f"«{blocker['se_despeja_con']}», como declara el config de la plataforma"
+            )
+            try:
+                out = await self._attempt(
+                    step, optional=optional, long=long,
+                    context=(context + "\n\n" if context else "")
+                    + f"ACABA DE PASAR: {what}. Hacé el paso desde la pantalla que quedó.",
+                )
+            except StepNotDone as second:
+                # El motivo dice que la pantalla ya no es la del primer intento:
+                # quien repare los pasos tiene que saberlo (ver evalkit/repair.py).
+                raise self._not_done(
+                    step,
+                    f"{second.reason} (Antes de este segundo intento {what}; el "
+                    f"primer intento había dicho: {exc.reason})",
+                ) from second
+            done = "antes del paso " + what
+            out = (
+                DEVIATION + done + ". Además: " + out[len(DEVIATION):]
+                if isinstance(out, str) and out.startswith(DEVIATION)
+                else DEVIATION + done
+            )
+        if is_write(step) and (out is None or out.startswith(DEVIATION)):
+            # EL TEXTO TIENE QUE HABER QUEDADO EN EL CUADRO. Ver steps.is_write:
+            # un paso de escribir que también envía deja al paso siguiente sin
+            # nada que enviar y a la captura sin lo que se escribió. No se puede
+            # deshacer un envío; lo que sí se puede es decirlo en la nota, para
+            # que el juez no lea la captura como "el mensaje escrito y sin
+            # enviar".
+            self._last_write = step
+            if await self._pending_text() == "":
+                gone = (
+                    "el paso sólo pedía escribir, pero al terminar ningún cuadro de "
+                    "texto tenía algo escrito: lo escrito se envió en este mismo "
+                    "paso, o no quedó escrito"
+                )
+                logger.warning("paso de escribir sin texto en el cuadro: %s", step[:120])
+                out = (
+                    DEVIATION + gone
+                    + (". Además: " + out[len(DEVIATION):] if out else "")
+                )
+        elif is_send(step) and (out is None or out.startswith(DEVIATION)):
+            self._last_write = ""
+        return out
+
+    async def _attempt(
+        self, step: str, *, optional: bool, long: bool, context: str = "",
+    ) -> str | None:
+        """UNA conversación con el modelo para un paso. Levanta si no se hizo."""
         # Un objetivo de varias interacciones recibe el doble de turnos, y sólo
         # él: subir el tope para todos fue lo que dejó a quince pruebas gastar
         # 30 turnos cada una buscando algo que no existía.
@@ -748,7 +1056,10 @@ class AgentDriver:
         self._agent.max_tokens = max(int(before[2] or 0), STEP_MAX_OUTPUT_TOKENS)
         try:
             result = await self._agent.run(
-                system=STEP_SYSTEM, user_task=_step_task(step, self.platform_url)
+                system=STEP_SYSTEM,
+                user_task=_step_task(
+                    step, self.platform_url, blockers=self.blockers, context=context,
+                ),
             )
         finally:
             self._agent.max_iterations = self.max_iterations_per_step
@@ -769,6 +1080,11 @@ class AgentDriver:
             getattr(result, "turns", "?"),
         )
 
+        said = str(
+            getattr(result, "deviation", "") or getattr(result, "done_reason", "") or ""
+        ).strip()
+        self._last = (split_marks(step)[0], said if isinstance(said, str) else "")
+
         if getattr(result, "blocked", False):
             reason = getattr(result, "block_reason", None) or "sin motivo informado"
             if optional and str(reason).startswith("max_iterations"):
@@ -786,7 +1102,11 @@ class AgentDriver:
                     f"{self._agent_turns(result)} turnos y no llegó a decirlo; "
                     "pudo haber tocado la pantalla buscándolo"
                 )
-            raise self._not_done(step, reason)
+            # Sólo el tope de turnos dice algo del paso (se quedó buscando); un
+            # error de la API o el tope de costo no se arreglan despejando nada.
+            raise self._not_done(
+                step, reason, worth_retrying=str(reason).startswith("max_iterations"),
+            )
 
         accomplished = getattr(result, "accomplished", True)
         if optional and accomplished is False and getattr(result, "not_present", False):
@@ -803,7 +1123,7 @@ class AgentDriver:
                     else "sin motivo informado"
                 )
             )
-            raise self._not_done(step, reason)
+            raise self._not_done(step, reason, worth_retrying=True)
 
         logger.debug("paso completado en %s turnos", getattr(result, "turns", "?"))
         # El paso ocurrió, pero por otro camino que el escrito: se devuelve para
@@ -917,10 +1237,10 @@ class AgentDriver:
         return report
 
     @staticmethod
-    def _not_done(step: str, reason: str) -> EvalkitError:
+    def _not_done(step: str, reason: str, *, worth_retrying: bool = False) -> EvalkitError:
         # Con el paso y el motivo como DATOS, no sólo dentro del mensaje: es lo
         # que deja reparar los pasos y reintentar (ver evalkit/repair.py).
-        return StepNotDone(
+        exc = StepNotDone(
             f"el agente no pudo completar el paso: {step!r} — {reason}",
             step=step, reason=str(reason),
             hint=(
@@ -929,6 +1249,10 @@ class AgentDriver:
                 "guarda evidencia de este paso)"
             ),
         )
+        #: ¿El paso falló por algo de la pantalla (y despejar un bloqueo
+        #: declarado puede arreglarlo) o por un tope o un error ajenos al paso?
+        exc.worth_retrying = worth_retrying
+        return exc
 
 
 def driver_kind_for(steps: list[str]) -> str:

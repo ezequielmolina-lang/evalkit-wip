@@ -144,6 +144,28 @@ class BrowserUnavailable(ServiceError):
     """Chromium is missing or refused to launch. An operator problem, not a run."""
 
 
+def _declared_blockers(record: JobRecord) -> list[dict]:
+    """`modelo_de_uso.bloqueos` de la plataforma de este trabajo. [] si no declara.
+
+    Sale de la declaración guardada en el trabajo (la misma que leyeron el plan
+    y la redacción) y, si el trabajo no la tiene, del config de la plataforma.
+    Un config que no se puede leer no frena la ejecución: las pruebas corren
+    sin bloqueos declarados, como antes de que existieran.
+    """
+    if record.usage:
+        return [dict(b) for b in usage_mod.UsageModel.from_dict(record.usage).bloqueos]
+    try:
+        from ..config import CONFIG
+        from ..platform_loader import resolve_platform_dir
+
+        key = resolve_platform_dir(record.platform_url, CONFIG.platforms_dir)
+        usage = usage_mod.load_usage(key, platforms_dir=CONFIG.platforms_dir)
+    except Exception as exc:  # noqa: BLE001 -- sin declaración se corre como antes
+        logger.info("sin bloqueos declarados para %s: %s", record.platform_url, exc)
+        return []
+    return [dict(b) for b in usage.bloqueos]
+
+
 def _default_driver_factory(record: JobRecord, credentials, artifacts_dir: Path):
     """A real Chromium, logged in if credentials were supplied.
 
@@ -301,6 +323,11 @@ def _default_driver_factory(record: JobRecord, credentials, artifacts_dir: Path)
                 # La dirección viaja en cada paso: "abrir la plataforma" tiene
                 # que poder cumplirse sin adivinar.
                 platform_url=record.platform_url,
+                # Las preguntas que esta plataforma exige responder antes de
+                # dejar seguir, tal como las declara su config. Sin esto cinco
+                # pruebas de la corrida del 2026-11-27 se cortaron frente a una
+                # pregunta que el config ya nombraba (ver usage.parse_blockers).
+                blockers=_declared_blockers(record),
             )
 
         async def __aexit__(self, *exc):

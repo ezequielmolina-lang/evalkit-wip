@@ -186,6 +186,63 @@ def is_observation(step: str) -> bool:
     return bool(_SAVES_VIEW.search(bare)) and not _PLATFORM_SAVE.search(bare)
 
 
+#: Un paso que ESCRIBE un texto en un cuadro...
+_WRITES = re.compile(r"\b(escribir|tipear|teclear|redactar)\b", re.IGNORECASE)
+#: ...y uno que ENVÍA: empieza por enviar, o toca el control que envía.
+_SENDS = re.compile(
+    r"^(enviar|mandar)\b|"
+    r"^(tocar|pulsar|presionar|apretar|hacer clic)\b.{0,60}?\b(enviar|mandar)\b",
+    re.IGNORECASE,
+)
+#: Dentro de un paso que escribe, lo que además lo vuelve un envío.
+_ALSO_SENDS = re.compile(r"\b(enviar|enviarlo|mandar|mandarlo)\b", re.IGNORECASE)
+
+
+def _head(step: str) -> str:
+    """La instrucción del paso, sin el texto que hay que escribir.
+
+    Lo que va después de los primeros dos puntos es el mensaje ("escribir
+    exactamente: voy a enviar la tarea") o un ejemplo: no dice qué hace el
+    paso, y un mensaje puede nombrar cualquier verbo.
+    """
+    text, _, _ = split_marks(step)
+    return text.split(":", 1)[0]
+
+
+def is_write(step: str) -> bool:
+    """¿Este paso escribe un texto en un cuadro y nada más?
+
+    POR QUÉ HACE FALTA SABERLO. En la corrida completa del 2026-11-27 (trabajo
+    3e932ff1d50c4a30) seis de los 24 pasos de escribir traían, en lugar del
+    mensaje, la descripción de la celda del muestreo ("escribir exactamente lo
+    que distingue a esta celda: en una segunda sesión, referir a la lección
+    anterior y ver si el tutor recupera..."). En las pruebas que se miraron,
+    quien ejecuta hizo tres cosas distintas con eso: copió la descripción tal
+    cual en el chat del tutor, la copió Y la envió, o hizo la secuencia entera
+    que la descripción contaba (escribir, enviar e irse a mirar el panel del
+    docente). En los dos últimos
+    casos el paso siguiente, "Enviar ese mensaje", encontró el cuadro vacío u
+    otra pantalla, y la prueba se cortó; en una de esas pruebas el mensaje era
+    de crisis y se envió sin que quedara captura de lo enviado ni de la
+    respuesta. Un paso que escribe se trata aparte: se le dice que sólo
+    escribe, y después se comprueba que el texto quedó en el cuadro (ver
+    browser_agents/agent_driver.py).
+
+    "Escribir y enviar" en un mismo paso no entra: ese paso también envía.
+    """
+    if is_observation(step):
+        return False
+    head = _head(step)
+    return bool(_WRITES.search(head)) and not _ALSO_SENDS.search(head)
+
+
+def is_send(step: str) -> bool:
+    """¿Este paso envía lo que un paso anterior dejó escrito?"""
+    if is_observation(step):
+        return False
+    return bool(_SENDS.search(_head(step).strip()))
+
+
 #: Una ACCIÓN que depende de algo que el tutor o la plataforma puede proponer o
 #: no: "Confirmar ante el tutor la hipótesis de error que proponga". Ver
 #: `lint_steps` para el caso.

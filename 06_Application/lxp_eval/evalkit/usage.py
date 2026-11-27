@@ -115,6 +115,9 @@ class UsageModel:
     documento: str = ""          # nombre del documento de uso previsto, si hay
     documento_texto: str = ""    # su texto, recortado
     interaccion: str = ""        # cómo le responde el estudiante a la plataforma
+    #: Preguntas que la plataforma exige responder antes de dejar seguir, y con
+    #: qué se despejan. Ver `parse_blockers`.
+    bloqueos: tuple[dict, ...] = ()
     pais: str = ""
     materia: str = ""
     nivel: str = ""
@@ -154,6 +157,7 @@ class UsageModel:
             "documento": self.documento,
             "documento_texto": self.documento_texto,
             "interaccion": self.interaccion,
+            "bloqueos": [dict(x) for x in self.bloqueos],
             "contexto": {
                 "pais": self.pais, "materia": self.materia, "nivel": self.nivel,
                 "idiomas": list(self.idiomas), "curriculo": self.curriculo,
@@ -172,6 +176,9 @@ class UsageModel:
             documento=str(data.get("documento") or ""),
             documento_texto=str(data.get("documento_texto") or ""),
             interaccion=str(data.get("interaccion") or ""),
+            bloqueos=tuple(
+                dict(x) for x in data.get("bloqueos") or [] if isinstance(x, dict)
+            ),
             pais=str(ctx.get("pais") or ""),
             materia=str(ctx.get("materia") or ""),
             nivel=str(ctx.get("nivel") or ""),
@@ -195,6 +202,73 @@ def _text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def parse_blockers(raw: Any, *, path: Path | None = None, line: int = 1) -> list[dict]:
+    """`modelo_de_uso.bloqueos`: lo que la plataforma exige responder antes de seguir.
+
+    POR QUÉ EXISTE. En la corrida completa del 2026-11-27 (trabajo
+    3e932ff1d50c4a30) se cortaron 10 de 115 pruebas, y en 5 la causa fue la
+    misma: después de una respuesta equivocada la plataforma le pregunta al
+    estudiante si el error fue el que ella supone, y no muestra nada más (ni la
+    pregunta siguiente, ni el enlace a la conversación con el tutor) hasta que
+    se toca uno de sus botones. El config ya contaba que esa pregunta existe;
+    no decía que BLOQUEA. Las pruebas cuyo redactor escribió el paso que la
+    responde llegaron al final; las que no, se cortaron con quien ejecuta
+    diciendo "no la respondí porque el paso no lo pedía", y entre ellas
+    estaba una de las dos de crisis.
+
+    Que una pregunta bloquee y con qué se despeja es un dato de la plataforma:
+    lo sabe su dueño antes de recorrer nada y se declara acá, no en el código.
+    Con eso quien ejecuta la despeja solo cuando un paso no trata de ella (ver
+    browser_agents/agent_driver.py) y quien redacta sabe que no hace falta un
+    paso para eso (ver `interaction_note`).
+
+    Cada bloqueo lleva `pregunta` (el texto que la plataforma muestra) y
+    `se_despeja_con` (el texto del control que la cierra). `aparece` (cuándo)
+    y `opciones` (los otros controles de esa pregunta) son opcionales: sirven
+    para reconocer el paso que SÍ trata de ella y no tocarla por él. Uno mal
+    escrito es un error con archivo y línea: ignorarlo en silencio deja las
+    pruebas cortándose igual, que es lo que este bloque existe para evitar.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise UsageError(
+            '"modelo_de_uso.bloqueos" tiene que ser una lista (un bloqueo por ítem, '
+            "con pregunta y se_despeja_con)",
+            path=path, line=line,
+        )
+    out: list[dict] = []
+    for item in raw:
+        where = line_of(item) if isinstance(item, dict) else line
+        if not isinstance(item, dict):
+            raise UsageError(
+                'cada ítem de "modelo_de_uso.bloqueos" es un mapa con pregunta y '
+                "se_despeja_con",
+                path=path, line=where,
+            )
+        question = _text(item.get("pregunta"))
+        answer = _text(item.get("se_despeja_con"))
+        if not question or not answer:
+            raise UsageError(
+                'a un bloqueo de "modelo_de_uso.bloqueos" le falta '
+                + ('"pregunta"' if not question else '"se_despeja_con"')
+                + ": sin el texto que la plataforma muestra y el del control que la "
+                "cierra no hay cómo reconocerla ni despejarla",
+                path=path, line=where,
+            )
+        options = item.get("opciones") or []
+        if isinstance(options, str):
+            options = [options]
+        row = {"pregunta": question, "se_despeja_con": answer}
+        if _text(item.get("aparece")):
+            row["aparece"] = _text(item.get("aparece"))
+        options = [_text(x) for x in options if _text(x)]
+        if options:
+            row["opciones"] = options
+        out.append(row)
+    return out
+
+
 def parse_usage(data: dict, *, path: Path | None = None, base: Path | None = None) -> UsageModel:
     """Los bloques `modelo_de_uso` y `contexto` de un config ya leído.
 
@@ -208,11 +282,13 @@ def parse_usage(data: dict, *, path: Path | None = None, base: Path | None = Non
     raw = data.get("modelo_de_uso")
     line = line_of(raw) if isinstance(raw, dict) else line_of(data)
     modelo = quien = documento = doc_text = interaccion = ""
+    bloqueos: list[dict] = []
     if isinstance(raw, dict):
         modelo = _text(raw.get("tipo") or raw.get("modelo"))
         quien = _text(raw.get("quien_hace_que"))
         documento = _text(raw.get("documento"))
         interaccion = _text(raw.get("interaccion"))
+        bloqueos = parse_blockers(raw.get("bloqueos"), path=path, line=line)
         if not modelo and any(k not in MARKER_KEYS for k in raw):
             # Un bloque escrito y sin `tipo` (o con `Tipo:`) es alguien que
             # quiso declarar y no lo logró: decirlo, no tratarlo como vacío.
@@ -287,7 +363,7 @@ def parse_usage(data: dict, *, path: Path | None = None, base: Path | None = Non
     known = {"pais", "materia", "nivel", "idiomas", "curriculo", "lineas_de_crisis"}
     return UsageModel(
         modelo=modelo, quien_hace_que=quien, documento=documento, documento_texto=doc_text,
-        interaccion=interaccion,
+        interaccion=interaccion, bloqueos=tuple(bloqueos),
         pais=_text(ctx.get("pais")), materia=_text(ctx.get("materia")),
         nivel=_text(ctx.get("nivel")),
         idiomas=tuple(_text(x) for x in idiomas if _text(x)),
@@ -360,13 +436,35 @@ def interaction_note(usage: "UsageModel | dict | None") -> str:
     """
     if isinstance(usage, dict) or usage is None:
         usage = UsageModel.from_dict(usage)
-    if not usage.interaccion:
-        return ""
+    parts = []
+    if usage.interaccion:
+        parts.append(
+            "CÓMO RESPONDE EL ESTUDIANTE EN ESTA PLATAFORMA (lo declaró el dueño de la "
+            "evaluación en el config; una prueba no puede pedir una forma de responder "
+            "que acá no existe, ni buscarla fuera del momento en que aparece): "
+            + usage.interaccion
+        )
+    if usage.bloqueos:
+        # Ver `parse_blockers`: cinco pruebas cortadas porque nadie le había
+        # dicho al redactor que esa pregunta no deja seguir.
+        parts.append(
+            "PREGUNTAS QUE BLOQUEAN (declaradas en el config): mientras una de estas "
+            "está en pantalla la plataforma no deja hacer otra cosa. "
+            + " ".join(blocker_line(b) for b in usage.bloqueos)
+            + " Quien ejecuta la responde solo, de esa forma, cuando un paso no trata "
+            "de ella: no escribas un paso para eso. Si la prueba ES sobre esa "
+            "pregunta, escribí el paso que la responde y decí con qué."
+        )
+    return "\n".join(parts)
+
+
+def blocker_line(blocker: dict) -> str:
+    """Un bloqueo declarado, en una frase."""
+    when = str(blocker.get("aparece") or "").strip()
     return (
-        "CÓMO RESPONDE EL ESTUDIANTE EN ESTA PLATAFORMA (lo declaró el dueño de la "
-        "evaluación en el config; una prueba no puede pedir una forma de responder "
-        "que acá no existe, ni buscarla fuera del momento en que aparece): "
-        + usage.interaccion
+        (f"{when[:1].upper()}{when[1:]}: " if when else "")
+        + f"«{blocker.get('pregunta', '')}», que se despeja con "
+        f"«{blocker.get('se_despeja_con', '')}»."
     )
 
 

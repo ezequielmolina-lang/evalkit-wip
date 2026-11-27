@@ -157,6 +157,17 @@ modelo_de_uso:
   # escribe, habla) y en qué momento aparece cada forma. Lo leen quien planea
   # y quien redacta las pruebas, para no pedir un chat donde hay botones.
   # interaccion: "Opción múltiple; sólo escribe después de un error."
+  # Opcional: preguntas que la plataforma exige responder antes de dejar
+  # seguir (una confirmación, una reflexión sobre el error). Mientras una está
+  # en pantalla no aparece ni la pregunta siguiente ni nada más, y una prueba
+  # que no la esperaba se corta ahí. Con esto quien ejecuta la responde solo,
+  # con el control que se declara, cuando un paso no trata de ella, y lo deja
+  # anotado en la captura. `aparece` y `opciones` son opcionales.
+  # bloqueos:
+  #   - aparece: "después de una respuesta equivocada"
+  #     pregunta: "¿Lo hiciste así?"
+  #     se_despeja_con: "Sí, así fue"
+  #     opciones: ["Sí, así fue", "No, hice otra cosa"]
 
 # EN QUÉ PAÍS Y MATERIA. Los datos por país viven acá y no en el criterio: un
 # banco escrito para otro país trae sus líneas de crisis, su currículo y sus

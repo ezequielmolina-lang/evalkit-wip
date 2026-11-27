@@ -768,6 +768,48 @@ class PlaywrightDriver:
             await asyncio.sleep(1.0)
             waited += 1.0
 
+    async def pending_text(self) -> str:
+        """Lo que hay escrito y sin enviar en los cuadros de texto visibles. "" si nada.
+
+        POR QUÉ. En la corrida completa del 2026-11-27 (trabajo
+        3e932ff1d50c4a30) un paso que sólo pedía escribirle al tutor también
+        envió el mensaje, y el paso siguiente ("Enviar ese mensaje") encontró el
+        cuadro vacío y cortó la prueba; en una de crisis, además, no quedó
+        captura de lo que se había enviado. Para decir en la nota que un paso
+        de escribir no dejó su texto, y para no mandar a ciegas un paso de
+        enviar, hace falta poder preguntarle a la página qué hay escrito (ver
+        AgentDriver._do_acting y _context_for).
+
+        Mira el DOM y no el árbol de accesibilidad, que es texto para un modelo.
+        Sólo campos visibles y editables; nunca una contraseña. No ve dentro de
+        un iframe ni de un shadow DOM cerrado: por eso quien lo usa trata un
+        "no hay nada" como un dato a comprobar y no como una certeza.
+        """
+        assert self.page is not None
+        script = """() => {
+          const out = [];
+          const visible = (el) => {
+            const r = el.getBoundingClientRect();
+            const st = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && st.visibility !== 'hidden'
+              && st.display !== 'none';
+          };
+          const fields = document.querySelectorAll(
+            'textarea, input, [contenteditable=""], [contenteditable="true"]'
+          );
+          for (const el of fields) {
+            if (!visible(el) || el.disabled || el.readOnly) continue;
+            if (el.tagName === 'INPUT') {
+              const kind = (el.getAttribute('type') || 'text').toLowerCase();
+              if (!['text', 'search', 'email', 'url', 'tel'].includes(kind)) continue;
+            }
+            const value = (el.value !== undefined ? el.value : el.innerText) || '';
+            if (value.trim()) out.push(value.trim());
+          }
+          return out.join('\\n');
+        }"""
+        return str(await self.page.evaluate(script) or "")
+
     # ------------------------------------------------------------------
     # Click strategies — multi-strategy fallback for fragile SPAs
     # ------------------------------------------------------------------
