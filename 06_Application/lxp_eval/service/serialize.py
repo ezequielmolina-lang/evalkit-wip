@@ -134,12 +134,19 @@ def with_frozen_readings(plan: dict, record: Any) -> dict:
     # corre es lo editado, o lo guardado si no se tocó (igual que
     # `probe_from_plan`). Si la compuerta pidiera lo que se había redactado,
     # una prueba que guardó justo lo aprobado quedaría sin juzgar.
+    # Sólo las pruebas que QUEDARON en el plan: la que quien revisa sacó no
+    # corre, así que tampoco decide qué evidencia pide el criterio. (Esta
+    # lista es lo que el criterio declara y entra en su huella; al puntuar,
+    # cada prueba se compara con lo que ella misma guarda.)
+    sent_back = plan.get("probes")
     edited = {
-        e.get("probeId"): e for e in (plan.get("probes") or [])
+        e.get("probeId"): e for e in (sent_back or [])
         if isinstance(e, dict) and e.get("probeId")
     }
     approved: dict[str, list] = {}
     for stored in getattr(record, "probes", None) or []:
+        if isinstance(sent_back, list) and stored.get("probeId") not in edited:
+            continue
         change = edited.get(stored.get("probeId")) or {}
         approved.setdefault(stored.get("criterionId"), []).append(
             {"capture": change.get("capture") or stored.get("capture")}

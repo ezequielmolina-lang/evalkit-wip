@@ -326,13 +326,22 @@ def _pedir_otro_tipo(store, job_id, cid, tipos):
     store.save(record)
 
 
-def test_gate_por_tipo_de_artefacto(tmp_path, env):  # noqa: F811
+def test_gate_por_tipo_de_artefacto(tmp_path, env, monkeypatch):  # noqa: F811
     """Si el tipo de evidencia que el plan pidió no está, el criterio no llega al juez."""
     store, engine, job_id, lector, vistas = _armar(tmp_path)
     _generar(store, engine, job_id)
     record = _aprobar(store, job_id)
     cid, otro = _probados(record)[0], _probados(record)[-1]
-    _pedir_otro_tipo(store, job_id, cid, ["page_text", "screenshot", "video"])
+    suyas = {p["probeId"] for p in record.probes if p["criterionId"] == cid}
+    real = lec.missing_artifacts
+
+    def falta(required, rows):
+        rows = list(rows)
+        if rows and all(r.get("probe_id") in suyas for r in rows):
+            return ["video"]
+        return real(required, rows)
+
+    monkeypatch.setattr(lec, "missing_artifacts", falta)
     lector.permitido = False
     record = _puntuar(store, engine, job_id)
 
@@ -655,3 +664,89 @@ def test_the_gate_asks_what_the_probe_saved_not_what_survived_deduplication(tmp_
 
     for cid in _probados(record):
         assert "no guardó la evidencia de tipo" not in _fila(store, job_id, cid)["rationale"]
+
+
+# --- lo que encontró la revisión de las tareas 7 y 9 --------------------------
+
+
+def _juez_que_nunca_alcanza(vistos, conjuntos):
+    def score(test, rows, client, *, platform=None, reading="", **kw):
+        vistos.append((test.id, {r.get("probe_id") for r in rows}))
+        if "JUICIO CONJUNTO" in reading:
+            conjuntos.append(test.id)
+        return scoring.TestVerdict(
+            test_id=test.id, platform=platform or "", status=scoring.NO_EVALUADO,
+            points_earned=0.0, points_possible=0.0, rationale="no alcanza",
+            evidence=[], runs=[scoring.NO_EVALUADO],
+        )
+    return score
+
+
+def test_one_probe_alone_is_not_a_joint_judgment(tmp_path, env, monkeypatch):  # noqa: F811
+    """Tres pruebas, dos sin su evidencia: la que queda no se vuelve a juzgar "junta" consigo misma."""
+    vistos, conjuntos = [], []
+    lector = _Lector()
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True, read_rule=lector,
+        score_test=_juez_que_nunca_alcanza(vistos, conjuntos),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check_verdicts=lambda *a, **k: {"ok": True, "motivo": ""},
+    )
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    del_criterio = [p["probeId"] for p in record.probes if p["criterionId"] == cid]
+    if len(del_criterio) < 3:
+        pytest.skip("este plan de prueba no tiene tres pruebas por criterio")
+    afuera = set(del_criterio[:2])
+    real = lec.missing_artifacts
+
+    def falta(required, rows):
+        rows = list(rows)
+        if rows and all(r.get("probe_id") in afuera for r in rows):
+            return ["page_text"]
+        return real(required, rows)
+
+    monkeypatch.setattr(lec, "missing_artifacts", falta)
+    _aprobar(store, job_id)
+    _puntuar(store, engine, job_id)
+
+    assert cid not in conjuntos, "con una sola prueba para mandar no hay conjunto que juzgar"
+    fila = _fila(store, job_id, cid)
+    assert fila["verdict"] == "NO_EVALUADO" and "JUICIO CONJUNTO" not in fila["rationale"]
+
+
+def test_each_probe_is_asked_for_what_that_probe_was_approved_to_save(tmp_path, env):  # noqa: F811
+    """Una sola prueba pasa a guardar sólo capturas al aprobar: no se le pide el texto que ya no guarda."""
+    store, engine, job_id, lector, _ = _armar(tmp_path)
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    record = _aprobar(store, job_id)
+    una = next(p for p in record.approved_plan["probes"] if p["criterionId"] == cid)
+    una["capture"] = ["screenshot"]
+    store.save(record)
+    lector.permitido = False
+    record = _puntuar(store, engine, job_id)
+
+    fila = _fila(store, job_id, cid)
+    assert "no guardó la evidencia de tipo" not in fila["rationale"]
+    assert not fila["rationale"].startswith("[causa: falta el tipo de evidencia]")
+
+
+def test_the_required_evidence_of_a_criterion_ignores_probes_dropped_at_approval(tmp_path, env):  # noqa: F811
+    """La prueba que quien revisa sacó del plan no decide qué evidencia pide el criterio."""
+    from lxp_eval.service import serialize
+
+    store, engine, job_id, _, _ = _armar(tmp_path)
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    del_criterio = [p for p in record.probes if p["criterionId"] == cid]
+    if len(del_criterio) < 2:
+        pytest.skip("este plan de prueba tiene una sola prueba por criterio")
+    quedan = [
+        {**p, "capture": ["screenshot"]} for p in del_criterio[1:]
+    ] + [dict(p) for p in record.probes if p["criterionId"] != cid]
+    plan = serialize.with_frozen_readings(
+        {"criteria": serialize.criteria_out(record.criteria), "probes": quedan, "sampling": {}}, record,
+    )
+    assert plan["lecturas"][cid]["artefactos_requeridos"] == ["screenshot"], \
+        "la que se sacó (guardaba también texto) no cuenta"

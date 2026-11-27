@@ -1633,8 +1633,13 @@ class JobRunner:
         if test is None:
             raise ServiceError(f"no se encontró el criterio {criterion_id} en este trabajo")
         client = self._client()
-        if sample is None and not fields:
-            raise ServiceError("la corrección de una lectura necesita los campos que cambia o la muestra elegida")
+        if (sample is None) == (not fields):
+            # Ni vacía ni las dos cosas: si llegan campos Y una muestra, usar
+            # una y descartar la otra en silencio es decidir por la persona.
+            raise ValueError(
+                "la corrección de una lectura lleva los campos que cambia o la "
+                "muestra elegida: una de las dos cosas"
+            )
         if sample is not None:
             new = await asyncio.to_thread(
                 lectura_mod.adjudicate_reading, entry, test, sample, by=by,
@@ -2424,11 +2429,16 @@ class JobRunner:
             # que el plan declaró (ver lectura.missing_artifacts). Una prueba
             # sin su tipo no se le manda al juez para que adivine; si no lo
             # guardó ninguna, el criterio no se juzga.
-            needs = (frozen.get(test.id) or {}).get("artefactos_requeridos") or []
+            # CADA PRUEBA, CONTRA LO QUE ESA PRUEBA DECLARA GUARDAR, tal como se
+            # aprobó y se ejecutó (`capture`). No contra la unión de lo que
+            # guardan todas las del criterio: si una sola pasa a guardar
+            # únicamente capturas, pedirle además el texto la dejaba afuera
+            # habiendo guardado justo lo aprobado.
             kept = saved if saved is not None else rows
             for p in to_judge:
                 gone = lectura_mod.missing_artifacts(
-                    needs, [r for r in kept if r.get("probe_id") == p.probe_id]
+                    getattr(p, "capture", None) or lectura_mod.DEFAULT_ARTIFACTS,
+                    [r for r in kept if r.get("probe_id") == p.probe_id],
                 )
                 if gone:
                     lacking[p.probe_id] = gone
@@ -2531,7 +2541,12 @@ class JobRunner:
 
         results = await judge_all()
         judged, lines, tail, cut, thin = summarize(results)
-        if not judged and thin >= 2:
+        # Las que SÍ se le mandan al juez: sin las que la compuerta por tipo
+        # dejó afuera. Un "conjunto" de una sola no es un conjunto: sería
+        # volver a juzgar la misma prueba que acaba de declarar insuficiente,
+        # y publicar ese veredicto como si hubieran sido varias.
+        sent = [p for p in to_judge if p.probe_id not in lacking]
+        if not judged and thin >= 2 and len(sent) >= 2:
             # NINGUNA PRUEBA ALCANZÓ SOLA, PERO HAY VARIAS COMPLETAS: se juzgan
             # JUNTAS, una vez. En la verificación en vivo del 2026-11-26 un
             # criterio (PT-D8-01) tuvo sus seis pruebas completas y quedó sin
@@ -2548,9 +2563,6 @@ class JobRunner:
             # se contesta por celda y las demás quedan como "sin evidencia
             # suficiente", que es lo que son. Y el veredicto conjunto dice que
             # lo es, porque no es "en x de n".
-            # Sin las pruebas que la compuerta por tipo dejó afuera: lo que no
-            # se le mandó al juez prueba por prueba tampoco entra por acá.
-            sent = [p for p in to_judge if p.probe_id not in lacking]
             together = [
                 r for p in sent for r in rows if r.get("probe_id") == p.probe_id
             ]

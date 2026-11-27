@@ -187,7 +187,9 @@ def _plan_of(record: JobRecord) -> dict | None:
         # antes de aprobar (ver evalkit/lectura.py). Lista vacía en un trabajo
         # hecho con el contrato apagado, o anterior a él.
         "lecturas": serialize.readings_out(record.readings),
-        "esquema": serialize.PLAN_SCHEMA,
+        # Sólo si el trabajo tiene lecturas: un plan sin ellas es del esquema
+        # de siempre, y una pantalla que mire esta clave no se confunde.
+        **({"esquema": serialize.PLAN_SCHEMA} if record.readings else {}),
     }
 
 

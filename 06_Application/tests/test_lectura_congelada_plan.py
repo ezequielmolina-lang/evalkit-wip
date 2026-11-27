@@ -63,7 +63,7 @@ def test_a_job_made_with_the_contract_off_shows_no_readings(tmp_path, env):  # n
     _generar(store, engine, job_id)
     with _web(store, engine) as web:
         plan = web.get(f"/jobs/{job_id}").json()["plan"]
-    assert plan["lecturas"] == []
+    assert plan["lecturas"] == [] and "esquema" not in plan, "sin lecturas, el plan es del esquema de siempre"
 
 
 def test_the_web_edits_a_reading_through_its_own_endpoint(tmp_path, env):  # noqa: F811
@@ -104,11 +104,14 @@ def test_a_bad_edit_is_told_what_is_wrong_and_changes_nothing(tmp_path, env):  #
         sin_nombre = web.post(f"/jobs/{job_id}/lecturas/{cid}", json={"by": " ", "changes": {"cumple": "Tres."}})
         sin_extremo = web.post(f"/jobs/{job_id}/lecturas/{cid}", json={"by": "E. M.", "changes": {"cumple": ""}})
         sin_nada = web.post(f"/jobs/{job_id}/lecturas/{cid}", json={"by": "E. M."})
+        las_dos = web.post(f"/jobs/{job_id}/lecturas/{cid}",
+                           json={"by": "E. M.", "sample": 1, "changes": {"cumple": "Tres."}})
         otro = web.post(f"/jobs/{job_id}/lecturas/NO-EXISTE", json={"by": "E. M.", "changes": {"cumple": "Tres."}})
 
     assert mal_escrito.status_code == 422 and "cumpel" in mal_escrito.text
     assert sin_nombre.status_code == 422 and sin_extremo.status_code == 422
-    assert sin_nada.status_code == 409 and otro.status_code == 404
+    assert sin_nada.status_code == 422 and las_dos.status_code == 422, "una corrección que no se entiende"
+    assert otro.status_code == 404
     assert store.get(job_id).readings[cid] == antes
 
 
@@ -172,22 +175,28 @@ def test_with_the_contract_off_the_plan_document_is_left_alone(tmp_path, env):  
 
 
 def test_an_old_job_file_without_readings_still_loads_and_scores(tmp_path, env):  # noqa: F811
-    """Migración: un job.json de antes del contrato no tiene `readings` ni lecturas en su plan."""
+    """Migración: un job.json de antes del contrato no tiene `readings`. Se abre, se aprueba y se puntúa."""
+    from tests.test_lectura_congelada_puntaje import _puntuar
+
     store, engine, job_id, _, _ = _armar(tmp_path, frozen_readings=False)
-    _correr(store, engine, job_id)
+    _generar(store, engine, job_id)
     path = store.dir_of(job_id) / "job.json"
     viejo = json.loads(path.read_text(encoding="utf-8"))
-    viejo.pop("readings", None)
-    path.write_text(json.dumps(viejo, ensure_ascii=False), encoding="utf-8")
+    assert viejo.pop("readings") == {}
+    path.write_text(json.dumps(viejo, ensure_ascii=False), encoding="utf-8")   # como lo dejó el motor viejo
 
     record = JobStore(store.root).get(job_id)
-    assert record.readings == {} and "lecturas" not in record.approved_plan
+    assert record.readings == {}
+    record = _aprobar(store, job_id)                 # recién acá se aprueba y se puntúa, sobre el archivo viejo
+    assert "lecturas" not in record.approved_plan and "esquema" not in record.approved_plan
+    record = _puntuar(store, engine, job_id)
+
+    assert _fila(store, job_id, _probados(record)[0])["verdict"] == "CUMPLE"
     with _web(store, engine) as web:
         estado = web.get(f"/jobs/{job_id}").json()
-    assert estado["plan"]["lecturas"] == []
+    assert estado["plan"]["lecturas"] == [] and "esquema" not in estado["plan"]
     assert estado["report"]["meta"]["lecturas"]["en_vivo"] == len(_probados(record))
     assert "no trae lecturas congeladas" in estado["report"]["meta"]["lecturasAdvertencia"]
-    assert _fila(store, job_id, _probados(record)[0])["verdict"] == "CUMPLE"
 
 
 def test_the_public_view_of_a_reading_never_offers_one_that_cannot_be_frozen():
