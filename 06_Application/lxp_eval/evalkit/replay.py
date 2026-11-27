@@ -77,7 +77,11 @@ def frozen_readings(job_dir: Path | str) -> dict:
     for cid, entry in (plan.get("lecturas") or {}).items():
         if not entry.get("lectura"):
             continue
-        if lectura_mod.reading_hash(entry["lectura"]) != entry.get("hash_lectura"):
+        try:
+            intact = lectura_mod.reading_hash(entry["lectura"]) == entry.get("hash_lectura")
+        except lectura_mod.ReadingUnavailable:
+            intact = False      # le falta la pregunta o un extremo: tampoco es la que se aprobó
+        if not intact:
             raise ReplayError(
                 f"la lectura congelada de {cid} no coincide con su huella: fue "
                 "cambiada después de aprobar el plan. No se puede reproducir el "

@@ -535,6 +535,24 @@ def _sha(payload: Any) -> str:
     ).hexdigest()
 
 
+def rule_hash(test: CriterionTest) -> str:
+    """La huella de la REGLA tal como está escrita: lo que el juez recibe de ella y nada más.
+
+    Se guarda en la lectura cuando se la escribe, para saber después contra
+    qué redacción se escribió. La huella del observable se calcula al congelar,
+    con el texto del plan aprobado; si la regla se reescribió ANTES de aprobar
+    (la persona la editó al aprobar, o el criterio se relocalizó entre una
+    redacción y otra), esa huella saldría bien y una lectura hecha para la
+    regla vieja juzgaría la nueva. Con esto, al congelar se nota.
+    """
+    return _sha({
+        "id": test.id,
+        "verificacion": test.verification,
+        "cumple": test.pass_criteria,
+        "falla": test.fail_criteria,
+    })
+
+
 def observable_hash(test: CriterionTest, reading: dict, artifacts: Iterable[str]) -> str:
     """La huella del OBSERVABLE: la regla tal como está escrita, su lectura y qué evidencia pide.
 
@@ -593,7 +611,16 @@ def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[st
             "hash_recon": str(entry.get("hash_recon") or recon_hash(entry.get("superficies") or [])),
         }
         test = by_id.get(cid)
-        if test is not None and freezable(entry):
+        written_for = str(entry.get("hash_regla") or "")
+        if test is not None and freezable(entry) and written_for and written_for != rule_hash(test):
+            # LA REGLA CAMBIÓ DESPUÉS DE ESCRIBIR SU LECTURA. No se congela: la
+            # lectura dice cómo leer otra redacción (ver `rule_hash`).
+            frozen["vencida"] = True
+            frozen["motivo"] = (
+                "la regla de este criterio se reescribió después de escribir su "
+                "lectura: la lectura es de la redacción anterior"
+            )
+        elif test is not None and freezable(entry):
             reading = RuleReading.from_dict(entry["lectura"]).as_dict()
             frozen.update({
                 "lectura": reading,
@@ -610,6 +637,7 @@ def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[st
 #: Por qué un criterio con el contrato encendido puede quedar sin puntuar.
 SIN_ADJUDICAR = "lectura sin adjudicar"
 VENCIDA = "lectura congelada vencida"
+NO_LEIDA = "no se pudo leer la regla"
 SIN_TIPO = "falta el tipo de evidencia"
 
 
@@ -670,10 +698,15 @@ def frozen_reading_for(frozen: dict | None, test: CriterionTest) -> tuple[RuleRe
     """
     entry = (frozen or {}).get(test.id) or {}
     if not entry.get("lectura"):
-        return None, SIN_ADJUDICAR, (
-            str(entry.get("motivo") or "")
-            or "este criterio no tiene una lectura en el plan aprobado"
-        )
+        why = str(entry.get("motivo") or "") or "este criterio no tiene una lectura en el plan aprobado"
+        if entry.get("vencida"):
+            return None, VENCIDA, why
+        if entry.get("estado") == NO_DISPONIBLE:
+            # El lector no devolvió una lectura al generar. Es la misma falla
+            # que cuando no la devuelve al puntuar, y se llama igual: no es una
+            # decisión pendiente de nadie, es nuestra.
+            return None, NO_LEIDA, why
+        return None, SIN_ADJUDICAR, why
     expected = observable_hash(test, entry["lectura"], entry.get("artefactos_requeridos") or DEFAULT_ARTIFACTS)
     if entry.get("hash_observable") != expected:
         return None, VENCIDA, (
@@ -696,6 +729,8 @@ def _one(
         "version": SCHEMA_VERSION, "criterio": test.id, "estado": NO_DISPONIBLE,
         "lectura": None, "muestras": [], "acuerdo": None, "motivo": "",
         "vaguedad": None,
+        # Contra qué redacción de la regla se escribió esta lectura (ver `rule_hash`).
+        "hash_regla": rule_hash(test),
     }
     taken: list[RuleReading] = []
     for _ in range(max(2, samples)):

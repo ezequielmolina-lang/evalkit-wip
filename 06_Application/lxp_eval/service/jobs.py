@@ -1359,7 +1359,11 @@ class JobRunner:
         # cliente y corre vigilada, y termina en `awaiting_approval`, que es
         # donde una persona revisa lo que se va a ejecutar. Sólo con el
         # contrato encendido (ver Engine.frozen_readings).
-        if self.engine.frozen_readings and self.engine.read_rule is not None:
+        # SÓLO DONDE HAY PLAN. El camino sin documento de plan (`build_plan`)
+        # puntúa sin lectura de la regla, congelada o no: escribir lecturas ahí
+        # las dejaría en el plan aprobado sin que nadie las use al juzgar, y el
+        # informe diría que hubo una vara aprobada que el juez no recibió.
+        if self.engine.frozen_readings and self.engine.read_rule is not None and record.strategy:
             tests = list(criteria.all_tests())
 
             def _reading_done(done: int, of: int) -> None:
@@ -1619,6 +1623,14 @@ class JobRunner:
             raise ServiceError(
                 "el plan se aprobó o cambió de etapa mientras se revisaba la "
                 "lectura: la corrección no se guardó"
+            )
+        if (fresh.readings or {}).get(criterion_id) != entry:
+            # Otra corrección de la MISMA lectura entró en el medio. Guardar
+            # esta la pisaría, con su historial, sin que nadie lo vea.
+            raise ServiceError(
+                f"la lectura de {criterion_id} cambió mientras se revisaba esta "
+                "corrección: no se guardó. Hay que volver a mirarla y corregir "
+                "sobre la que quedó"
             )
         fresh.readings = {**(fresh.readings or {}), criterion_id: new}
         for d in fresh.strategy:

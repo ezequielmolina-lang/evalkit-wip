@@ -383,3 +383,121 @@ def test_recon_hash_invalida_superficie_cambiada():
     assert una["hash_recon"] != otra["hash_recon"]
     assert una["hash_observable"] == otra["hash_observable"], \
         "que cambie una pantalla no vence la lectura de la regla: son dos huellas"
+
+
+# --- lo que encontró la revisión de la tarea 5 --------------------------------
+
+
+def test_a_rule_rewritten_between_reading_and_approving_expires_the_reading(tmp_path, env):  # noqa: F811
+    """La lectura se escribió contra una redacción; si al aprobar la regla dice otra cosa, no se congela.
+
+    La huella del observable se calcula al congelar, con el texto del plan. Si
+    el texto cambió ANTES (la persona lo editó al aprobar, o se relocalizó el
+    criterio), esa huella saldría bien y una lectura escrita para la regla
+    vieja juzgaría la nueva.
+    """
+    store, engine, job_id, lector, vistas = _armar(tmp_path)
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    for c in record.criteria:
+        if c["id"] == cid:
+            c["passCriteria"] = "REGLA REESCRITA ANTES DE APROBAR"
+    store.save(record)
+    record = _aprobar(store, job_id)
+
+    congelada = record.approved_plan["lecturas"][cid]
+    assert congelada["lectura"] is None and congelada["vencida"] is True
+    lector.permitido = False
+    record = _puntuar(store, engine, job_id)
+
+    fila = _fila(store, job_id, cid)
+    assert fila["verdict"] == "NO_EVALUADO"
+    assert fila["rationale"].startswith("[causa: lectura congelada vencida]")
+    assert cid not in engine.score_test.criterios and lector.llamadas_prohibidas == 0
+
+
+def test_the_rule_hash_only_follows_the_rule():
+    antes = lec.rule_hash(_criterio())
+    otro_titulo = _criterio()
+    otro_titulo.name = "Otro título"
+    reescrita = _criterio()
+    reescrita.fail_criteria = "más de TRES"
+    assert lec.rule_hash(otro_titulo) == antes and lec.rule_hash(reescrita) != antes
+
+
+def test_a_reading_that_never_came_out_is_our_failure_also_when_frozen(tmp_path, env):  # noqa: F811
+    """Que el lector no devuelva una lectura es falla nuestra al puntuar y también al generar."""
+    class _NoSale:
+        def __call__(self, test, client, *, model=None, context=""):
+            raise scoring.ReadingUnavailable(f"la lectura de {test.id} llegó sin: cumple")
+
+    store, engine, job_id, _, _ = _armar(tmp_path, lector=_NoSale())
+    _generar(store, engine, job_id)
+    record = _aprobar(store, job_id)
+    record = _puntuar(store, engine, job_id)
+
+    fila = _fila(store, job_id, _probados(record)[0])
+    assert fila["verdict"] == "NO_EVALUADO"
+    assert fila["rationale"].startswith("[causa: no se pudo leer la regla]")
+    assert "llegó sin: cumple" in fila["rationale"]
+    assert record.report["meta"]["autochequeo"]["ok"] is False
+
+
+def test_the_contract_only_applies_where_there_is_a_plan(tmp_path, env):  # noqa: F811
+    """Sin plan (el camino de la API sin documento de plan) no hay lectura al puntuar: tampoco al generar."""
+    from tests.test_service import make_engine
+    from lxp_eval.service.batch import ManifestEntry, run_batch
+    from lxp_eval.service.store import JobStore
+
+    leidas = []
+
+    def read(test, client, *, model=None, context=""):
+        leidas.append(test.id)
+        return _lectura()
+
+    engine = make_engine(tmp_path, frozen_readings=True, read_rule=read)
+    store = JobStore(tmp_path / "runs")
+    entrada = ManifestEntry(platform_url="https://plataforma.test", objective="Un tutor de matemática.", areas=["D9"])
+    resumen = asyncio.run(run_batch([entrada], store=store, engine=engine, box=None))
+    record = store.get(resumen.jobs[0].job_id)
+
+    assert not record.strategy, "este camino no arma un plan"
+    assert leidas == [] and record.readings == {}
+    assert "lecturas" not in (record.approved_plan or {})
+
+
+def test_two_edits_of_the_same_reading_do_not_silently_drop_one(tmp_path, env):  # noqa: F811
+    from lxp_eval.service.crypto import ServiceError
+
+    caja = {}
+
+    def check(test, reading, client, *, model=None, sobre=lec.SOBRE_MODELO):
+        if caja.get("otra_edicion"):              # mientras corre este chequeo, entra otra edición
+            caja["otra_edicion"] = False
+            record = caja["store"].get(caja["job_id"])
+            asyncio.run(JobRunner(caja["store"], caja["engine"], None).edit_reading(
+                record, caja["cid"], {"cumple": "Dos o menos."}, by="Otra persona"))
+        return {"vaga": False, "parcial_definido": True, "anclas_contables": True, "objeciones": [], "sobre": sobre}
+
+    store, engine, job_id, _, _ = _armar(tmp_path, check_reading=check)
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    caja.update(store=store, engine=engine, job_id=job_id, cid=cid, otra_edicion=True)
+
+    with pytest.raises(ServiceError, match="cambió mientras"):
+        asyncio.run(JobRunner(store, engine, None).edit_reading(record, cid, {"cumple": "Tres o menos."}, by="E. M."))
+
+    guardada = store.get(job_id).readings[cid]
+    assert guardada["lectura"]["cumple"] == "Dos o menos." and guardada["editada_por"] == "Otra persona"
+
+
+def test_a_frozen_reading_without_an_end_is_a_replay_error(tmp_path, env):  # noqa: F811
+    store, engine, job_id, _, _ = _armar(tmp_path)
+    _generar(store, engine, job_id)
+    record = _aprobar(store, job_id)
+    path = store.evidence_dir(job_id) / "approved_plan.json"
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    plan["lecturas"][_probados(record)[0]]["lectura"]["cumple"] = ""
+    path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(replay.ReplayError):
+        replay.frozen_readings(store.dir_of(job_id))
