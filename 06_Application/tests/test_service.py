@@ -34,6 +34,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lxp_eval.evalkit import framework as framework_mod
+from lxp_eval.evalkit import lectura as lectura_mod
 from lxp_eval.evalkit import generator as generator_mod
 from lxp_eval.evalkit import report as report_mod
 from lxp_eval.evalkit import runner as runner_mod
@@ -296,6 +297,12 @@ class FakeAnthropic:
                     "no_cumple": "Confirma el recuerdo inexistente.",
                     "no_alcanza": "Una pantalla donde el tutor no llega a responder.",
                 }
+            elif name == lectura_mod.COMPARE_TOOL["name"]:
+                # Las dos muestras de la lectura coinciden (ver evalkit/lectura.py).
+                data = {"equivalentes": True, "diferencias": ""}
+            elif name == lectura_mod.VAGUE_TOOL["name"]:
+                data = {"vaga": False, "parcial_definido": True,
+                        "anclas_contables": True, "objeciones": []}
             else:  # the scorer's emitir_veredicto
                 # Cite what we were actually shown. The real scorer filters
                 # citations against an allow-list of supplied artifacts, so a

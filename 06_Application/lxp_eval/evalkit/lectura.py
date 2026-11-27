@@ -168,17 +168,175 @@ def compare_readings(
     return {"equivalentes": same, "diferencias": "" if same else str(data.get("diferencias") or "").strip()}
 
 
+# --- ¿la lectura quedó vaga? -------------------------------------------------
+
+#: Sobre qué texto corrió el chequeo de vaguedad. No es lo mismo revisar lo que
+#: escribió el modelo que lo que escribió una persona, y el registro lo dice.
+SOBRE_MODELO = "lectura escrita por el modelo"
+SOBRE_PERSONA = "texto escrito por una persona"
+
+_VAGUE_TOOL_NAME = "chequear_lectura"
+
+VAGUE_TOOL: dict[str, Any] = {
+    "name": _VAGUE_TOOL_NAME,
+    "description": "Decí si esta lectura de una regla deja algo para decidir a ojo.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "parcial_definido": {
+                "type": "boolean",
+                "description": (
+                    "true si la lectura dice qué HECHO observable es PARCIAL, o "
+                    "dice expresamente que la regla no tiene estado intermedio. "
+                    "false si PARCIAL falta sin explicación o es 'algo intermedio'."
+                ),
+            },
+            "anclas_contables": {
+                "type": "boolean",
+                "description": (
+                    "true si cada umbral o conteo dice QUÉ se cuenta y DESDE "
+                    "CUÁNTO (o si la regla no tiene conteos). false si hay un "
+                    "'varios', 'la mayoría', 'suficiente' sin número ni unidad."
+                ),
+            },
+            "objeciones": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Cada cosa que quedaría a criterio de quien juzga, en una "
+                    "frase, con las palabras de la lectura que la causan. Vacío "
+                    "si no hay ninguna."
+                ),
+            },
+            "vaga": {
+                "type": "boolean",
+                "description": (
+                    "true si dos personas cuidadosas, mirando la misma pantalla "
+                    "con esta lectura, podrían dar veredictos distintos."
+                ),
+            },
+        },
+        "required": ["parcial_definido", "anclas_contables", "objeciones", "vaga"],
+    },
+}
+
+VAGUE_SYSTEM = (
+    "Revisás UNA lectura de la regla de un criterio, antes de que una persona "
+    "la apruebe y quede fija para juzgar. No revisás una prueba ni una "
+    "plataforma, y no te toca decir si la lectura es la correcta para el "
+    "criterio: eso lo mira otro. Tu única pregunta es si la lectura deja algo "
+    "para decidir a ojo.\n"
+    "Mirá tres cosas. Uno: PARCIAL. ¿Dice qué hecho observable lo distingue de "
+    "CUMPLE y de NO_CUMPLE, o dice expresamente que la regla no tiene estado "
+    "intermedio? Un PARCIAL ausente sin explicación, o definido como 'algo "
+    "intermedio', se decide a ojo. Dos: las anclas. Cada umbral o conteo tiene "
+    "que decir qué se cuenta y desde cuánto ('cada opción de respuesta cuenta "
+    "como un elemento; cinco o más es NO_CUMPLE'). 'Varios', 'la mayoría', "
+    "'suficiente' sin número ni unidad se deciden a ojo. Tres: los términos. "
+    "Si una palabra de la regla admite dos lecturas y la lectura no eligió una, "
+    "queda a ojo.\n"
+    "Sé concreto: cada objeción cita las palabras de la lectura que la causan. "
+    "No objetes por estilo ni pidas más texto por pedir. Respondés con la "
+    "herramienta."
+)
+
+
+def check_reading(
+    test: CriterionTest, reading: RuleReading, client: Any,
+    *, model: str | None = None, sobre: str = SOBRE_MODELO,
+) -> dict:
+    """¿Esta lectura deja algo para decidir a ojo? Una llamada, con su propio prompt.
+
+    POR QUÉ ES UN CHEQUEO PROPIO Y NO UN ASIENTO DEL CONSEJO. El consejo tiene
+    un asiento de falsabilidad, pero está escrito para revisar UNA PRUEBA
+    ("Estás revisando UN probe"), y su prompt entra en `council_fingerprint`:
+    tocarlo para que lea lecturas cambia el instrumento con el que se
+    revisaron todas las pruebas anteriores. Esto pregunta otra cosa, sobre
+    otro objeto, con otro prompt.
+
+    Lo que busca es lo que hizo volcar al juez sobre la misma evidencia: en 20
+    de 23 criterios la regla dejaba sin definir la unidad de conteo, el umbral
+    o el caso intermedio, y cada lectura lo resolvía por su cuenta.
+
+    Devuelve {"vaga", "parcial_definido", "anclas_contables", "objeciones",
+    "sobre"}. `sobre` dice si el texto revisado lo escribió el modelo o una
+    persona. Una respuesta que no dice si es vaga cuenta como objeción: lo que
+    no se pudo chequear no se da por bueno. Un error de la API sube.
+    """
+    if model is None:
+        from ..config import CONFIG
+
+        model = CONFIG.model_heavy
+    response = client.messages.create(
+        model=model,
+        max_tokens=1500,
+        system=[{"type": "text", "text": VAGUE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": (
+            f"CRITERIO {test.id}: {test.name}\n"
+            f"Aprueba si: {test.pass_criteria}\n"
+            f"Falla si: {test.fail_criteria}\n\n"
+            f"LECTURA A REVISAR\n{reading.as_text()}"
+        )}]}],
+        tools=[VAGUE_TOOL],
+        tool_choice={"type": "tool", "name": _VAGUE_TOOL_NAME},
+    )
+    try:
+        data = scoring._extract_tool_input(response, _VAGUE_TOOL_NAME)
+    except (ValueError, TypeError, AttributeError):
+        data = {}
+    if not isinstance(data.get("vaga"), bool):
+        return {
+            "vaga": True, "parcial_definido": False, "anclas_contables": False,
+            "objeciones": ["no se pudo chequear la lectura: la respuesta no dijo si era vaga"],
+            "sobre": sobre,
+        }
+    raw = data.get("objeciones")
+    return {
+        "vaga": data["vaga"],
+        "parcial_definido": bool(data.get("parcial_definido")),
+        "anclas_contables": bool(data.get("anclas_contables")),
+        "objeciones": [str(x).strip() for x in (raw if isinstance(raw, list) else []) if str(x).strip()],
+        "sobre": sobre,
+    }
+
+
+def review_note(entry: dict | None) -> str:
+    """Lo que una persona tiene que mirar de esta lectura antes de aprobar, o "" si nada.
+
+    Va a las `advertencias` del criterio en el plan y lo marca para revisar:
+    la lectura vaga, la que no salió igual dos veces y la que no salió.
+    """
+    if not entry:
+        return ""
+    state = entry.get("estado")
+    if state == REQUIERE_ADJUDICACION:
+        return (
+            "la lectura de la regla no salió igual dos veces y hay que decidir cuál vale: "
+            + str((entry.get("acuerdo") or {}).get("diferencias") or "sin detalle")
+        )
+    if state == NO_DISPONIBLE:
+        return "no se pudo escribir la lectura de la regla: " + str(entry.get("motivo") or "sin detalle")
+    vague = entry.get("vaguedad") or {}
+    if vague.get("vaga"):
+        return "la lectura de la regla deja algo para decidir a ojo: " + (
+            "; ".join(vague.get("objeciones") or []) or "sin detalle"
+        )
+    return ""
+
+
 # --- escribir las lecturas de un plan ----------------------------------------
 
 
 def _one(
     test: CriterionTest, client: Any, *, model: str | None, context: str,
     samples: int, reader: Callable[..., Any], compare: Callable[..., dict],
+    check: Callable[..., dict] | None = None,
 ) -> dict:
     """El registro de lectura de UN criterio: sus muestras, si coinciden, y en qué estado queda."""
     entry: dict = {
         "version": SCHEMA_VERSION, "criterio": test.id, "estado": NO_DISPONIBLE,
         "lectura": None, "muestras": [], "acuerdo": None, "motivo": "",
+        "vaguedad": None,
     }
     taken: list[RuleReading] = []
     for _ in range(max(2, samples)):
@@ -197,13 +355,19 @@ def _one(
         taken.append(reading)
     entry["muestras"] = [r.as_dict() for r in taken]
     agreement = compare(test, taken, client, model=model)
+    # `is True`, no "algo verdadero": un comparador reemplazado que devuelva
+    # "false" como texto no puede terminar en una lectura congelable.
     entry["acuerdo"] = {
-        "equivalentes": bool(agreement.get("equivalentes")),
+        "equivalentes": agreement.get("equivalentes") is True,
         "diferencias": str(agreement.get("diferencias") or ""),
     }
     if entry["acuerdo"]["equivalentes"]:
         entry["estado"] = ESTABLE
         entry["lectura"] = taken[0].as_dict()
+        # El chequeo de vaguedad queda EN la lectura, como campo: quien la
+        # aprueba, la edita o la congela lo tiene delante, no en un log.
+        if check is not None:
+            entry["vaguedad"] = check(test, taken[0], client, model=model)
     else:
         # SIN ACUERDO NO HAY UNA LECTURA. No se elige una de las muestras "por
         # ahora": si quedara puesta, tarde o temprano alguien la congelaría, y
@@ -222,6 +386,7 @@ def write_readings(
     samples: int = SAMPLES,
     reader: Callable[..., Any] | None = None,
     compare: Callable[..., dict] | None = None,
+    check: Callable[..., dict] | None = None,
     on_done: Callable[[int, int], None] | None = None,
     max_workers: int = WORKERS,
 ) -> dict[str, dict]:
@@ -231,7 +396,8 @@ def write_readings(
     defecto `scoring.read_rule`) y una comparación (`compare`). Si coinciden,
     queda UNA lectura en estado ESTABLE; si no, quedan las muestras y el
     criterio espera a una persona (REQUIERE_ADJUDICACION); si una muestra no
-    salió, NO_DISPONIBLE con el motivo.
+    salió, NO_DISPONIBLE con el motivo. Con `check` (ver `check_reading`), la
+    lectura estable lleva además su chequeo de vaguedad en el campo `vaguedad`.
 
     `contexts` es lo que el plan dijo que se iba a hacer y mirar por criterio
     (lo mismo que recibe `read_rule` al puntuar). `on_done(hechos, total)` es
@@ -248,14 +414,27 @@ def write_readings(
         return out
     done = 0
     beat = threading.Lock()
+    # SI UNO REVIENTA, LOS QUE NO EMPEZARON NO EMPIEZAN. Un 400 falla igual
+    # para el criterio siguiente, y sin esto los que estaban en cola seguían
+    # leyéndose (tres llamadas cada uno) después del error: gasto de más y un
+    # fallo que tarda en aparecer. La marca la pone el hilo que falló, antes de
+    # terminar, para que el siguiente de la cola la vea.
+    stop = threading.Event()
+
+    def _guarded(t: CriterionTest) -> dict | None:
+        if stop.is_set():
+            return None
+        try:
+            return _one(
+                t, client, model=model, context=str(contexts.get(t.id) or ""),
+                samples=samples, reader=reader, compare=compare, check=check,
+            )
+        except BaseException:
+            stop.set()
+            raise
+
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, total))) as pool:
-        futures = {
-            pool.submit(
-                _one, t, client, model=model, context=str(contexts.get(t.id) or ""),
-                samples=samples, reader=reader, compare=compare,
-            ): t
-            for t in tests
-        }
+        futures = {pool.submit(_guarded, t): t for t in tests}
         for fut in as_completed(futures):
             test = futures[fut]
             out[test.id] = fut.result()   # una excepción sube y corta la etapa

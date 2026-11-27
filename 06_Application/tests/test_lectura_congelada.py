@@ -237,3 +237,162 @@ def test_with_the_contract_off_nothing_is_read_while_generating(tmp_path, env): 
 
     assert record.stage == Stage.AWAITING_APPROVAL
     assert leidas == [] and record.readings == {}
+
+
+# --- Tarea 2: el chequeo de vaguedad es DE LA LECTURA, con su propio prompt ---
+
+#: Las huellas del instrumento el 2026-11-27, antes de la lectura congelada.
+#: Dos corridas sólo se comparan si el juez y el consejo fueron los mismos; el
+#: informe de la corrida que midió el piso de ruido trae esta huella del juez.
+#: Si una de estas pruebas falla, alguien cambió un prompt del juez o del
+#: consejo: eso vuelve incomparable lo anterior, y es una decisión que se toma
+#: a la vista, actualizando el valor acá, no de costado.
+_HUELLA_DEL_JUEZ = "de7523978a9b71dd5240b09fe52a96ea7ef5cbc4cd5580712d2e19e526414e8e"
+_HUELLA_DEL_CONSEJO = "b87a476d539548af27f2fef28bc8e256f2fda98204e1ccc4fb2b8ccf15cde5fc"
+
+
+def test_council_fingerprint_estable():
+    from lxp_eval.evalkit import generator
+
+    assert generator.council_fingerprint() == _HUELLA_DEL_CONSEJO
+    textos = " ".join(j.system for j in generator.COUNCIL)
+    assert lec.VAGUE_SYSTEM not in textos and lec.COMPARE_SYSTEM not in textos, \
+        "los chequeos de la lectura no son asientos del consejo"
+
+
+def test_judge_fingerprint_estable():
+    assert scoring.judge_fingerprint() == _HUELLA_DEL_JUEZ
+
+
+def test_chequeo_vaguedad_lectura():
+    modelo = _Modelo(chequear_lectura={
+        "vaga": True, "parcial_definido": False, "anclas_contables": True,
+        "objeciones": ["PARCIAL no dice qué hecho lo distingue de CUMPLE"],
+    })
+    out = lec.check_reading(_criterio(), _lectura(parcial="Algo intermedio."), modelo, model="m")
+
+    assert out == {
+        "vaga": True, "parcial_definido": False, "anclas_contables": True,
+        "objeciones": ["PARCIAL no dice qué hecho lo distingue de CUMPLE"],
+        "sobre": lec.SOBRE_MODELO,
+    }
+    pedido = modelo.calls[0]
+    assert pedido["system"][0]["text"] == lec.VAGUE_SYSTEM
+    assert "- PARCIAL si se observa: Algo intermedio." in pedido["messages"][0]["content"][0]["text"]
+
+
+def test_a_check_that_did_not_answer_is_an_objection_not_a_pass():
+    out = lec.check_reading(_criterio(), _lectura(), _Modelo(chequear_lectura={"objeciones": []}), model="m")
+    assert out["vaga"] is True and "no se pudo chequear" in out["objeciones"][0]
+
+
+def test_a_stable_reading_carries_its_vagueness_check_as_a_field():
+    vistas = []
+
+    def check(test, reading, client, *, model=None):
+        vistas.append(reading)
+        return {"vaga": True, "parcial_definido": False, "anclas_contables": True,
+                "objeciones": ["PARCIAL se decide a ojo"], "sobre": lec.SOBRE_MODELO}
+
+    out = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": _lectura(),
+        compare=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check=check,
+    )
+
+    r = out["X-01"]
+    assert r["vaguedad"]["vaga"] is True and r["vaguedad"]["objeciones"] == ["PARCIAL se decide a ojo"]
+    assert vistas == [_lectura()], "se chequea la lectura que quedó, una vez"
+    assert "PARCIAL se decide a ojo" in lec.review_note(r)
+
+
+def test_there_is_nothing_to_check_when_there_is_no_single_reading():
+    llamado = []
+    out = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": _lectura(),
+        compare=lambda *a, **k: {"equivalentes": False, "diferencias": "otro umbral"},
+        check=lambda *a, **k: llamado.append(1),
+    )
+    assert llamado == [] and out["X-01"]["vaguedad"] is None
+    assert "otro umbral" in lec.review_note(out["X-01"])
+
+
+def test_a_vague_reading_marks_its_criterion_for_review_in_the_plan(tmp_path, env):  # noqa: F811
+    def check(test, reading, client, *, model=None):
+        return {"vaga": True, "parcial_definido": False, "anclas_contables": True,
+                "objeciones": ["PARCIAL se decide a ojo"], "sobre": lec.SOBRE_MODELO}
+
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check_reading=check,
+    )
+    record = _generar(store, engine, job_id)
+
+    probados = [d for d in record.strategy if d["estado"] == "se_prueba"]
+    assert probados
+    for d in probados:
+        assert d["revisar"] is True
+        assert any("PARCIAL se decide a ojo" in n for n in d["advertencias"])
+        assert record.readings[d["id"]]["vaguedad"]["vaga"] is True, "y es un campo de la lectura, no sólo un aviso"
+
+
+# --- lo que encontró la revisión de la tarea 1 --------------------------------
+
+
+def test_only_a_true_agreement_makes_a_reading_stable():
+    """Un comparador reemplazado que devuelve "false" como texto no es un acuerdo."""
+    out = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": _lectura(),
+        compare=lambda *a, **k: {"equivalentes": "false", "diferencias": ""},
+    )
+    assert out["X-01"]["estado"] == lec.REQUIERE_ADJUDICACION and out["X-01"]["lectura"] is None
+
+
+def test_an_api_error_stops_the_readings_that_had_not_started():
+    """Un 400 falla igual para siempre: no se siguen pagando los criterios que faltaban."""
+    leidas = []
+
+    def read(test, client, *, model=None, context=""):
+        leidas.append(test.id)
+        raise RuntimeError("400 invalid_request_error")
+
+    with pytest.raises(RuntimeError):
+        lec.write_readings(
+            [_criterio("X-01"), _criterio("X-02"), _criterio("X-03")], client=None,
+            reader=read, compare=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+            max_workers=1,
+        )
+    assert leidas == ["X-01"]
+
+
+def test_a_failed_reading_stage_fails_the_job_and_says_why(tmp_path, env):  # noqa: F811
+    def write(tests, **kw):
+        raise RuntimeError("400 invalid_request_error: tool schema")
+
+    store, engine, job_id = _plan(tmp_path, frozen_readings=True, write_readings=write)
+    record = _generar(store, engine, job_id)
+
+    assert record.stage == Stage.ERROR
+    assert "400 invalid_request_error" in str(record.error)
+    assert record.probes == [], "sin lecturas no se redacta: la etapa se corta ahí"
+
+
+def test_readings_of_a_second_drafting_add_to_the_first(tmp_path, env):  # noqa: F811
+    """Un piloto de un criterio y después el resto: las lecturas del piloto no se pierden."""
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+    )
+    record = store.get(job_id)
+    record.readings = {"OTRO-99": {"estado": lec.ESTABLE, "lectura": _lectura().as_dict()}}
+    store.save(record)
+    record = _generar(store, engine, job_id)
+
+    probados = [d["id"] for d in record.strategy if d["estado"] == "se_prueba"]
+    assert set(record.readings) == set(probados) | {"OTRO-99"}

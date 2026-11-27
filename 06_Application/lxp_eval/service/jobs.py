@@ -417,6 +417,9 @@ class Engine:
     #: puntuar: una sola forma de leer una regla.
     write_readings: Callable[..., Any] = staticmethod(lectura_mod.write_readings)
     compare_readings: Callable[..., Any] = staticmethod(lectura_mod.compare_readings)
+    #: El chequeo de vaguedad de la lectura (ver lectura.check_reading). Es
+    #: propio de la lectura: no es un asiento del consejo y no toca su huella.
+    check_reading: Callable[..., Any] = staticmethod(lectura_mod.check_reading)
     #: ¿El objetivo es un entorno REAL/producción (alumnos, datos o cuentas
     #: reales)? Por defecto NO: una evaluación encargada corre sobre un demo o con
     #: cuentas de prueba, así que las pruebas de datos de menores / escritura real
@@ -1374,7 +1377,7 @@ class JobRunner:
 
             said = {str(d.get("id")): str(d.get("que_se_prueba") or "") for d in record.strategy}
             try:
-                record.readings = await asyncio.to_thread(
+                written = await asyncio.to_thread(
                     self.engine.write_readings,
                     tests,
                     client=client,
@@ -1382,12 +1385,36 @@ class JobRunner:
                     contexts={t.id: said.get(t.id, "") for t in tests},
                     reader=self.engine.read_rule,
                     compare=self.engine.compare_readings,
+                    check=self.engine.check_reading,
                     on_done=_reading_done,
                 )
             except BaseException as exc:  # noqa: BLE001
+                # Lo que se alcanzó a gastar en lecturas queda en la cuenta.
+                self._fold_client_spend(record, client, "redaccion")
                 self._fail(record, Stage.PROBES, "", exc)
                 return record
+            # SE SUMAN, no reemplazan: un piloto de un criterio y después el
+            # resto no puede dejar al piloto sin su lectura.
+            record.readings = {**(record.readings or {}), **written}
+            # LO QUE HAY QUE MIRAR, AL PLAN. Una lectura vaga, una que no salió
+            # igual dos veces o una que no salió marcan su criterio para
+            # revisar, con el motivo entre sus advertencias: es donde la
+            # persona ya mira antes de aprobar.
+            for d in record.strategy:
+                note = lectura_mod.review_note(record.readings.get(str(d.get("id"))))
+                if note:
+                    d["revisar"] = True
+                    notes = d.setdefault("advertencias", [])
+                    if note not in notes:
+                        notes.append(note)
             self.store.save(record)
+
+        elif record.readings:
+            # Contrato apagado y se vuelve a redactar: la lectura que quedó de
+            # una redacción anterior de ESTOS criterios ya no vale. Si quedara,
+            # el plan aprobado la congelaría sin que nadie la haya pedido.
+            for t in criteria.all_tests():
+                record.readings.pop(t.id, None)
 
         # CON UN PLAN APROBADO, CONSEJO REDUCIDO (ver generator.REDUCED_COUNCIL).
         council_kw: dict = {}
