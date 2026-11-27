@@ -175,13 +175,13 @@ def auto_approve(store: JobStore, record: JobRecord) -> None:
     registrar no surte efecto.
     """
     record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
-    record.approved_plan = {
+    record.approved_plan = serialize.with_frozen_readings({
         "criteria": serialize.criteria_out(record.criteria),
         # Copia profunda: la instantánea es lo que había AL APROBAR, y no debe
         # cambiar si después alguien toca `record.probes` en memoria.
         "probes": copy.deepcopy(record.probes),
         "sampling": record.sampling,
-    }
+    }, record)
     record.approved_at = now()
     store.save(record)
     _ledger_the_approval(store, record, note=serialize.APPROVAL_NOTE_AUTO)
@@ -197,11 +197,11 @@ def approve_from_plan(store: JobStore, record: JobRecord, *, approved_by: str) -
     sin correr hasta que alguien la firme, una por una.
     """
     record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
-    record.approved_plan = {
+    record.approved_plan = serialize.with_frozen_readings({
         "criteria": serialize.criteria_out(record.criteria),
         "probes": copy.deepcopy(record.probes),
         "sampling": record.sampling,
-    }
+    }, record)
     record.approved_at = now()
     store.save(record)
     version = (record.plan_document or {}).get("version", "?")

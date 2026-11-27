@@ -98,6 +98,28 @@ def criteria_out(criteria: list[dict]) -> list[dict]:
     return [{**c, "source": _source_out(c.get("source"))} for c in criteria]
 
 
+def with_frozen_readings(plan: dict, record: Any) -> dict:
+    """El plan aprobado, con las lecturas congeladas si el trabajo las tiene.
+
+    Va en la misma instantánea que las pruebas y los criterios, que es la que
+    se guarda y se hashea en el ledger al aprobar: lo que una persona aprobó
+    incluye la lectura con la que se va a juzgar. Las huellas se calculan con
+    el texto de los criterios DEL PLAN, que es el que después recibe el juez.
+    Un trabajo sin lecturas (contrato apagado, o anterior a él) sale igual que
+    entró, sin la clave: se puntúa con la lectura generada en el momento.
+    """
+    readings = getattr(record, "readings", None) or {}
+    if not readings:
+        return plan
+    from ..evalkit import lectura as lectura_mod
+
+    criteria = criteria_from_plan(
+        plan.get("criteria") or criteria_out(record.criteria), record.objective
+    )
+    plan["lecturas"] = lectura_mod.freeze(readings, criteria.all_tests())
+    return plan
+
+
 def criteria_from_plan(plan_criteria: list[dict], name: str) -> Criteria:
     """The approved criteria as a `Criteria`, OBSERVABLE ONLY.
 

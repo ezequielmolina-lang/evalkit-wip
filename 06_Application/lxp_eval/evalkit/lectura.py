@@ -331,6 +331,21 @@ def is_vague(check: dict | None) -> bool:
     )
 
 
+#: Con qué empieza cada aviso de `review_note`: para poder sacar del plan el
+#: aviso de una lectura cuando la lectura cambia (ver `without_review_notes`).
+_NOTE_UNSTABLE = "la lectura de la regla no salió igual dos veces"
+_NOTE_MISSING = "no se pudo escribir la lectura de la regla"
+_NOTE_VAGUE = "la lectura de la regla deja algo para decidir a ojo"
+
+
+def without_review_notes(notes: Iterable[str] | None) -> list[str]:
+    """Las advertencias de un criterio, sin las que puso una lectura anterior."""
+    return [
+        n for n in (notes or [])
+        if not str(n).startswith((_NOTE_UNSTABLE, _NOTE_MISSING, _NOTE_VAGUE))
+    ]
+
+
 def review_note(entry: dict | None) -> str:
     """Lo que una persona tiene que mirar de esta lectura antes de aprobar, o "" si nada.
 
@@ -342,11 +357,11 @@ def review_note(entry: dict | None) -> str:
     state = entry.get("estado")
     if state == REQUIERE_ADJUDICACION:
         return (
-            "la lectura de la regla no salió igual dos veces y hay que decidir cuál vale: "
+            _NOTE_UNSTABLE + " y hay que decidir cuál vale: "
             + str((entry.get("acuerdo") or {}).get("diferencias") or "sin detalle")
         )
     if state == NO_DISPONIBLE:
-        return "no se pudo escribir la lectura de la regla: " + str(entry.get("motivo") or "sin detalle")
+        return _NOTE_MISSING + ": " + str(entry.get("motivo") or "sin detalle")
     vague = entry.get("vaguedad") or {}
     if is_vague(vague):
         said = list(vague.get("objeciones") or [])
@@ -354,7 +369,7 @@ def review_note(entry: dict | None) -> str:
             said.append("PARCIAL quedó sin definir")
         if vague.get("anclas_contables") is not True:
             said.append("hay conteos o umbrales sin unidad ni número")
-        return "la lectura de la regla deja algo para decidir a ojo: " + "; ".join(said)
+        return _NOTE_VAGUE + ": " + ("; ".join(said) or "sin detalle")
     return ""
 
 
@@ -390,14 +405,20 @@ def _decided_by_a_person(
         raise ValueError("la edición de una lectura necesita decir quién la hizo")
     out = copy.deepcopy(entry)
     history = list(out.get("historial") or [])
-    history.append({
+    before = {
         "lectura": out.get("lectura"),
         "hash_lectura": out.get("hash_lectura") or reading_hash(out.get("lectura")),
         "estado": out.get("estado"),
         "vaguedad": out.get("vaguedad"),
         "editada_por": out.get("editada_por", ""),
         "editada_en": out.get("editada_en", ""),
-    })
+    }
+    # Cuál muestra se había elegido es un dato de ESA decisión: queda en el
+    # historial y no sobrevive a la siguiente (una lectura editada después ya
+    # no es "la muestra 2").
+    if "muestra_elegida" in out:
+        before["muestra_elegida"] = out.pop("muestra_elegida")
+    history.append(before)
     out.update({
         "historial": history,
         "lectura": reading.as_dict(),
@@ -438,12 +459,34 @@ def edit_reading(
     Una edición que deja la lectura sin la pregunta o sin un extremo levanta
     `ReadingUnavailable` y no cambia nada. Sin nombre, `ValueError`.
     """
-    known = {k for k, _ in scoring.READING_FIELDS}
+    known = [k for k, _ in scoring.READING_FIELDS]
+    # LO QUE NO SE ENTIENDE SE RECHAZA, NO SE IGNORA. Un campo mal escrito
+    # ("cumpel") o un valor que no es texto se descartaban en silencio, y el
+    # registro quedaba como "editado por una persona" con la lectura del modelo
+    # intacta: quien edita cree que corrigió algo y el registro afirma una
+    # autoría que no existe.
+    unknown = [k for k in (fields or {}) if k not in known]
+    if unknown:
+        raise ValueError(
+            "la lectura no tiene estos campos: " + ", ".join(map(str, unknown))
+            + " (los que tiene: " + ", ".join(known) + ")"
+        )
     base = dict(entry.get("lectura") or {})
     for key, value in (fields or {}).items():
-        if key in known:
-            base[key] = str(value or "")
+        if value is None:
+            base[key] = ""              # borrar un campo; si era un extremo, se rechaza abajo
+        elif isinstance(value, str):
+            base[key] = value
+        else:
+            raise ValueError(
+                f"el campo {key} de la lectura tiene que ser texto, no {type(value).__name__}"
+            )
     reading = RuleReading.from_dict(base)
+    if entry.get("lectura") and reading_hash(reading) == reading_hash(entry["lectura"]):
+        raise ValueError(
+            "la edición no cambia nada de la lectura: no se registra como editada "
+            "por una persona una lectura que nadie tocó"
+        )
     return _decided_by_a_person(
         entry, test, reading, state=EDITADA, by=by, client=client, model=model,
         check=check, sobre=SOBRE_PERSONA, now=now,
@@ -462,7 +505,14 @@ def adjudicate_reading(
     corre sobre la elegida, que es texto del modelo.
     """
     samples = entry.get("muestras") or []
-    if not isinstance(sample, int) or not 1 <= sample <= len(samples):
+    if len(samples) < 2:
+        # Elegir entre muestras supone que hubo dos para comparar. Con una sola
+        # (la otra no salió) no hay elección: la persona puede escribirla
+        # (`edit_reading`), que dice lo que es.
+        raise ValueError(
+            f"para elegir hacen falta dos muestras y este criterio tiene {len(samples)}"
+        )
+    if type(sample) is not int or not 1 <= sample <= len(samples):
         raise ValueError(f"no hay una muestra {sample}: este criterio tiene {len(samples)}")
     out = _decided_by_a_person(
         entry, test, RuleReading.from_dict(samples[sample - 1]), state=ADJUDICADA, by=by,
@@ -470,6 +520,119 @@ def adjudicate_reading(
     )
     out["muestra_elegida"] = sample
     return out
+
+
+# --- congelar: lo que va al plan aprobado, con sus huellas -------------------
+
+#: Los tipos de artefacto que una prueba guarda si nadie dice otra cosa (el
+#: valor por defecto de `Probe.capture`).
+DEFAULT_ARTIFACTS = ("screenshot", "page_text")
+
+
+def _sha(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def observable_hash(test: CriterionTest, reading: dict, artifacts: Iterable[str]) -> str:
+    """La huella del OBSERVABLE: la regla tal como está escrita, su lectura y qué evidencia pide.
+
+    Se vence si se reescribe la regla (la lectura se escribió contra esa
+    redacción), si cambia un campo de la lectura o si cambia el tipo de
+    evidencia que hace falta. No se vence por lo que no toca la regla: el
+    título del criterio o su puntaje.
+    """
+    return _sha({
+        "id": test.id,
+        "verificacion": test.verification,
+        "cumple": test.pass_criteria,
+        "falla": test.fail_criteria,
+        "lectura": RuleReading.from_dict(reading).as_dict(),
+        "artefactos": sorted({str(a) for a in artifacts}),
+    })
+
+
+def recon_hash(surfaces: Iterable[dict]) -> str:
+    """La huella del RECORRIDO: las superficies donde se prueba el criterio y la huella de su captura.
+
+    Es aparte de la del observable a propósito: si la plataforma cambió una
+    pantalla, se vence esto y no la lectura de la regla, que no tiene por qué
+    cambiar porque cambió un botón.
+    """
+    return _sha(sorted(
+        (str(s.get("id") or ""), str(s.get("sha256") or "")) for s in surfaces if isinstance(s, dict)
+    ))
+
+
+def set_hash(hashes: Iterable[str]) -> str:
+    """Una huella para un conjunto de huellas, sin importar el orden: la que va al informe."""
+    return _sha(sorted(str(h) for h in hashes))
+
+
+def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[str, dict]:
+    """Lo que queda en el plan aprobado: por criterio, la lectura congelada con sus huellas.
+
+    Sólo se congela una lectura que se puede congelar (ver `freezable`): dos
+    muestras que coincidieron, o la que decidió una persona. La que no, entra
+    igual, con `lectura: None` y el motivo: así quien puntúa sabe que el
+    contrato estaba encendido y que ese criterio quedó sin lectura decidida, y
+    no la reemplaza por una generada en el momento.
+    """
+    by_id = {t.id: t for t in tests}
+    out: dict[str, dict] = {}
+    for cid, entry in (readings or {}).items():
+        artifacts = [str(a) for a in (entry.get("artefactos_requeridos") or DEFAULT_ARTIFACTS)]
+        frozen = {
+            "version": SCHEMA_VERSION,
+            "estado": entry.get("estado"),
+            "lectura": None,
+            "motivo": review_note(entry) or str(entry.get("motivo") or ""),
+            "artefactos_requeridos": artifacts,
+            "superficies": copy.deepcopy(entry.get("superficies") or []),
+            "hash_recon": str(entry.get("hash_recon") or recon_hash(entry.get("superficies") or [])),
+        }
+        test = by_id.get(cid)
+        if test is not None and freezable(entry):
+            reading = RuleReading.from_dict(entry["lectura"]).as_dict()
+            frozen.update({
+                "lectura": reading,
+                "hash_lectura": reading_hash(reading),
+                "hash_observable": observable_hash(test, reading, artifacts),
+                "vaguedad": copy.deepcopy(entry.get("vaguedad")),
+                "editada_por": str(entry.get("editada_por") or ""),
+                "editada_en": str(entry.get("editada_en") or ""),
+            })
+        out[cid] = frozen
+    return out
+
+
+#: Por qué un criterio con el contrato encendido puede quedar sin puntuar.
+SIN_ADJUDICAR = "lectura sin adjudicar"
+VENCIDA = "lectura congelada vencida"
+
+
+def frozen_reading_for(frozen: dict | None, test: CriterionTest) -> tuple[RuleReading | None, str, str]:
+    """La lectura congelada de un criterio para puntuar: (lectura, "", "") o (None, causa, motivo).
+
+    `frozen` es `approved_plan["lecturas"]`. Nunca devuelve una lectura que no
+    corresponde: si nadie la decidió, o si su huella ya no coincide con la
+    regla que se va a juzgar, dice por qué y quien llama deja el criterio sin
+    puntuar. No hay un tercer camino que la reemplace por otra.
+    """
+    entry = (frozen or {}).get(test.id) or {}
+    if not entry.get("lectura"):
+        return None, SIN_ADJUDICAR, (
+            str(entry.get("motivo") or "")
+            or "este criterio no tiene una lectura en el plan aprobado"
+        )
+    expected = observable_hash(test, entry["lectura"], entry.get("artefactos_requeridos") or DEFAULT_ARTIFACTS)
+    if entry.get("hash_observable") != expected:
+        return None, VENCIDA, (
+            "la lectura se congeló contra otra redacción de la regla, otra lectura "
+            "u otro tipo de evidencia: su huella ya no coincide"
+        )
+    return RuleReading.from_dict(entry["lectura"]), "", ""
 
 
 # --- escribir las lecturas de un plan ----------------------------------------

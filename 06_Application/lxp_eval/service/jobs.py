@@ -1393,6 +1393,23 @@ class JobRunner:
                 self._fold_client_spend(record, client, "redaccion")
                 self._fail(record, Stage.PROBES, "", exc)
                 return record
+            # LA HUELLA DEL RECORRIDO, por criterio: las superficies donde el
+            # plan dijo que se prueba y la huella de su captura. Va aparte de
+            # la huella de la lectura (ver lectura.recon_hash).
+            seen = {
+                p.get("id"): p
+                for p in ((surfaces or {}).get("profile") or {}).get("partes") or []
+                if isinstance(p, dict)
+            }
+            for d in record.strategy:
+                entry = written.get(str(d.get("id")))
+                if entry is None:
+                    continue
+                entry["superficies"] = [
+                    {"id": pid, "sha256": str((seen.get(pid) or {}).get("sha256") or "")}
+                    for pid in (d.get("partes") or [])
+                ]
+                entry["hash_recon"] = lectura_mod.recon_hash(entry["superficies"])
             # SE SUMAN, no reemplazan: un piloto de un criterio y después el
             # resto no puede dejar al piloto sin su lectura.
             record.readings = {**(record.readings or {}), **written}
@@ -1401,12 +1418,8 @@ class JobRunner:
             # revisar, con el motivo entre sus advertencias: es donde la
             # persona ya mira antes de aprobar.
             for d in record.strategy:
-                note = lectura_mod.review_note(record.readings.get(str(d.get("id"))))
-                if note:
-                    d["revisar"] = True
-                    notes = d.setdefault("advertencias", [])
-                    if note not in notes:
-                        notes.append(note)
+                if str(d.get("id")) in written:
+                    self._note_reading(record, d)
             self.store.save(record)
 
         elif record.readings:
@@ -1528,6 +1541,25 @@ class JobRunner:
 
     # --- la lectura de la regla, corregida por una persona ------------------
 
+    @staticmethod
+    def _note_reading(record: JobRecord, decision: dict) -> None:
+        """El aviso de la lectura de un criterio, puesto al día en el plan.
+
+        Saca el aviso de la lectura anterior y pone el de la actual, si tiene
+        uno. Sin esto una lectura ya adjudicada seguía diciendo en el plan "hay
+        que decidir cuál vale", y una objeción nueva al texto de una persona no
+        aparecía donde se mira antes de aprobar. `revisar` sólo se enciende: lo
+        puede haber encendido otra cosa.
+        """
+        entry = (record.readings or {}).get(str(decision.get("id")))
+        notes = lectura_mod.without_review_notes(decision.get("advertencias"))
+        note = lectura_mod.review_note(entry)
+        if note:
+            notes.append(note)
+            decision["revisar"] = True
+        if notes or "advertencias" in decision:
+            decision["advertencias"] = notes
+
     async def edit_reading(
         self, record: JobRecord, criterion_id: str, fields: dict | None = None,
         *, by: str, sample: int | None = None,
@@ -1555,6 +1587,8 @@ class JobRunner:
         if test is None:
             raise ServiceError(f"no se encontró el criterio {criterion_id} en este trabajo")
         client = self._client()
+        if sample is None and not fields:
+            raise ServiceError("la corrección de una lectura necesita los campos que cambia o la muestra elegida")
         if sample is not None:
             new = await asyncio.to_thread(
                 lectura_mod.adjudicate_reading, entry, test, sample, by=by,
@@ -1565,10 +1599,25 @@ class JobRunner:
                 lectura_mod.edit_reading, entry, test, fields or {}, by=by,
                 client=client, model=self.engine.model, check=self.engine.check_reading,
             )
-        record.readings = {**record.readings, criterion_id: new}
-        self._fold_client_spend(record, client, "redaccion")
-        self.store.save(record)
-        return record
+        # EL CHEQUEO TARDA SEGUNDOS Y EL REGISTRO PUDO CAMBIAR MIENTRAS TANTO.
+        # Se vuelve a leer antes de guardar: si en ese rato alguien aprobó el
+        # plan, guardar el registro viejo pisaría la aprobación y dejaría una
+        # lectura distinta de la que quedó congelada.
+        fresh = self.store.get(record.job_id) or record
+        if fresh.stage != Stage.AWAITING_APPROVAL or fresh.approved_at != record.approved_at:
+            raise ServiceError(
+                "el plan se aprobó o cambió de etapa mientras se revisaba la "
+                "lectura: la corrección no se guardó"
+            )
+        fresh.readings = {**(fresh.readings or {}), criterion_id: new}
+        for d in fresh.strategy:
+            if str(d.get("id")) == criterion_id:
+                self._note_reading(fresh, d)
+        self._fold_client_spend(fresh, client, "redaccion")
+        self.store.save(fresh)
+        record.readings, record.strategy = fresh.readings, fresh.strategy
+        record.spend_usd, record.spend_by_stage = fresh.spend_usd, fresh.spend_by_stage
+        return fresh
 
     # --- the gate ----------------------------------------------------------
 
@@ -2015,6 +2064,8 @@ class JobRunner:
 
         client = self._client()
         verdicts = []
+        #: criterio -> de dónde salió la lectura con la que se juzgó (ver `_score_cells`).
+        reading_sources: dict[str, str] = {}
         by_test: dict[str, list] = {}
         for p in probes:
             by_test.setdefault(p.test_id, []).append(p)
@@ -2035,6 +2086,7 @@ class JobRunner:
                             record.approved_at,
                         ), record.retried),
                         client,
+                        sources=reading_sources,
                     ))
                     continue
                 if test.id in cut_short:
@@ -2144,6 +2196,31 @@ class JobRunner:
             },
         )
         if record.strategy:
+            # DE DÓNDE SALIÓ LA LECTURA DE CADA REGLA. Congelada en el plan que
+            # una persona aprobó, o generada al puntuar (un plan anterior al
+            # contrato, o con el contrato apagado). El informe lo dice porque
+            # son dos garantías distintas: la primera se reproduce, la segunda
+            # puede leerse distinto en otra corrida.
+            frozen = plan.get("lecturas")
+            how = list(reading_sources.values())
+            record.report.setdefault("meta", {})["lecturas"] = {
+                "congeladas": how.count("congelada"),
+                "en_vivo": how.count("en_vivo"),
+                "sin_lectura": how.count("sin_lectura"),
+            }
+            if frozen is not None:
+                record.report["meta"]["observableSha"] = lectura_mod.set_hash(
+                    e.get("hash_observable", "") for e in frozen.values()
+                )
+                record.report["meta"]["reconSha"] = lectura_mod.set_hash(
+                    e.get("hash_recon", "") for e in frozen.values()
+                )
+            elif how.count("en_vivo"):
+                record.report["meta"]["lecturasAdvertencia"] = (
+                    "Este plan no trae lecturas congeladas: la lectura de cada "
+                    "regla se generó al puntuar. Otra corrida sobre la misma "
+                    "evidencia puede leer una regla distinto."
+                )
             causes = _causes_of(record.report)
             bugs = {k: v for k, v in causes.items() if k in _BUG_CAUSES}
             record.report.setdefault("meta", {})["causasNoEvaluado"] = causes
@@ -2164,7 +2241,8 @@ class JobRunner:
         return record
 
     async def _score_cells(
-        self, record: JobRecord, test: Any, cells: list, rows: list[dict], client: Any
+        self, record: JobRecord, test: Any, cells: list, rows: list[dict], client: Any,
+        *, sources: dict | None = None,
     ) -> Any:
         """El veredicto de UN criterio a partir de sus celdas: "en x de n".
 
@@ -2238,7 +2316,29 @@ class JobRunner:
         # juzgar: un criterio con todas sus pruebas cortadas no la paga.
         reading = ""
         to_judge = [p for p in cells if p.probe_id not in record.unevaluated]
-        if to_judge and self.engine.read_rule is not None:
+        # LA LECTURA CONGELADA MANDA. Si el plan aprobado trae lecturas (el
+        # contrato estaba encendido cuando se generó), se juzga con la que una
+        # persona aprobó y NO se llama a `read_rule`: pedir otra es justo lo
+        # que hacía que dos corridas leyeran la regla distinto. Y si la de este
+        # criterio no se decidió, o se venció porque la regla se reescribió,
+        # tampoco se improvisa una: el criterio queda sin puntuar con su causa
+        # (ver lectura.frozen_reading_for). Un plan sin lecturas congeladas es
+        # un plan viejo: sigue por el camino de siempre, abajo.
+        frozen = (record.approved_plan or {}).get("lecturas")
+        if to_judge and frozen is not None:
+            held, cause, why = lectura_mod.frozen_reading_for(frozen, test)
+            if held is None:
+                if sources is not None:
+                    sources[test.id] = "sin_lectura"
+                return unscored(
+                    cause,
+                    f"no se juzgó ninguna de las {len(to_judge)} prueba(s) completa(s) "
+                    f"de este criterio: {why}. La evidencia está en el ledger.",
+                )
+            reading = held.as_text()
+            if sources is not None:
+                sources[test.id] = "congelada"
+        elif to_judge and self.engine.read_rule is not None:
             decision = next(
                 (d for d in record.strategy if str(d.get("id")) == test.id), {}
             )
@@ -2263,6 +2363,8 @@ class JobRunner:
                 ) or "")
             except scoring_mod.ReadingUnavailable as exc:
                 reading, why = "", str(exc)
+            if sources is not None:
+                sources[test.id] = "en_vivo" if reading.strip() else "sin_lectura"
             if not reading.strip():
                 return unscored(
                     "no se pudo leer la regla",
@@ -2517,6 +2619,9 @@ _BUG_CAUSES = frozenset({
     # La lectura de la regla no salió ni al segundo pedido (ver
     # scoring.read_rule): el criterio tenía evidencia y no se juzgó.
     "no se pudo leer la regla",
+    # La lectura congelada en el plan ya no corresponde a la regla que se va
+    # a juzgar (ver lectura.frozen_reading_for): hay que volver a generarla.
+    "lectura congelada vencida",
     # La ausencia de algo no se pudo afirmar porque faltó cobertura (una sola
     # prueba, o un lugar sin recorrer): es nuestra, se arregla mirando más.
     "ausencia sin cobertura",

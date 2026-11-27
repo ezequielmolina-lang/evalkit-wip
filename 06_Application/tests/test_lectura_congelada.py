@@ -670,3 +670,136 @@ def test_the_service_refuses_to_edit_a_reading_once_the_plan_is_approved(tmp_pat
     cid = next(iter(record.readings))
     with pytest.raises(ServiceError):
         asyncio.run(JobRunner(store, engine, None).edit_reading(record, cid, {"cumple": "Tres."}, by="E. M."))
+
+
+# --- lo que encontró la revisión de la tarea 4 --------------------------------
+
+
+def test_an_edit_with_a_misspelled_field_is_refused_not_ignored():
+    """Quien escribe "cumpel" cree que corrigió algo: no puede quedar como editada sin cambiar nada."""
+    vistas = []
+    with pytest.raises(ValueError, match="cumpel"):
+        lec.edit_reading(_estable(), _criterio(), {"cumpel": "Tres."}, by="E. M.", client=None,
+                         check=_chequeo_que_anota(vistas))
+    assert vistas == [], "se rechaza antes de gastar en el chequeo"
+
+
+def test_an_edit_that_changes_nothing_is_refused():
+    antes = _estable()
+    for campos in ({}, {"cumple": antes["lectura"]["cumple"]}, {"cumple": "  Cuatro o menos.  "}):
+        with pytest.raises(ValueError, match="no cambia nada"):
+            lec.edit_reading(antes, _criterio(), campos, by="E. M.", client=None,
+                             check=_chequeo_que_anota([]))
+
+
+def test_only_text_goes_into_a_reading():
+    """Una lista o un número no se convierten en texto para el juez."""
+    for valor in (["a", "b"], {"x": 1}, 0, True):
+        with pytest.raises(ValueError, match="texto"):
+            lec.edit_reading(_estable(), _criterio(), {"cumple": valor}, by="E. M.", client=None,
+                             check=_chequeo_que_anota([]))
+
+
+def test_none_clears_an_optional_field_but_not_an_end():
+    con_parcial = _estable()
+    con_parcial["lectura"]["parcial"] = "Algo intermedio."
+    sin = lec.edit_reading(con_parcial, _criterio(), {"parcial": None}, by="E. M.", client=None,
+                           check=_chequeo_que_anota([]))
+    assert sin["lectura"]["parcial"] == ""
+    with pytest.raises(scoring.ReadingUnavailable):
+        lec.edit_reading(_estable(), _criterio(), {"cumple": None}, by="E. M.", client=None,
+                         check=_chequeo_que_anota([]))
+
+
+def test_the_picked_sample_does_not_outlive_a_later_edit():
+    muestras = iter([_lectura(), _lectura(cumple="Tres o menos.")])
+    sin_acuerdo = lec.write_readings(
+        [_criterio()], client=None,
+        reader=lambda test, client, *, model=None, context="": next(muestras),
+        compare=lambda *a, **k: {"equivalentes": False, "diferencias": "otro umbral"},
+    )["X-01"]
+    elegida = lec.adjudicate_reading(sin_acuerdo, _criterio(), 2, by="E. M.", client=None,
+                                     check=_chequeo_que_anota([]))
+    editada = lec.edit_reading(elegida, _criterio(), {"cumple": "Dos o menos."}, by="E. M.",
+                               client=None, check=_chequeo_que_anota([]))
+
+    assert "muestra_elegida" not in editada, "ya no es la muestra 2: la persona la cambió"
+    assert editada["historial"][-1]["muestra_elegida"] == 2, "y el historial dice cuál se había elegido"
+
+
+def test_picking_needs_two_samples_and_a_real_number():
+    una_sola = lec.write_readings(
+        [_criterio()], client=None,
+        reader=_lector_que_falla_la_segunda(),
+        compare=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+    )["X-01"]
+    assert una_sola["estado"] == lec.NO_DISPONIBLE and len(una_sola["muestras"]) == 1
+    with pytest.raises(ValueError, match="dos muestras"):
+        lec.adjudicate_reading(una_sola, _criterio(), 1, by="E. M.", client=None,
+                               check=_chequeo_que_anota([]))
+    with pytest.raises(ValueError):
+        lec.adjudicate_reading(_estable(), _criterio(), True, by="E. M.", client=None,
+                               check=_chequeo_que_anota([]))
+
+
+def _lector_que_falla_la_segunda():
+    veces = []
+
+    def read(test, client, *, model=None, context=""):
+        veces.append(1)
+        if len(veces) == 2:
+            raise scoring.ReadingUnavailable("llegó sin: cumple")
+        return _lectura()
+    return read
+
+
+def test_the_plan_warnings_follow_the_reading_after_an_edit(tmp_path, env):  # noqa: F811
+    """Adjudicada la lectura, el plan deja de decir "hay que decidir cuál vale"."""
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": False, "diferencias": "otro umbral"},
+        check_reading=_chequeo_que_anota([], vaga=True),
+    )
+    record = _generar(store, engine, job_id)
+    cid = next(d["id"] for d in record.strategy if d["estado"] == "se_prueba")
+    decision = next(d for d in record.strategy if d["id"] == cid)
+    assert any("no salió igual dos veces" in n for n in decision["advertencias"])
+
+    asyncio.run(JobRunner(store, engine, None).edit_reading(record, cid, by="E. M.", sample=1))
+
+    decision = next(d for d in store.get(job_id).strategy if d["id"] == cid)
+    assert not any("no salió igual dos veces" in n for n in decision["advertencias"]), "la nota vieja se va"
+    assert any("decidir a ojo" in n for n in decision["advertencias"]), "y la objeción nueva queda a la vista"
+    assert decision["revisar"] is True
+
+
+def test_an_edit_does_not_overwrite_a_plan_approved_meanwhile(tmp_path, env):  # noqa: F811
+    """El chequeo tarda segundos: si el plan se aprobó mientras tanto, la edición no lo pisa."""
+    from lxp_eval.service.crypto import ServiceError
+    from lxp_eval.service.ledger_decisions import approve_from_plan
+    from tests.test_plan_ejecucion import APROBO
+
+    caja = {}
+
+    def check(test, reading, client, *, model=None, sobre=lec.SOBRE_MODELO):
+        if "store" in caja:                      # mientras corre el chequeo, alguien aprueba
+            approve_from_plan(caja["store"], caja["store"].get(caja["job_id"]), approved_by=APROBO)
+        return {"vaga": False, "parcial_definido": True, "anclas_contables": True, "objeciones": [], "sobre": sobre}
+
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True,
+        read_rule=lambda test, client, *, model=None, context="": _lectura(),
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check_reading=check,
+    )
+    record = _generar(store, engine, job_id)
+    cid = next(d["id"] for d in record.strategy if d["estado"] == "se_prueba")
+    caja.update(store=store, job_id=job_id)
+
+    with pytest.raises(ServiceError):
+        asyncio.run(JobRunner(store, engine, None).edit_reading(record, cid, {"cumple": "Tres."}, by="E. M."))
+
+    guardado = store.get(job_id)
+    assert guardado.approved_plan is not None, "la aprobación sigue ahí"
+    assert guardado.approved_plan["lecturas"][cid]["lectura"]["cumple"] == "Cuatro o menos."

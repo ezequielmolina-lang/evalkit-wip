@@ -581,11 +581,11 @@ def create_app(
         # `requiresSignoff` / `signedOff` are server state; a payload that
         # flipped them is recorded as received but never consulted (see
         # JobRunner.runnable_probes).
-        record.approved_plan = {
+        record.approved_plan = serialize.with_frozen_readings({
             "criteria": plan.get("criteria") or serialize.criteria_out(record.criteria),
             "probes": plan.get("probes"),
             "sampling": record.sampling,
-        }
+        }, record)
         record.approved_at = now()
         store.save(record)
 
