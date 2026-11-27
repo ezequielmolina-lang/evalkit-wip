@@ -47,6 +47,7 @@ from tests.test_lectura_congelada import (
     _HUELLA_DEL_CONSEJO,
     _HUELLA_DEL_JUEZ,
     _criterio,
+    _estable,
     _generar,
     _lectura,
 )
@@ -71,7 +72,9 @@ class _Lector:
 def _juez_que_anota(vistas):
     def score(test, rows, client, **kw):
         vistas.append(kw.get("reading", ""))
+        score.criterios.append(test.id)
         return scoring.score_test(test, rows, client, **kw)
+    score.criterios = []
     return score
 
 
@@ -288,3 +291,95 @@ def test_a_job_without_frozen_readings_has_none_to_replay(tmp_path, env):  # noq
     store, engine, job_id, _, _ = _armar(tmp_path, frozen_readings=False)
     _correr(store, engine, job_id)
     assert replay.frozen_readings(store.dir_of(job_id)) == {}
+
+
+# --- Tarea 6: una compuerta determinista por TIPO de artefacto ----------------
+
+
+def test_the_required_artifact_types_come_from_what_the_probes_capture():
+    assert lec.required_artifacts([{"capture": ["screenshot", "page_text"]}, {"capture": ["page_text"]}]) == \
+        ["page_text", "screenshot"]
+    assert lec.required_artifacts([{}]) == ["page_text", "screenshot"], "sin dato, lo que una prueba guarda por defecto"
+    assert lec.missing_artifacts(["page_text", "screenshot"], [{"kind": "screenshot"}]) == ["page_text"]
+    assert lec.missing_artifacts(["page_text", "screenshot"], [{"kind": "screenshot"}, {"kind": "page_text"}]) == []
+
+
+def test_the_reading_declares_what_evidence_its_probes_capture(tmp_path, env):  # noqa: F811
+    store, engine, job_id, _, _ = _armar(tmp_path)
+    record = _generar(store, engine, job_id)
+    for cid in _probados(record):
+        assert record.readings[cid]["artefactos_requeridos"] == ["page_text", "screenshot"]
+    record = _aprobar(store, job_id)
+    assert record.approved_plan["lecturas"][_probados(record)[0]]["artefactos_requeridos"] == ["page_text", "screenshot"]
+
+
+def _pedir_otro_tipo(store, job_id, cid, tipos):
+    """Deja el plan aprobado pidiendo `tipos` para un criterio, con su huella al día."""
+    from lxp_eval.service import serialize
+
+    record = store.get(job_id)
+    entrada = record.approved_plan["lecturas"][cid]
+    entrada["artefactos_requeridos"] = list(tipos)
+    criterios = serialize.criteria_from_plan(record.approved_plan["criteria"], record.objective)
+    test = next(t for t in criterios.all_tests() if t.id == cid)
+    entrada["hash_observable"] = lec.observable_hash(test, entrada["lectura"], tipos)
+    store.save(record)
+
+
+def test_gate_por_tipo_de_artefacto(tmp_path, env):  # noqa: F811
+    """Si el tipo de evidencia que el plan pidió no está, el criterio no llega al juez."""
+    store, engine, job_id, lector, vistas = _armar(tmp_path)
+    _generar(store, engine, job_id)
+    record = _aprobar(store, job_id)
+    cid, otro = _probados(record)[0], _probados(record)[-1]
+    _pedir_otro_tipo(store, job_id, cid, ["page_text", "screenshot", "video"])
+    lector.permitido = False
+    record = _puntuar(store, engine, job_id)
+
+    fila = _fila(store, job_id, cid)
+    assert fila["verdict"] == "NO_EVALUADO"
+    assert fila["rationale"].startswith("[causa: falta el tipo de evidencia]")
+    assert "video" in fila["rationale"]
+    if otro != cid:
+        assert _fila(store, job_id, otro)["verdict"] == "CUMPLE", "los demás criterios se juzgan"
+    assert cid not in engine.score_test.criterios, \
+        "el juez no se llamó para las pruebas del criterio sin su evidencia"
+    assert engine.score_test.criterios, "y sí para los demás"
+    assert "falta el tipo de evidencia" in record.report["meta"]["autochequeo"]["fallasDelEvaluador"]
+
+
+def test_precondicion_semantica_es_no_alcanza(tmp_path, env):  # noqa: F811
+    """"¿Comparó dos distractores de la misma pregunta?" lo decide el juez leyendo, no una compuerta."""
+    semantica = _lectura(no_alcanza="Un solo distractor por pregunta: hace falta comparar dos de la misma.")
+    store, engine, job_id, lector, vistas = _armar(tmp_path, lector=_Lector(semantica))
+    _generar(store, engine, job_id)
+    _aprobar(store, job_id)
+    lector.permitido = False
+    record = _puntuar(store, engine, job_id)
+
+    assert vistas, "el juez SÍ se llama: la precondición no es una compuerta"
+    assert all("hace falta comparar dos de la misma" in v for v in vistas), "y la recibe en la lectura, como dato"
+    fila = _fila(store, job_id, _probados(record)[0])
+    assert not fila["rationale"].startswith("[causa: falta el tipo de evidencia]")
+
+
+def test_recon_hash_invalida_superficie_cambiada():
+    antes = [{"id": "P1", "sha256": "aaa"}, {"id": "P2", "sha256": "bbb"}]
+    huella = lec.recon_hash(antes)
+
+    assert lec.recon_hash(list(reversed(antes))) == huella, "el orden no importa"
+    cambiada = [{"id": "P1", "sha256": "aaa"}, {"id": "P2", "sha256": "OTRA"}]
+    assert lec.recon_hash(cambiada) != huella
+
+    entrada = {"superficies": antes, "hash_recon": huella}
+    assert lec.stale_surfaces(entrada, [{"id": "P1", "sha256": "aaa"}, {"id": "P2", "sha256": "bbb"}]) == []
+    assert lec.stale_surfaces(entrada, [{"id": "P1", "sha256": "aaa"}, {"id": "P2", "sha256": "OTRA"}]) == ["P2"]
+    assert lec.stale_surfaces(entrada, [{"id": "P1", "sha256": "aaa"}]) == ["P2"], "una superficie que ya no está"
+
+    una = lec.freeze({"X-01": {**_estable(), "superficies": antes, "hash_recon": huella}}, [_criterio()])["X-01"]
+    otra = lec.freeze(
+        {"X-01": {**_estable(), "superficies": cambiada, "hash_recon": lec.recon_hash(cambiada)}}, [_criterio()],
+    )["X-01"]
+    assert una["hash_recon"] != otra["hash_recon"]
+    assert una["hash_observable"] == otra["hash_observable"], \
+        "que cambie una pantalla no vence la lectura de la regla: son dos huellas"

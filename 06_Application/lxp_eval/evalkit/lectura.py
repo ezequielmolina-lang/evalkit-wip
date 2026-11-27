@@ -610,6 +610,54 @@ def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[st
 #: Por qué un criterio con el contrato encendido puede quedar sin puntuar.
 SIN_ADJUDICAR = "lectura sin adjudicar"
 VENCIDA = "lectura congelada vencida"
+SIN_TIPO = "falta el tipo de evidencia"
+
+
+# --- la compuerta por TIPO de artefacto --------------------------------------
+
+
+def required_artifacts(probes: Iterable[dict]) -> list[str]:
+    """Qué tipos de artefacto tiene que haber para juzgar un criterio: los que sus pruebas guardan.
+
+    Es un dato que YA estaba declarado: cada prueba dice qué captura
+    (`Probe.capture`, por defecto captura de pantalla y texto de página). No
+    se reusa `evidencia_requerida`, que es una frase para que la lea una
+    persona, ni se agrega nada por nombre de criterio: la compuerta de abajo
+    mira TIPOS, y qué tipos hacen falta sale de las pruebas.
+    """
+    kinds: set[str] = set()
+    for probe in probes:
+        kinds.update(str(k) for k in (probe.get("capture") or DEFAULT_ARTIFACTS))
+    return sorted(kinds or DEFAULT_ARTIFACTS)
+
+
+def missing_artifacts(required: Iterable[str], rows: Iterable[dict]) -> list[str]:
+    """Los tipos pedidos que no están entre las filas de evidencia de una prueba.
+
+    ES TODO LO QUE ESTA COMPUERTA DECIDE: si el TIPO está o no. No abre el
+    archivo ni lee su contenido. Que el archivo exista y se pueda leer lo
+    sigue controlando el juez (`scoring._build_content` y la regla de "sin
+    cita válida no hay veredicto"), y lo que exige LEER la pantalla ("¿se
+    compararon dos distractores de la misma pregunta?") no es una compuerta:
+    va en el `no_alcanza` de la lectura y lo decide el modelo, diciéndolo.
+    """
+    have = {str(r.get("kind")) for r in rows}
+    return [k for k in sorted({str(x) for x in required}) if k not in have]
+
+
+def stale_surfaces(entry: dict | None, parts: Iterable[dict]) -> list[str]:
+    """Las superficies de una lectura congelada cuya captura ya no es la misma (o que ya no están).
+
+    Compara lo que se guardó al congelar con un recorrido nuevo de la
+    plataforma. Es la mitad "se vence si cambió la plataforma" de las dos
+    huellas; hace falta un recorrido nuevo para preguntarlo, así que no corre
+    al puntuar.
+    """
+    now = {str(p.get("id")): str(p.get("sha256") or "") for p in parts if isinstance(p, dict)}
+    return [
+        str(s.get("id")) for s in (entry or {}).get("superficies") or []
+        if now.get(str(s.get("id"))) != str(s.get("sha256") or "")
+    ]
 
 
 def frozen_reading_for(frozen: dict | None, test: CriterionTest) -> tuple[RuleReading | None, str, str]:

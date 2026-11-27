@@ -1507,6 +1507,17 @@ class JobRunner:
                     drafted, cells.get(drafted["criterionId"])
                 )
             ]
+        if self.engine.frozen_readings and record.readings:
+            # QUÉ EVIDENCIA HACE FALTA PARA JUZGAR, como dato y por criterio:
+            # los tipos de artefacto que sus pruebas guardan (ver
+            # lectura.required_artifacts). Queda en la lectura, entra en su
+            # huella al congelar y es lo que mira la compuerta al puntuar.
+            drafted: dict[str, list] = {}
+            for p in record.probes:
+                drafted.setdefault(p.get("criterionId"), []).append(p)
+            for cid, own in drafted.items():
+                if cid in record.readings:
+                    record.readings[cid]["artefactos_requeridos"] = lectura_mod.required_artifacts(own)
         record.sampling = dict(serialize.DEFAULT_SAMPLING)
         # KEEP THE NOTICE. It is rendered here and needed at signoff, which is
         # a different moment and a different screen; dropping it meant the
@@ -2324,6 +2335,8 @@ class JobRunner:
         # tampoco se improvisa una: el criterio queda sin puntuar con su causa
         # (ver lectura.frozen_reading_for). Un plan sin lecturas congeladas es
         # un plan viejo: sigue por el camino de siempre, abajo.
+        #: prueba -> tipos de artefacto que el plan pidió y esa prueba no guardó.
+        lacking: dict[str, list[str]] = {}
         frozen = (record.approved_plan or {}).get("lecturas")
         if to_judge and frozen is not None:
             held, cause, why = lectura_mod.frozen_reading_for(frozen, test)
@@ -2338,6 +2351,26 @@ class JobRunner:
             reading = held.as_text()
             if sources is not None:
                 sources[test.id] = "congelada"
+            # LA COMPUERTA POR TIPO DE ARTEFACTO, antes del juez. Determinista
+            # y angosta: sólo mira si la prueba guardó los TIPOS de evidencia
+            # que el plan declaró (ver lectura.missing_artifacts). Una prueba
+            # sin su tipo no se le manda al juez para que adivine; si no lo
+            # guardó ninguna, el criterio no se juzga.
+            needs = (frozen.get(test.id) or {}).get("artefactos_requeridos") or []
+            for p in to_judge:
+                gone = lectura_mod.missing_artifacts(
+                    needs, [r for r in rows if r.get("probe_id") == p.probe_id]
+                )
+                if gone:
+                    lacking[p.probe_id] = gone
+            if len(lacking) == len(to_judge):
+                kinds = sorted({k for v in lacking.values() for k in v})
+                return unscored(
+                    lectura_mod.SIN_TIPO,
+                    f"ninguna de las {len(to_judge)} prueba(s) completa(s) guardó la "
+                    f"evidencia de tipo {', '.join(kinds)} que el plan pidió para este "
+                    "criterio, así que no se le mandó al juez. Lo guardado está en el ledger.",
+                )
         elif to_judge and self.engine.read_rule is not None:
             decision = next(
                 (d for d in record.strategy if str(d.get("id")) == test.id), {}
@@ -2389,6 +2422,13 @@ class JobRunner:
                 label = label_of(p)
                 if p.probe_id in record.unevaluated:
                     out.append((label, "CORTADA", record.unevaluated[p.probe_id], []))
+                    continue
+                if p.probe_id in lacking:
+                    out.append((label, NV, (
+                        "esta prueba no guardó la evidencia de tipo "
+                        + ", ".join(lacking[p.probe_id])
+                        + " que el plan pidió: no se le mandó al juez"
+                    ), []))
                     continue
                 own = [r for r in rows if r.get("probe_id") == p.probe_id]
                 v = await asyncio.to_thread(
@@ -2622,6 +2662,9 @@ _BUG_CAUSES = frozenset({
     # La lectura congelada en el plan ya no corresponde a la regla que se va
     # a juzgar (ver lectura.frozen_reading_for): hay que volver a generarla.
     "lectura congelada vencida",
+    # Las pruebas corrieron y no guardaron el tipo de evidencia que el plan
+    # había pedido para el criterio (ver lectura.missing_artifacts).
+    "falta el tipo de evidencia",
     # La ausencia de algo no se pudo afirmar porque faltó cobertura (una sola
     # prueba, o un lugar sin recorrer): es nuestra, se arregla mirando más.
     "ausencia sin cobertura",
