@@ -461,3 +461,72 @@ def test_with_the_contract_off_the_council_is_asked_exactly_as_before(tmp_path, 
 
     assert "escalate_for" not in pedidos[0]
     assert all(p["consejo"] == "reducido" for p in record.probes)
+
+
+# --- lo que encontró la revisión de la tarea 2 --------------------------------
+
+
+def test_the_real_error_surfaces_even_if_a_skipped_criterion_finishes_first(monkeypatch):
+    """Un 400 se muestra, no se tapa.
+
+    El hilo que falla avisa a los demás ANTES de que su resultado quede listo,
+    así que un criterio salteado puede terminar primero. Su resultado vacío no
+    puede usarse ni convertir el 400 en un error de tipos.
+    """
+    from concurrent.futures import wait
+
+    def salteados_primero(futures):
+        wait(futures)
+        return sorted(futures, key=lambda f: f.exception() is not None)
+
+    monkeypatch.setattr(lec, "as_completed", salteados_primero)
+
+    def read(test, client, *, model=None, context=""):
+        raise RuntimeError("400 invalid_request_error")
+
+    with pytest.raises(RuntimeError, match="400 invalid_request_error"):
+        lec.write_readings(
+            [_criterio("X-01"), _criterio("X-02"), _criterio("X-03")], client=None,
+            reader=read, compare=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+            max_workers=1,
+        )
+
+
+def test_a_check_that_contradicts_itself_is_an_objection():
+    """`vaga: false` con un PARCIAL sin definir o con objeciones escritas no es un visto bueno."""
+    for respuesta in (
+        {"vaga": False, "parcial_definido": False, "anclas_contables": True, "objeciones": []},
+        {"vaga": False, "parcial_definido": True, "anclas_contables": False, "objeciones": []},
+        {"vaga": False, "parcial_definido": True, "anclas_contables": True, "objeciones": ["PARCIAL falta"]},
+    ):
+        out = lec.check_reading(_criterio(), _lectura(), _Modelo(chequear_lectura=respuesta), model="m")
+        assert out["vaga"] is True, respuesta
+        assert lec.review_note({"estado": lec.ESTABLE, "lectura": _lectura().as_dict(), "vaguedad": out})
+
+    limpia = lec.check_reading(_criterio(), _lectura(), _Modelo(chequear_lectura={
+        "vaga": False, "parcial_definido": True, "anclas_contables": True, "objeciones": [],
+    }), model="m")
+    assert limpia["vaga"] is False
+    assert lec.review_note({"estado": lec.ESTABLE, "lectura": _lectura().as_dict(), "vaguedad": limpia}) == ""
+
+
+def test_a_reviewer_double_that_objects_without_saying_vague_still_marks_the_criterion():
+    """La nota mira las objeciones, no sólo la bandera: un chequeo reemplazado no la esquiva."""
+    entrada = {"estado": lec.ESTABLE, "lectura": _lectura().as_dict(),
+               "vaguedad": {"vaga": False, "parcial_definido": False, "anclas_contables": True, "objeciones": []}}
+    assert "decidir a ojo" in lec.review_note(entrada)
+
+
+def test_with_the_contract_off_a_new_drafting_drops_the_old_readings_of_those_criteria(tmp_path, env):  # noqa: F811
+    """El único cambio con el contrato apagado: una lectura vieja no sobrevive a otra redacción."""
+    store, engine, job_id = _plan(tmp_path)
+    record = store.get(job_id)
+    probados = [d["id"] for d in record.strategy if d["estado"] == "se_prueba"]
+    record.readings = {
+        probados[0]: {"estado": lec.ESTABLE, "lectura": _lectura().as_dict()},
+        "OTRO-99": {"estado": lec.ESTABLE, "lectura": _lectura().as_dict()},
+    }
+    store.save(record)
+    record = _generar(store, engine, job_id)
+
+    assert set(record.readings) == {"OTRO-99"}, "se va la del criterio vuelto a redactar; la de otro queda"

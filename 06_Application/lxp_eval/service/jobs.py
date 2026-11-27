@@ -1473,6 +1473,10 @@ class JobRunner:
                 platform_profile=(surfaces or {}).get("profile"),
             )
         except BaseException as exc:  # noqa: BLE001
+            if record.readings and self.engine.frozen_readings:
+                # Las lecturas ya se pagaron con este mismo cliente: que la
+                # redacción falle después no las saca de la cuenta.
+                self._fold_client_spend(record, client, "redaccion")
             self._fail(record, Stage.PROBES, "", exc)
             return record
 

@@ -291,13 +291,35 @@ def check_reading(
             "sobre": sobre,
         }
     raw = data.get("objeciones")
-    return {
+    out = {
         "vaga": data["vaga"],
-        "parcial_definido": bool(data.get("parcial_definido")),
-        "anclas_contables": bool(data.get("anclas_contables")),
+        "parcial_definido": data.get("parcial_definido") is True,
+        "anclas_contables": data.get("anclas_contables") is True,
         "objeciones": [str(x).strip() for x in (raw if isinstance(raw, list) else []) if str(x).strip()],
         "sobre": sobre,
     }
+    # UNA RESPUESTA QUE SE CONTRADICE NO ES UN VISTO BUENO. "No es vaga" junto
+    # a un PARCIAL sin definir, a conteos sin ancla o a una objeción escrita es
+    # una respuesta que no se pudo leer como aprobación (ver `is_vague`).
+    out["vaga"] = is_vague(out)
+    return out
+
+
+def is_vague(check: dict | None) -> bool:
+    """¿Este chequeo objeta la lectura? Mira todo lo que dijo, no sólo la bandera.
+
+    Alcanza con cualquiera: dijo que es vaga, PARCIAL quedó sin definir, los
+    conteos quedaron sin ancla, o escribió una objeción. El error para este
+    lado es que una persona mire una lectura que estaba bien.
+    """
+    if not check:
+        return False
+    return bool(
+        check.get("vaga") is not False
+        or check.get("parcial_definido") is not True
+        or check.get("anclas_contables") is not True
+        or check.get("objeciones")
+    )
 
 
 def review_note(entry: dict | None) -> str:
@@ -317,10 +339,13 @@ def review_note(entry: dict | None) -> str:
     if state == NO_DISPONIBLE:
         return "no se pudo escribir la lectura de la regla: " + str(entry.get("motivo") or "sin detalle")
     vague = entry.get("vaguedad") or {}
-    if vague.get("vaga"):
-        return "la lectura de la regla deja algo para decidir a ojo: " + (
-            "; ".join(vague.get("objeciones") or []) or "sin detalle"
-        )
+    if is_vague(vague):
+        said = list(vague.get("objeciones") or [])
+        if vague.get("parcial_definido") is not True:
+            said.append("PARCIAL quedó sin definir")
+        if vague.get("anclas_contables") is not True:
+            said.append("hay conteos o umbrales sin unidad ni número")
+        return "la lectura de la regla deja algo para decidir a ojo: " + "; ".join(said)
     return ""
 
 
@@ -433,16 +458,30 @@ def write_readings(
             stop.set()
             raise
 
+    # El hilo que falla avisa ANTES de que su resultado quede listo, así que un
+    # criterio salteado puede terminar primero. Por eso el error se guarda y se
+    # levanta al final, y un resultado vacío se saltea: si se usara, un 400
+    # llegaría a quien mira convertido en un error de tipos.
+    failed: BaseException | None = None
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, total))) as pool:
         futures = {pool.submit(_guarded, t): t for t in tests}
         for fut in as_completed(futures):
             test = futures[fut]
-            out[test.id] = fut.result()   # una excepción sube y corta la etapa
+            try:
+                entry = fut.result()
+            except BaseException as exc:  # noqa: BLE001 -- se levanta abajo, el primero
+                failed = failed or exc
+                continue
+            if entry is None:
+                continue
+            out[test.id] = entry
             with beat:
                 done += 1
                 now = done
             logger.info("lectura %d/%d (%s): %s", now, total, test.id, out[test.id]["estado"])
             if on_done is not None:
                 on_done(now, total)
+    if failed is not None:
+        raise failed   # corta la etapa, con el error de verdad
     # En el orden del instrumento, no en el que terminaron los hilos.
     return {t.id: out[t.id] for t in tests}
