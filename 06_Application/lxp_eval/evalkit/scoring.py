@@ -30,6 +30,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,6 +206,91 @@ READING_SYSTEM = (
 )
 
 
+#: Cuántas veces se pide la lectura de una regla antes de darla por perdida.
+READING_ATTEMPTS = 2
+
+#: Las claves sin las cuales una lectura no sirve: la pregunta y los dos extremos.
+_READING_NEEDS = ("pregunta", "cumple", "no_cumple")
+
+#: Un campo de la herramienta pegado DENTRO del texto de otro: el cierre de un
+#: parámetro y la apertura del siguiente, escritos como texto (ver
+#: `_recover_glued_fields`, con el caso).
+_GLUED_FIELD = re.compile(r'</parameter>\s*<parameter name="([A-Za-z_][A-Za-z0-9_]*)">')
+_GLUED_TAIL = re.compile(r"\s*</parameter>(?:\s*</invoke>)?\s*$")
+
+
+class ReadingUnavailable(EvalkitError):
+    """No se pudo fijar la lectura de la regla de un criterio (ver `read_rule`)."""
+
+
+def _recover_glued_fields(data: dict, known: tuple[str, ...]) -> dict:
+    """Devuelve a su clave cada campo que el modelo dejó pegado dentro de otro.
+
+    EL CASO. Al volver a juzgar cuatro veces la evidencia congelada de una
+    corrida (2026-11-27) la lectura de la regla llegó vacía en 48 de 172
+    juicios de criterio. El modelo la había escrito entera. La respuesta cruda
+    de siete llamadas mostró siempre lo mismo: el valor de un campo traía, como
+    texto, el cierre de ese campo y la apertura del siguiente,
+
+        "definiciones": "...no inferido.</parameter>\n<parameter name=\"cumple\">En 3 o más pares...",
+
+    y a veces el cierre de la llamada al final (`</parameter>\n</invoke>`). La
+    clave `cumple` no llegaba como clave, `read_rule` veía que faltaba un
+    extremo y descartaba todo. En una de las siete sólo llegaron dos claves y
+    las otras cuatro venían adentro de `definiciones`.
+
+    Lo pegado vuelve a su clave sólo si esa clave es del esquema y NO llegó por
+    su cuenta: una clave que sí llegó manda, y lo pegado que la repite se
+    descarta. Lo pegado con un nombre que el esquema no conoce se descarta
+    también: no hay dónde ponerlo y no es parte del campo donde apareció.
+    """
+    out = dict(data)
+    for key, value in data.items():
+        if not isinstance(value, str) or "</parameter>" not in value:
+            continue
+        parts = _GLUED_FIELD.split(value)
+        out[key] = _GLUED_TAIL.sub("", parts[0]).strip()
+        for name, text in zip(parts[1::2], parts[2::2]):
+            if name not in known:
+                continue
+            if str(data.get(name) or "").strip() or str(out.get(name) or "").strip():
+                continue  # la clave llegó por su cuenta, o ya se recuperó: la primera manda
+            out[name] = _GLUED_TAIL.sub("", text).strip()
+    return out
+
+
+def _reading_of(response: Any) -> tuple[str, str]:
+    """(la lectura como texto, "") o ("", por qué esta respuesta no es una lectura)."""
+    try:
+        data = _extract_tool_input(response, _READING_TOOL_NAME)
+    except (ValueError, TypeError, AttributeError):
+        return "", "la respuesta no trae la herramienta de lectura"
+    if not isinstance(data, dict):
+        return "", "la respuesta no trae la herramienta de lectura"
+    fields = (
+        ("pregunta", "Qué pregunta la regla"),
+        ("definiciones", "Definiciones"),
+        ("cumple", "CUMPLE si se observa"),
+        ("parcial", "PARCIAL si se observa"),
+        ("no_cumple", "NO_CUMPLE si se observa"),
+        ("no_alcanza", "NO alcanza para decidir (es NO_EVALUADO)"),
+    )
+    data = _recover_glued_fields(data, tuple(k for k, _ in fields))
+    # Sin la pregunta y los dos extremos no hay lectura que valga la pena mandar.
+    missing = [k for k in _READING_NEEDS if not str(data.get(k) or "").strip()]
+    if missing:
+        return "", (
+            "llegó sin: " + ", ".join(missing)
+            + " (llegaron: " + (", ".join(sorted(str(k) for k in data)) or "ninguna clave") + ")"
+        )
+    lines = []
+    for key, human in fields:
+        value = str(data.get(key) or "").strip()
+        if value:
+            lines.append(f"- {human}: {value}")
+    return "\n".join(lines), ""
+
+
 def read_rule(
     test: CriterionTest, client: Any, *, model: str | None = None, context: str = "",
 ) -> str:
@@ -227,15 +313,31 @@ def read_rule(
     `context` es lo que el plan dijo que se iba a hacer y mirar; ayuda a fijar
     las definiciones sobre lo que de verdad se va a observar.
 
-    Devuelve "" si el modelo no usó la herramienta: sin lectura se juzga como
-    antes, y el chequeo de coherencia sigue estando después. Un error de la API
-    sube.
+    NUNCA devuelve una lectura vacía. Hasta el 2026-11-27 devolvía "" cuando a
+    la respuesta le faltaba la pregunta o un extremo, y quien llamaba juzgaba
+    "como antes", sin lectura y sin decirlo. Eso pasó en 48 de 172 juicios de
+    criterio de una medición sobre evidencia congelada, y no era inocuo: dos
+    pasadas del mismo criterio diferían en 21 % de los pares cuando las dos
+    tenían (o no tenían) lectura y en 58 % cuando una la tenía y la otra no, y
+    sin lectura el juez daba CUMPLE más seguido (56 % contra 44 %). Una
+    instrucción que aparece y desaparece al azar es ruido que pone el evaluador.
+
+    Ahora: lo que el modelo dejó pegado dentro de otro campo se recupera (ver
+    `_recover_glued_fields`: era la causa de las 48); si igual queda
+    incompleta se pide de nuevo, `READING_ATTEMPTS` veces en total; y si tampoco
+    sale levanta `ReadingUnavailable` con lo que faltó, para que quien llama
+    decida a la vista (el servicio deja el criterio NO_EVALUADO con esa causa,
+    ver `JobRunner._score_cells`).
+
+    El pedido repetido es por una RESPUESTA incompleta, no por un error: un
+    error de la API (un 400, un 401) sube en el primer intento, sin reintento
+    acá. Los transitorios ya los reintenta service/retry.py por debajo.
     """
     if model is None:
         from ..config import CONFIG
 
         model = CONFIG.model_heavy
-    response = client.messages.create(
+    request = dict(
         model=model,
         max_tokens=2500,
         system=[{"type": "text", "text": READING_SYSTEM, "cache_control": {"type": "ephemeral"}}],
@@ -249,28 +351,15 @@ def read_rule(
         tools=[READING_TOOL],
         tool_choice={"type": "tool", "name": _READING_TOOL_NAME},
     )
-    try:
-        data = _extract_tool_input(response, _READING_TOOL_NAME)
-    except (ValueError, TypeError, AttributeError):
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    lines = []
-    for key, human in (
-        ("pregunta", "Qué pregunta la regla"),
-        ("definiciones", "Definiciones"),
-        ("cumple", "CUMPLE si se observa"),
-        ("parcial", "PARCIAL si se observa"),
-        ("no_cumple", "NO_CUMPLE si se observa"),
-        ("no_alcanza", "NO alcanza para decidir (es NO_EVALUADO)"),
-    ):
-        value = str(data.get(key) or "").strip()
-        if value:
-            lines.append(f"- {human}: {value}")
-    # Sin la pregunta y los dos extremos no hay lectura que valga la pena mandar.
-    if not all(str(data.get(k) or "").strip() for k in ("pregunta", "cumple", "no_cumple")):
-        return ""
-    return "\n".join(lines)
+    why = ""
+    for _ in range(READING_ATTEMPTS):
+        reading, why = _reading_of(client.messages.create(**request))
+        if reading:
+            return reading
+    raise ReadingUnavailable(
+        f"la lectura de la regla de {test.id} no se pudo fijar en "
+        f"{READING_ATTEMPTS} intentos: {why}"
+    )
 
 _CHECK_TOOL_NAME = "emitir_chequeo"
 

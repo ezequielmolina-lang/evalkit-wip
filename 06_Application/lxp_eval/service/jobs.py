@@ -379,7 +379,9 @@ class Engine:
     #: gasta exploraciones; se puede apagar con EVALKIT_RECORRIDO_DIRIGIDO=0.
     plan_revisit: bool = os.getenv("EVALKIT_RECORRIDO_DIRIGIDO", "1") != "0"
     #: La lectura de la regla, una por criterio, que reciben todas sus pruebas
-    #: (ver scoring.read_rule). None = se juzga sin ella, como antes.
+    #: (ver scoring.read_rule). None = se juzga sin ella, a propósito. Con un
+    #: lector puesto, una lectura que no sale NO es lo mismo: ese criterio
+    #: queda NO_EVALUADO con su causa (ver `_score_cells`).
     read_rule: Callable[..., Any] | None = staticmethod(scoring_mod.read_rule)
     repair_probe: Callable[..., Any] = staticmethod(repair_mod.propose_repair)
     #: Qué consejo revisa las pruebas que salen de un plan aprobado: "reducido"
@@ -2101,11 +2103,37 @@ class JobRunner:
             decision = next(
                 (d for d in record.strategy if str(d.get("id")) == test.id), {}
             )
-            reading = str(await asyncio.to_thread(
-                self.engine.read_rule, test, client,
-                model=self.engine.model,
-                context=str(decision.get("que_se_prueba") or ""),
-            ) or "")
+            # SIN LECTURA NO SE PUNTÚA EN SILENCIO. Hasta el 2026-11-27 una
+            # lectura vacía dejaba pasar el criterio "como antes": se juzgaba
+            # sin ella y nada lo decía. En una medición sobre evidencia
+            # congelada eso pasó en 48 de 172 juicios de criterio, y el mismo
+            # criterio daba otro veredicto según le hubiera tocado lectura o
+            # no (ver scoring.read_rule, con los números). Un veredicto sacado
+            # con otro instrumento no es comparable con los demás, así que no
+            # se publica: el criterio queda NO_EVALUADO con su causa, que es
+            # una falla nuestra (`_BUG_CAUSES`) y el informe la nombra arriba.
+            # Las pruebas quedan en el ledger; volver a puntuar las juzga.
+            #
+            # Sólo la lectura que falta. Un error de la API sube como siempre.
+            why = ""
+            try:
+                reading = str(await asyncio.to_thread(
+                    self.engine.read_rule, test, client,
+                    model=self.engine.model,
+                    context=str(decision.get("que_se_prueba") or ""),
+                ) or "")
+            except scoring_mod.ReadingUnavailable as exc:
+                reading, why = "", str(exc)
+            if not reading.strip():
+                return unscored(
+                    "no se pudo leer la regla",
+                    f"no se juzgó ninguna de las {len(to_judge)} prueba(s) completa(s) "
+                    "de este criterio: la lectura de su regla, que todas reciben "
+                    "igual, no se pudo fijar"
+                    + (f" ({why})" if why else " (el lector devolvió una lectura vacía)")
+                    + ". Juzgar sin ella daría un veredicto que no se puede "
+                    "comparar con los demás. La evidencia está en el ledger.",
+                )
 
         def label_of(p: Any) -> str:
             cell = (by_id.get(p.probe_id) or {}).get("celda") or {}
@@ -2347,6 +2375,9 @@ _CAUSE_OF = {
 _BUG_CAUSES = frozenset({
     "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
     "evidencia insuficiente", "juicio en duda",
+    # La lectura de la regla no salió ni al segundo pedido (ver
+    # scoring.read_rule): el criterio tenía evidencia y no se juzgó.
+    "no se pudo leer la regla",
     # La ausencia de algo no se pudo afirmar porque faltó cobertura (una sola
     # prueba, o un lugar sin recorrer): es nuestra, se arregla mirando más.
     "ausencia sin cobertura",

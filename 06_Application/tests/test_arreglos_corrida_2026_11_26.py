@@ -611,7 +611,15 @@ def test_the_rule_is_read_once_and_comes_back_as_text():
 
 
 def test_a_reading_without_the_question_and_both_ends_is_no_reading():
-    assert scoring.read_rule(_test_obj(), _ClienteQueRepara({"verdict": "CUMPLE"}), model="m") == ""
+    """Y ya no vuelve como "": eso dejaba juzgar sin lectura (ver test_lectura_de_la_regla.py)."""
+    client = _ClienteQueRepara({"verdict": "CUMPLE"})
+    try:
+        scoring.read_rule(_test_obj(), client, model="m")
+    except scoring.ReadingUnavailable as exc:
+        assert "pregunta" in str(exc)
+    else:
+        raise AssertionError("una respuesta sin la pregunta ni los extremos no es una lectura")
+    assert len(client.calls) == scoring.READING_ATTEMPTS
 
 
 def test_every_probe_of_a_criterion_gets_the_same_reading(tmp_path):
