@@ -2245,6 +2245,14 @@ class JobRunner:
                     "evidencia puede leer una regla distinto."
                 )
             causes = _causes_of(record.report)
+            # CUÁNTO SE DECLINÓ PUNTUAR, y por qué. El recuento por causa de
+            # abajo cuenta TODOS los NO_EVALUADO, incluidos los que el plan ya
+            # había dejado afuera (un documento, un estudio). Esto mira sólo
+            # los criterios que tenían prueba: los que el evaluador fue a
+            # medir y no puntuó. Con la lectura congelada y su compuerta es
+            # barato quedarse sin puntuar, y "lo hicimos reproducible" no puede
+            # querer decir en silencio "dejamos de responder".
+            record.report["meta"]["cobertura"] = _coverage(record.report, set(by_test))
             bugs = {k: v for k, v in causes.items() if k in _BUG_CAUSES}
             record.report.setdefault("meta", {})["causasNoEvaluado"] = causes
             record.report["meta"]["gastoPorEtapa"] = dict(record.spend_by_stage)
@@ -2755,6 +2763,51 @@ def _is_browser_error(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError):
         return True
     return (type(exc).__module__ or "").startswith("playwright")
+
+
+#: Las causas de NO_EVALUADO que vienen del contrato de la lectura congelada
+#: (ver evalkit/lectura.py): sin él, esos criterios se habrían juzgado.
+_READING_CAUSES = frozenset({
+    lectura_mod.SIN_ADJUDICAR, lectura_mod.VENCIDA, lectura_mod.SIN_TIPO, lectura_mod.NO_LEIDA,
+})
+
+
+def _coverage(report: dict | None, tested: set[str]) -> dict:
+    """De los criterios que tenían prueba, cuántos quedaron con veredicto y cuántos no, por causa.
+
+    `tested` son los criterios con al menos una prueba para ejecutar. La
+    cuenta va en números enteros ("x de n"), no en porcentajes: con veinte
+    criterios un porcentaje esconde que se habla de dos.
+    """
+    import re
+
+    rows = (report or {}).get("rows") or []
+    mine = [r for r in rows if r.get("id") in tested]
+    unscored: dict[str, int] = {}
+    for r in mine:
+        if r.get("verdict") != scoring_mod.NO_EVALUADO:
+            continue
+        m = re.match(r"\[causa: ([^\]]+)\]", str(r.get("rationale") or ""))
+        cause = m.group(1) if m else "sin causa registrada"
+        unscored[cause] = unscored.get(cause, 0) + 1
+    declined = sum(unscored.values())
+    by_reading = sum(n for cause, n in unscored.items() if cause in _READING_CAUSES)
+    detail = ", ".join(f"{cause} {n}" for cause, n in sorted(unscored.items()))
+    line = (
+        f"De {len(mine)} criterio(s) con prueba, {len(mine) - declined} quedaron con "
+        f"veredicto y {declined} de {len(mine)} sin puntuar"
+        + (f" ({detail})" if detail else "")
+        + (f". Por la lectura de la regla: {by_reading}." if by_reading else ".")
+    )
+    return {
+        "criterios": len(rows),
+        "con_prueba": len(mine),
+        "con_veredicto": len(mine) - declined,
+        "sin_puntuar": declined,
+        "sin_puntuar_por_causa": unscored,
+        "por_la_lectura": by_reading,
+        "linea": line,
+    }
 
 
 def _causes_of(report: dict | None) -> dict[str, int]:

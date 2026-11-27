@@ -501,3 +501,59 @@ def test_a_frozen_reading_without_an_end_is_a_replay_error(tmp_path, env):  # no
     path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(replay.ReplayError):
         replay.frozen_readings(store.dir_of(job_id))
+
+
+# --- Tarea 7: NO_EVALUADO por causa, y cuánto se declinó puntuar --------------
+
+
+def _un_criterio_sin_acuerdo(tmp_path):
+    """El primer criterio probado no sale igual dos veces; los demás sí."""
+    caja = {}
+
+    def compare(test, readings, client, *, model=None):
+        caja.setdefault("primero", test.id)
+        igual = test.id != caja["primero"]
+        return {"equivalentes": igual, "diferencias": "" if igual else "otro umbral"}
+
+    lector = _Lector()
+    vistas: list[str] = []
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True, read_rule=lector, score_test=_juez_que_anota(vistas),
+        compare_readings=compare, check_verdicts=lambda *a, **k: {"ok": True, "motivo": ""},
+    )
+    return store, engine, job_id, lector, caja
+
+
+def test_reporta_no_evaluado_por_causa_y_cobertura(tmp_path, env):  # noqa: F811
+    """Que el contrato haga más reproducible el juicio no puede querer decir, en silencio, que se juzga menos."""
+    store, engine, job_id, lector, caja = _un_criterio_sin_acuerdo(tmp_path)
+    _generar(store, engine, job_id)
+    _aprobar(store, job_id)
+    lector.permitido = False
+    record = _puntuar(store, engine, job_id)
+    probados = _probados(record)
+    if len(probados) < 2:
+        pytest.skip("este plan de prueba tiene un solo criterio probado")
+
+    meta = record.report["meta"]
+    cobertura = meta["cobertura"]
+    assert cobertura["con_prueba"] == len(probados)
+    assert cobertura["con_veredicto"] == len(probados) - 1
+    assert cobertura["sin_puntuar"] == 1
+    assert cobertura["sin_puntuar_por_causa"] == {"lectura sin adjudicar": 1}
+    assert cobertura["por_la_lectura"] == 1, "cuánto de lo no puntuado es por el contrato de la lectura"
+    assert cobertura["criterios"] == len(record.report["rows"])
+    assert meta["causasNoEvaluado"]["lectura sin adjudicar"] == 1, "y sigue en el recuento por causa de siempre"
+    assert f"1 de {len(probados)}" in cobertura["linea"] and "lectura sin adjudicar" in cobertura["linea"]
+
+
+def test_the_coverage_is_reported_with_the_contract_off_too(tmp_path, env):  # noqa: F811
+    """La base para comparar: con el contrato apagado el informe trae la misma cuenta."""
+    store, engine, job_id, _, _ = _armar(tmp_path, frozen_readings=False)
+    _correr(store, engine, job_id)
+    record = store.get(job_id)
+    cobertura = record.report["meta"]["cobertura"]
+
+    assert cobertura["con_prueba"] == len(_probados(record)) == cobertura["con_veredicto"]
+    assert cobertura["sin_puntuar"] == 0 and cobertura["por_la_lectura"] == 0
+    assert cobertura["sin_puntuar_por_causa"] == {}
