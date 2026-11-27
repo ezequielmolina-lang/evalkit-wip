@@ -12,7 +12,7 @@ El modelo SÍ había escrito la lectura entera. La respuesta cruda de siete
 llamadas mostró siempre lo mismo: dentro del texto de un campo venía pegado el
 cierre de ese campo y la apertura del siguiente,
 
-    "definiciones": "...no inferido.</parameter>\n<parameter name=\"cumple\">En 3 o más pares...",
+    "definiciones": "...no inferido de documentación.</parameter>\n<parameter name=\"cumple\">En 3 o más pares...",
 
 así que `cumple` no llegaba como clave, `read_rule` veía que faltaba un extremo
 y devolvía "". Estas pruebas fijan las tres cosas que cambian: lo que vino

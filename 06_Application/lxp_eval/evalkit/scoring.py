@@ -232,7 +232,7 @@ def _recover_glued_fields(data: dict, known: tuple[str, ...]) -> dict:
     de siete llamadas mostró siempre lo mismo: el valor de un campo traía, como
     texto, el cierre de ese campo y la apertura del siguiente,
 
-        "definiciones": "...no inferido.</parameter>\n<parameter name=\"cumple\">En 3 o más pares...",
+        "definiciones": "...no inferido de documentación.</parameter>\n<parameter name=\"cumple\">En 3 o más pares...",
 
     y a veces el cierre de la llamada al final (`</parameter>\n</invoke>`). La
     clave `cumple` no llegaba como clave, `read_rule` veía que faltaba un
