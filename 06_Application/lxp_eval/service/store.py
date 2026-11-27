@@ -133,8 +133,50 @@ class JobRecord:
     #: applies` exists to stop -- and would erase the divergence itself, which
     #: is the finding. So both are carried, and a reader can see the gap.
     executed_steps: dict[str, list[str]] = field(default_factory=dict)
+    #: probe_id -> {run_index, motivo, reparacion}: las pruebas que se cortaron
+    #: en el primer intento y llegaron al final en el segundo (ver
+    #: JobRunner._retry_cut). `run_index` es el del intento que vale: la
+    #: evidencia del intento cortado queda en el ledger, para auditar, y deja
+    #: de ser base de un veredicto. `reparacion` dice qué se corrigió en los
+    #: pasos; vacío si se corrió de nuevo con los mismos.
+    retried: dict[str, dict] = field(default_factory=dict)
+    #: EL PLAN QUE UNA PERSONA APRUEBA ANTES DE QUE SE REDACTE UNA PRUEBA.
+    #: `strategy` es la decisión del planificador por criterio, ya cerrada con el
+    #: muestreo; `sampling_matrix`, la matriz tal como la propuso el muestreo;
+    #: `plan_document`, dónde quedó el documento (versión, archivos, conteos); y
+    #: `plan_corrections`, lo que la persona corrigió ("eso existe, está acá"),
+    #: como datos que el replaneo consume. Ver evalkit/planner.py.
+    strategy: list[dict] = field(default_factory=list)
+    #: EL ALCANCE (ver evalkit/usage.py). `usage` es el modelo de uso y el
+    #: contexto que declaró el config de la plataforma cuando se hizo el plan:
+    #: quién hace qué (plataforma o docente) y de qué país y materia son los
+    #: hechos. `scope` es la clasificación de cada criterio contra esa
+    #: declaración. Se guardan en el trabajo para que el plan, la redacción y
+    #: el informe lean una sola verdad, y para que un config que cambie
+    #: después no reescriba un plan que una persona ya aprobó.
+    usage: dict = field(default_factory=dict)
+    scope: list[dict] = field(default_factory=list)
+    sampling_matrix: dict = field(default_factory=dict)
+    plan_document: dict = field(default_factory=dict)
+    plan_corrections: list[dict] = field(default_factory=list)
+    #: Lo que agregó la corrida completa del 2026-11-25 (50 pruebas cortadas,
+    #: USD 73,7 sin saber en qué etapa se fueron):
+    #: `content_inventory`, las rutas del menú hasta cada contenido navegable
+    #: (ver evalkit/inventory.py): de ahí salen los temas del muestreo;
+    #: `probe_preamble`, pasos que se ejecutan antes de CADA prueba (crear un
+    #: estudiante nuevo, por ejemplo) para que una prueba no herede el estado
+    #: que dejó la anterior; y `spend_by_stage`, el gasto separado por etapa.
+    content_inventory: list[dict] = field(default_factory=list)
+    probe_preamble: list[str] = field(default_factory=list)
+    spend_by_stage: dict = field(default_factory=dict)
     #: The reviewed plan exactly as the human approved it.
     approved_plan: dict | None = None
+    #: criterio -> su registro de lectura (ver evalkit/lectura.py): las
+    #: muestras escritas al generar, si coincidieron, y en qué estado quedó.
+    #: Vacío en un trabajo hecho con el contrato de la lectura congelada
+    #: apagado, y en todos los anteriores a él: esos se puntúan con la lectura
+    #: generada en el momento, como siempre.
+    readings: dict = field(default_factory=dict)
     approved_at: str = ""
     report: dict | None = None
 

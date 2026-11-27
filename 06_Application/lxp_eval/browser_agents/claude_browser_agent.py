@@ -22,6 +22,7 @@ million tokens).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -34,7 +35,11 @@ from anthropic import Anthropic, APIError
 
 from ..config import CONFIG
 from ..evalkit import pricing as _pricing
-from .playwright_driver import PlaywrightDriver
+from .playwright_driver import (
+    HumanVerificationRequired,
+    OffPlatformNavigation,
+    PlaywrightDriver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +83,21 @@ class AgentRunResult:
     #: not "I called done to explain that I could not do this".
     accomplished: bool | None = None
     done_reason: str = ""
+    #: El paso estaba marcado [SI APARECE] y lo que nombra no apareció (ver
+    #: agent_driver.STEP_DONE_TOOL). No es un fallo ni un éxito.
+    not_present: bool = False
+    #: El paso se cumplió por un camino distinto del escrito, y cuál (ver
+    #: agent_driver.STEP_DONE_TOOL, campo `desvio`). Vacío = se hizo tal cual.
+    deviation: str = ""
+    #: Lo que el agente informó con una herramienta de cierre propia (hoy,
+    #: `describe_platform` del recorrido). None = no informó nada.
+    report: dict[str, Any] | None = None
+    #: Las partes y los comportamientos que el explorador registró MIENTRAS
+    #: recorría (`record_part`, `record_behavior`), cada uno con la captura que
+    #: el código tomó en ese momento. Sobreviven aunque la exploración termine
+    #: sin informe: lo visto y capturado no se pierde por quedarse sin turnos.
+    parts: list[dict[str, Any]] = field(default_factory=list)
+    behaviors: list[dict[str, Any]] = field(default_factory=list)
     transcript: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,6 +293,10 @@ def read_only_tools() -> list[dict[str, Any]]:
 # ----------------------------------------------------------------------
 
 
+#: Con cuántos turnos por delante se le avisa a un encargo con cierre
+#: obligatorio (ver `ClaudeBrowserAgent.run`) que tiene que informar.
+CLOSING_WARNING_TURNS = 4
+
 #: Anthropic rejects images whose longest edge exceeds this many pixels.
 _API_IMAGE_MAX_PX = 8000
 
@@ -364,8 +388,8 @@ class ClaudeBrowserAgent:
         model: str | None = None,
         max_iterations: int = 25,
         cost_cap_usd: float = 5.0,
-        price_per_m_input: float = DEFAULT_PRICE_PER_M_INPUT,
-        price_per_m_output: float = DEFAULT_PRICE_PER_M_OUTPUT,
+        price_per_m_input: float | None = None,
+        price_per_m_output: float | None = None,
         transcript_dir: Path | None = None,
     ) -> None:
         self.driver = driver
@@ -377,6 +401,19 @@ class ClaudeBrowserAgent:
         # `accomplished` field. Sending the module global unconditionally would
         # make that swap silently inert.
         self.tools = self.tools_default()
+        # La herramienta con la que un encargo TIENE que cerrar, o None. Ver
+        # `run`: con esto puesto, quedarse sin turnos ya no pierde lo hecho.
+        self.closing_tool: str | None = None
+        # Cuánto puede escribir el modelo por turno. 2048 alcanza para un paso
+        # (una acción y un `done`); un informe del recorrido necesita más, y
+        # `AgentDriver.explore` lo sube mientras dura la exploración.
+        self.max_tokens = 2048
+        # Cuánto esfuerzo se le pide al modelo (`output_config.effort`), o None
+        # para no mandarlo. Lo pone `AgentDriver.do` mientras dura un paso: ver
+        # ahí por qué un paso no necesita el esfuerzo por defecto.
+        self.effort: str | None = None
+        # None = el precio del modelo que se esté usando (pricing.prices_for).
+        # Un valor explícito manda, para quien corre con una tarifa propia.
         self.price_per_m_input = price_per_m_input
         self.price_per_m_output = price_per_m_output
         self.transcript_dir = transcript_dir
@@ -411,9 +448,31 @@ class ClaudeBrowserAgent:
 
         assert self.client is not None
 
+        # EL CIERRE OBLIGATORIO. La primera exploración en vivo (2026-11-25) usó
+        # sus 30 turnos mirando -- y mirando bien -- y nunca informó: lo que vio
+        # se perdió y costó USD 1,76 averiguarlo. Un encargo cuyo producto es un
+        # informe no puede depender de que el modelo decida informar a tiempo.
+        # Con `closing_tool` puesto se le avisa cuando le quedan pocos turnos y,
+        # en el último, esa herramienta es la única respuesta posible.
+        #
+        # NO se usa para un paso de una prueba (`AgentDriver.do` lo deja en
+        # None): forzarle un `done` a un paso que no terminó sería inventarle un
+        # resultado, y ese paso tiene que seguir fallando ruidosamente.
+        closing = getattr(self, "closing_tool", None)
+        nudged = False
+
         for iteration in range(self.max_iterations):
             result.turns = iteration + 1
             logger.info("Claude turn %d / %d", result.turns, self.max_iterations)
+            remaining = self.max_iterations - result.turns
+            forced: dict[str, Any] = {}
+            if closing and remaining == 0:
+                forced = {"tool_choice": {"type": "tool", "name": closing}}
+            effort = getattr(self, "effort", None)
+            if effort:
+                # Por `extra_body` y no como argumento: el SDK instalado puede
+                # ser anterior a `output_config`, y así el pedido sale igual.
+                forced["extra_body"] = {"output_config": {"effort": effort}}
 
             try:
                 # PROMPT CACHING. This loop runs up to 20 turns per step and
@@ -430,7 +489,7 @@ class ClaudeBrowserAgent:
                 # re-processing it.
                 response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=2048,
+                    max_tokens=getattr(self, "max_tokens", 2048),
                     system=[{
                         "type": "text",
                         "text": system,
@@ -438,6 +497,7 @@ class ClaudeBrowserAgent:
                     }],
                     tools=self.tools,
                     messages=_with_cache_breakpoint(messages),
+                    **forced,
                 )
             except APIError as e:
                 logger.error("Claude API error on turn %d: %s", result.turns, e)
@@ -485,12 +545,50 @@ class ClaudeBrowserAgent:
                         "name": getattr(block, "name", ""),
                         "input": getattr(block, "input", {}),
                     })
+                elif btype in ("thinking", "redacted_thinking"):
+                    # LOS BLOQUES DE PENSAMIENTO VUELVEN TAL CUAL. Con Opus 4.8
+                    # este agente no los recibía (no pide pensar). Sonnet 5.5 y
+                    # Haiku 5.5 piensan por defecto y la API espera el bloque,
+                    # sin tocar, en el turno siguiente; este bucle reconstruía
+                    # el turno sólo con texto y herramientas y lo habría
+                    # perdido. Van en su lugar, en el orden en que llegaron.
+                    assistant_content.append(_block_as_dict(block))
             messages.append({"role": "assistant", "content": assistant_content})
 
             if text_blocks:
                 logger.info("Claude said: %s", " | ".join(t.strip()[:200] for t in text_blocks if t.strip()))
 
             stop_reason = getattr(response, "stop_reason", None)
+
+            if stop_reason == "refusal":
+                # Los modelos nuevos pueden negarse con un 200 y este motivo.
+                # Sin esta rama caía en "no llamó herramientas" y el paso se
+                # cortaba con "terminó sin declarar", que no dice qué pasó.
+                details = getattr(response, "stop_details", None)
+                category = getattr(details, "category", None) or "sin categoría"
+                logger.error("el modelo se negó a seguir (categoría: %s)", category)
+                result.blocked = True
+                result.block_reason = f"el modelo se negó a seguir (refusal: {category})"
+                break
+
+            if (
+                not tool_uses and not nudged and stop_reason == "end_turn"
+                and assistant_content and remaining > 0
+                and any(t.get("name") == "done" for t in self.tools)
+            ):
+                # CERRÓ HABLANDO EN VEZ DE LLAMAR A `done`. En la prueba de la
+                # API con Sonnet 5.5 (2026-11-25), ante un botón deshabilitado
+                # el modelo explicó en texto por qué no podía y terminó el
+                # turno. Para este bucle eso es "terminó sin declarar": un paso
+                # cortado sin motivo legible, o peor, un paso HECHO que se da
+                # por no hecho. Se le pide una vez que lo diga con `done`.
+                nudged = True
+                messages.append({"role": "user", "content": (
+                    "No llamaste a ninguna herramienta. Si el paso ya ocurrió o "
+                    "no se puede hacer, cerralo ahora llamando a `done` y decí "
+                    "cuál de las dos cosas pasó."
+                )})
+                continue
 
             if not tool_uses:
                 # No tools called — Claude is done talking. Treat as soft end.
@@ -532,7 +630,33 @@ class ClaudeBrowserAgent:
                 if is_done:
                     done_requested = True
 
+            if closing and not done_requested and remaining == CLOSING_WARNING_TURNS:
+                # Va DESPUÉS de los resultados de herramientas, en el mismo
+                # mensaje: la API exige que los tool_result vayan primero.
+                tool_results.append({
+                    "type": "text",
+                    "text": (
+                        f"Te quedan {remaining} turnos. Terminá lo que estás "
+                        f"mirando e informá con `{closing}` todo lo que viste "
+                        "hasta ahora. Si te quedás sin turnos sin informar, lo "
+                        "que viste se pierde."
+                    ),
+                })
+
             messages.append({"role": "user", "content": tool_results})
+
+            if done_requested and stop_reason == "max_tokens" and result.report is not None:
+                # UN INFORME CORTADO NO ES UN INFORME. La salida se truncó en
+                # el límite: llegó lo primero que el modelo escribió y se
+                # perdió el resto. En vivo (2026-11-25) quedó la entrada y
+                # desapareció la lista de partes, y se aceptó sin decir nada.
+                result.report = None
+                result.accomplished = None
+                result.blocked = True
+                result.block_reason = (
+                    "el informe se cortó por el límite de salida del modelo"
+                )
+                break
 
             if done_requested:
                 logger.info("Claude called `done` — ending loop")
@@ -560,12 +684,28 @@ class ClaudeBrowserAgent:
         d = self.driver
         if name == "navigate":
             url = args.get("url", "")
-            final = await d.navigate(url)
+            try:
+                final = await d.navigate(url)
+            except OffPlatformNavigation as exc:
+                # El driver se negó: no es una dirección de la plataforma. Se
+                # le dice al modelo en limpio, para que cierre el paso en
+                # lugar de probar otra dirección inventada.
+                return (
+                    f"NAVEGACIÓN RECHAZADA: {exc.text} No inventes direcciones. "
+                    "Si el paso no se puede hacer dentro de la plataforma, "
+                    "terminá diciendo que no se pudo y por qué."
+                ), False
             return f"Navigated. Current URL: {final}", False
 
         if name == "click":
             desc = args.get("element_description", "")
-            ok = await d.click_element_description(desc)
+            try:
+                ok = await d.click_element_description(desc)
+            except HumanVerificationRequired as exc:
+                return (
+                    f"CLIC RECHAZADO: {exc.text} Terminá el paso diciendo que "
+                    "no se pudo por una verificación de humano."
+                ), False
             if ok:
                 return f"Clicked {desc!r}. Current URL: {await d.get_url()}", False
             return f"Click on {desc!r} FAILED — element not found. Read the page and try a different label.", False
@@ -617,6 +757,66 @@ class ClaudeBrowserAgent:
             result.observations.append(obs)
             return f"Observation recorded: {obs.test_id} = {obs.status}", False
 
+        if name in ("record_part", "record_behavior"):
+            # LA CAPTURA LA TOMA EL CÓDIGO, en el momento del registro. Si la
+            # pidiera el modelo por separado habría partes sin captura y capturas
+            # de otra pantalla; así, una parte registrada ES una pantalla que
+            # estuvo abierta, con sus bytes hasheados. Es lo que el documento del
+            # plan le muestra a quien lo aprueba.
+            kind = "parte" if name == "record_part" else "comportamiento"
+            bucket = result.parts if name == "record_part" else result.behaviors
+            entry = {
+                k: str(v).strip() for k, v in args.items() if str(v or "").strip()
+            }
+            if not entry.get("nombre"):
+                return f"REGISTRO RECHAZADO: falta `nombre` de {kind}.", False
+            n = len(result.parts) + len(result.behaviors) + 1
+            try:
+                path = await d.screenshot(f"recon_{kind}_{n:02d}")
+            except Exception as exc:  # noqa: BLE001 -- sin captura no hay registro
+                return (
+                    f"REGISTRO RECHAZADO: no se pudo capturar la pantalla ({exc}). "
+                    "Volvé a intentarlo con la pantalla abierta."
+                ), False
+            entry["captura"] = Path(path).name
+            try:
+                entry["sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except OSError:
+                entry["sha256"] = ""
+            try:
+                entry["url"] = str(await d.get_url())
+            except Exception:  # noqa: BLE001 -- la dirección es un extra
+                pass
+            # EL ÁRBOL DE LA PANTALLA, ENTERO. De acá sale la frontera del
+            # recorrido (qué entradas hay en esta pantalla, las haya mencionado
+            # el modelo o no) y la firma del estado. Se guarda al lado de la
+            # captura: es la otra mitad de la evidencia de esta parte.
+            try:
+                from ..evalkit.frontier import enumerate_entries, state_signature
+
+                tree = await d.read_page(max_chars=None)
+                text_path = Path(path).with_suffix(".txt")
+                text_path.write_text(tree or "", encoding="utf-8")
+                entry["texto"] = text_path.name
+                entry["firma"] = state_signature(tree or "", entry.get("url", ""))
+                if name == "record_part":
+                    entry["entradas_en_pantalla"] = enumerate_entries(tree or "")
+            except Exception:  # noqa: BLE001 -- sin árbol hay parte, sin frontera
+                logger.debug("no pude leer el árbol de la parte registrada", exc_info=True)
+            bucket.append(entry)
+            return [
+                _image_block_for_api(path),
+                {"type": "text", "text": f"Registrado ({kind} {len(bucket)}): {entry['nombre']}"},
+            ], False
+
+        if name == "describe_platform":
+            # El cierre de una exploración (ver agent_driver.EXPLORE_REPORT_TOOL):
+            # lo que el agente vio, estructurado. Termina el bucle como `done`.
+            result.report = dict(args)
+            result.accomplished = True
+            result.summary = result.summary or "plataforma descrita"
+            return "Acknowledged.", True
+
         if name == "done":
             # `accomplished`/`reason` come from the per-step tool schema
             # (agent_driver.STEP_DONE_TOOL); `summary` from the whole-task one.
@@ -625,6 +825,10 @@ class ClaudeBrowserAgent:
             result.done_reason = reason
             if "accomplished" in args:
                 result.accomplished = bool(args["accomplished"])
+                result.not_present = bool(args.get("no_aparecio")) and not result.accomplished
+                result.deviation = (
+                    str(args.get("desvio") or "").strip() if result.accomplished else ""
+                )
             else:
                 # Whole-task `done` cannot express failure, so it can only mean
                 # "the loop ended cleanly" -- never "the step really happened".
@@ -660,9 +864,14 @@ class ClaudeBrowserAgent:
         The arithmetic lives in `evalkit.pricing.cost_usd`; this keeps its own
         signature and prices so every existing caller is undisturbed.
         """
+        price_in, price_out, price_read = _pricing.prices_for(getattr(self, "model", None))
+        if getattr(self, "price_per_m_input", None) is not None:
+            price_in, price_read = self.price_per_m_input, None
+        if getattr(self, "price_per_m_output", None) is not None:
+            price_out = self.price_per_m_output
         return _pricing.cost_usd(
             in_tok, out_tok, cache_read, cache_write,
-            price_in=self.price_per_m_input, price_out=self.price_per_m_output,
+            price_in=price_in, price_out=price_out, price_cache_read=price_read,
         )
 
     def _maybe_save_transcript(self, result: AgentRunResult) -> None:
@@ -691,6 +900,16 @@ def _short_json(obj: Any, n: int = 120) -> str:
     except Exception:  # noqa: BLE001
         s = str(obj)
     return s if len(s) <= n else s[:n] + "…"
+
+
+def _block_as_dict(block: Any) -> dict:
+    """Un bloque de la respuesta, como el diccionario que la API devolvió."""
+    if isinstance(block, dict):
+        return dict(block)
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        return dump(exclude_none=True)
+    return {k: v for k, v in vars(block).items() if v is not None}
 
 
 def _safe_messages(messages: list[Any]) -> list[Any]:

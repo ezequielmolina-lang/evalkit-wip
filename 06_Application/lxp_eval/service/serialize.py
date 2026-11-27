@@ -98,6 +98,67 @@ def criteria_out(criteria: list[dict]) -> list[dict]:
     return [{**c, "source": _source_out(c.get("source"))} for c in criteria]
 
 
+#: El esquema del plan aprobado cuando trae lecturas congeladas (ver
+#: `with_frozen_readings`). Un plan aprobado sin la clave `esquema` es anterior:
+#: no trae lecturas y se puntúa con la lectura generada en el momento.
+PLAN_SCHEMA = 2
+
+
+def readings_out(readings: dict | None) -> list[dict]:
+    """Las lecturas de un trabajo como las ve la web, en el orden en que se guardaron."""
+    from ..evalkit import lectura as lectura_mod
+
+    return [lectura_mod.public_view(cid, entry) for cid, entry in (readings or {}).items()]
+
+
+def with_frozen_readings(plan: dict, record: Any) -> dict:
+    """El plan aprobado, con las lecturas congeladas si el trabajo las tiene.
+
+    Va en la misma instantánea que las pruebas y los criterios, que es la que
+    se guarda y se hashea en el ledger al aprobar: lo que una persona aprobó
+    incluye la lectura con la que se va a juzgar. Las huellas se calculan con
+    el texto de los criterios DEL PLAN, que es el que después recibe el juez.
+    Un trabajo sin lecturas (contrato apagado, o anterior a él) sale igual que
+    entró, sin la clave: se puntúa con la lectura generada en el momento.
+    """
+    readings = getattr(record, "readings", None) or {}
+    if not readings:
+        return plan
+    from ..evalkit import lectura as lectura_mod
+
+    criteria = criteria_from_plan(
+        plan.get("criteria") or criteria_out(record.criteria), record.objective
+    )
+    # QUÉ EVIDENCIA PIDE CADA CRITERIO, según las pruebas TAL COMO SE APRUEBAN.
+    # Quien aprueba puede cambiar qué guarda una prueba (`capture`); lo que
+    # corre es lo editado, o lo guardado si no se tocó (igual que
+    # `probe_from_plan`). Si la compuerta pidiera lo que se había redactado,
+    # una prueba que guardó justo lo aprobado quedaría sin juzgar.
+    # Sólo las pruebas que QUEDARON en el plan: la que quien revisa sacó no
+    # corre, así que tampoco decide qué evidencia pide el criterio. (Esta
+    # lista es lo que el criterio declara y entra en su huella; al puntuar,
+    # cada prueba se compara con lo que ella misma guarda.)
+    sent_back = plan.get("probes")
+    edited = {
+        e.get("probeId"): e for e in (sent_back or [])
+        if isinstance(e, dict) and e.get("probeId")
+    }
+    approved: dict[str, list] = {}
+    for stored in getattr(record, "probes", None) or []:
+        if isinstance(sent_back, list) and stored.get("probeId") not in edited:
+            continue
+        change = edited.get(stored.get("probeId")) or {}
+        approved.setdefault(stored.get("criterionId"), []).append(
+            {"capture": change.get("capture") or stored.get("capture")}
+        )
+    plan["lecturas"] = lectura_mod.freeze(
+        readings, criteria.all_tests(),
+        artifacts={cid: lectura_mod.required_artifacts(own) for cid, own in approved.items()},
+    )
+    plan["esquema"] = PLAN_SCHEMA
+    return plan
+
+
 def criteria_from_plan(plan_criteria: list[dict], name: str) -> Criteria:
     """The approved criteria as a `Criteria`, OBSERVABLE ONLY.
 
@@ -164,6 +225,11 @@ def probe_to_dict(generated) -> dict:
         "councilSha": prov.council_fingerprint,
         "drafterSha": prov.drafter_fingerprint,
         "requiresSignoff": prov.requires_human_signoff,
+        # `requiresSignoff` pide la contrafirma del aviso al proveedor; `holdsRun`
+        # dice, además, que la prueba NO corre sin esa firma. Crisis: requiresSignoff
+        # True, holdsRun False. Y holdsRun sólo es True contra un entorno real: en un
+        # demo o con cuentas de prueba, hasta datos/escritura corren (política 2026-11-26).
+        "holdsRun": prov.hold_run_for_signoff,
         "signoffReason": " ".join(prov.gate_reasons),
         "riskMarkers": list(prov.risk_markers),
         "signedOff": False,
@@ -217,6 +283,15 @@ def quorum_line(probe_dicts: list[dict]) -> str:
     gets forwarded, quoted, and disputed a year later.
     """
     short = [p for p in probe_dicts if not p.get("quorum", {}).get("complete", True)]
+    reduced = sum(1 for p in probe_dicts if p.get("consejo") == "reducido")
+    if not short and reduced:
+        # No es el consejo completo y el informe no puede decir que lo fue.
+        wider = sum(1 for p in probe_dicts if p.get("consejo") == "ampliado")
+        return (
+            f"{reduced} prueba(s) fueron revisadas por el consejo reducido "
+            f"(coherencia con el criterio, realismo y riesgo) y {wider} por el "
+            "consejo completo, que se convoca cuando hay una objeción o un riesgo."
+        )
     if not short:
         return "Todas las pruebas fueron juzgadas por el consejo completo."
     detalle = "; ".join(

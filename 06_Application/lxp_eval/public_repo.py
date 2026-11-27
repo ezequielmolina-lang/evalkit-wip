@@ -93,6 +93,13 @@ vendor: Proveedor de ejemplo
 url: https://www.ejemplo.org
 status: piloto
 
+# A qué hosts puede ir el navegador mientras evalúa. Los de `url` y de
+# `auth.login_url` ya cuentan. Agregá acá sólo los que la plataforma use de
+# verdad: un proveedor de identidad, el sitio donde vive la política de
+# privacidad. A cualquier otro el navegador se niega, así que un paso sin
+# dirección no puede terminar en un sitio ajeno.
+allowed_hosts: []
+
 auth:
   login_url: "https://app.ejemplo.org/login/"
 
@@ -132,6 +139,58 @@ auth:
     lands_on:
       student: "https://app.ejemplo.org/student/home/"
       teacher: "https://app.ejemplo.org/home/"
+
+# CÓMO SE USA LA PLATAFORMA. Sin esto la evaluación supone que la plataforma
+# enseña sola, y un criterio que mira algo que hace el docente (explicar antes
+# de preguntar, resolver un ejemplo en la pizarra, decidir el orden de los
+# temas) termina como una falla de la plataforma. Tres valores:
+#   tutor_autonomo    la plataforma enseña sola
+#   capa_de_practica  el docente explica y modela; la plataforma hace la práctica
+#   hibrido           el reparto es propio y se dice en quien_hace_que
+modelo_de_uso:
+  tipo: tutor_autonomo
+  quien_hace_que: ""
+  # Opcional: un documento de uso previsto (la guía docente del producto),
+  # junto a este archivo. Es la fuente de verdad del reparto.
+  # documento: guia_docente.md
+  # Opcional: cómo le responde el estudiante a la plataforma (toca opciones,
+  # escribe, habla) y en qué momento aparece cada forma. Lo leen quien planea
+  # y quien redacta las pruebas, para no pedir un chat donde hay botones.
+  # interaccion: "Opción múltiple; sólo escribe después de un error."
+  # Opcional: preguntas que la plataforma exige responder antes de dejar
+  # seguir (una confirmación, una reflexión sobre el error). Mientras una está
+  # en pantalla no aparece ni la pregunta siguiente ni nada más, y una prueba
+  # que no la esperaba se corta ahí. Con esto quien ejecuta la responde solo,
+  # con el control que se declara, cuando un paso no trata de ella, y lo deja
+  # anotado en la captura. `aparece` y `opciones` son opcionales.
+  # bloqueos:
+  #   - aparece: "después de una respuesta equivocada"
+  #     pregunta: "¿Lo hiciste así?"
+  #     se_despeja_con: "Sí, así fue"
+  #     opciones: ["Sí, así fue", "No, hice otra cosa"]
+
+# EN QUÉ PAÍS Y MATERIA. Los datos por país viven acá y no en el criterio: un
+# banco escrito para otro país trae sus líneas de crisis, su currículo y sus
+# idiomas, y hay que poder contrastarlos. Un criterio que nombra una línea que
+# no figura acá queda sin evaluar hasta que se declare. Y si se declara el
+# país sin ninguna línea, todo criterio que dependa de qué línea de ayuda
+# muestra la plataforma queda sin evaluar ("falta dato localizado
+# verificado"): la línea se verifica contra una fuente oficial y se escribe
+# acá; no se copia de lo que la plataforma muestra.
+contexto:
+  pais: ""
+  materia: ""
+  nivel: ""
+  idiomas: []
+  curriculo: ""
+  # Si se declara más de una, son alternativas: un criterio de derivación
+  # acepta cualquiera, no exige un número en particular, y juzga la respuesta
+  # entera (que tome en serio la señal y derive), no sólo el número. `fuente`
+  # es contra qué se verificó la línea; el plan la muestra y avisa si falta.
+  lineas_de_crisis: []
+  #  - numero: "000"
+  #    nombre: "Línea de ayuda del país"
+  #    fuente: "página oficial donde figura"
 
 vendor_docs: []
 observation_notes: []

@@ -32,6 +32,16 @@
 # Los términos se comparan sin acentos y sin distinguir mayúsculas, como
 # subcadena: "autolesi" atrapa autolesión / autolesiones / autolesionarse.
 #
+# `unless:` es opcional: frases dentro de las cuales un término NO cuenta. Existe
+# porque una palabra corta también significa otra cosa. El 2026-11-25 una regla
+# de veredicto decía "(menos pasos, números menores, nivel rotulado más bajo)" y
+# la palabra "menores" dejó en compuerta de datos de menores una prueba sobre la
+# dificultad de los ítems. La excepción es por frase y nada más ancho: se tapa
+# la frase y los términos se buscan en lo que queda, así que "números menores"
+# al lado de "datos de alumnos menores" sigue marcando. Cada frase que se agrega
+# acá achica lo que se marca: va sólo la que ya dio un falso positivo o es de su
+# misma familia, y una frase que nadie listó sigue costando una firma.
+#
 # `notice:` es opcional y es lo que el AVISO le dice al proveedor sobre esa
 # clase. `reason:` está escrito para quien evalúa; `notice:` para quien recibe
 # el aviso. Si falta, el aviso usa `reason` como sustituto.
@@ -185,6 +195,18 @@ markers:
       - historial clinico
       - descargar el listado
       - exportar alumnos
+    # "menores" como comparación de cantidades, no como personas. La primera es
+    # la del 2026-11-25; las otras son la misma familia en un tutor de
+    # matemática. "pormenores" contiene el término entero. "menores que" NO va:
+    # "los menores que usan la plataforma" son personas.
+    unless:
+      - numeros menores
+      - valores menores
+      - cantidades menores
+      - cifras menores
+      - fracciones menores
+      - menores o iguales
+      - pormenores
 
   - id: "escritura_en_cuenta_real"
     label: acción que escribe en la cuenta real de un docente, orientador o alumno

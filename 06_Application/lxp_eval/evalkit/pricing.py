@@ -22,6 +22,8 @@ __all__ = [
     "DEFAULT_PRICE_PER_M_OUTPUT",
     "CACHE_WRITE_MULT",
     "CACHE_READ_MULT",
+    "MODEL_PRICES",
+    "prices_for",
     "cost_usd",
     "MeteredClient",
 ]
@@ -42,6 +44,37 @@ CACHE_WRITE_MULT = 1.25
 CACHE_READ_MULT = 0.10
 
 
+#: USD por millón de tokens (entrada, salida, lectura de caché o None) por
+#: modelo. EXISTE porque el navegador dejó de manejarse con el mismo modelo que
+#: juzga (2026-11-25): con una sola constante de precio, un paso ejecutado con
+#: Sonnet se habría informado a precio de Opus, 2,5 veces más caro de lo que
+#: costó, y la comparación de costos que motivó el cambio habría salido falsa.
+#: La lectura de caché va aparte porque no siempre es 0,1 veces la entrada:
+#: en Sonnet 5.5 es 0,05. Tarifas publicadas, vistas el 2026-11-25.
+MODEL_PRICES: dict[str, tuple[float, float, float | None]] = {
+    "claude-opus-4-8": (5.0, 25.0, None),
+    "claude-opus-5": (5.0, 25.0, None),
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-sonnet-5": (2.0, 10.0, None),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10),
+    "claude-haiku-5-5": (0.10, 0.50, None),
+    "claude-haiku-4-5": (1.0, 5.0, None),
+}
+
+
+def prices_for(model: str | None) -> tuple[float, float, float | None]:
+    """(entrada, salida, lectura de caché) del modelo.
+
+    Un modelo que no está en la tabla se cobra a la tarifa por defecto (la de
+    Opus, o la que fije LXP_PRICE_INPUT / LXP_PRICE_OUTPUT): es la más alta de
+    las que se usan, así que lo desconocido se sobreestima y el tope de costo
+    por paso corta antes, nunca después.
+    """
+    return MODEL_PRICES.get(
+        str(model or ""), (DEFAULT_PRICE_PER_M_INPUT, DEFAULT_PRICE_PER_M_OUTPUT, None)
+    )
+
+
 def cost_usd(
     input_tokens: int,
     output_tokens: int,
@@ -50,6 +83,7 @@ def cost_usd(
     *,
     price_in: float = DEFAULT_PRICE_PER_M_INPUT,
     price_out: float = DEFAULT_PRICE_PER_M_OUTPUT,
+    price_cache_read: float | None = None,
 ) -> float:
     """USD for one turn. Cached tokens are cheaper, never free.
 
@@ -59,10 +93,15 @@ def cost_usd(
     it.
     """
     m = 1_000_000.0
+    read_cost = (
+        (cache_read_tokens / m) * price_in * CACHE_READ_MULT
+        if price_cache_read is None
+        else (cache_read_tokens / m) * price_cache_read
+    )
     return (
         (input_tokens / m) * price_in
         + (cache_write_tokens / m) * price_in * CACHE_WRITE_MULT
-        + (cache_read_tokens / m) * price_in * CACHE_READ_MULT
+        + read_cost
         + (output_tokens / m) * price_out
     )
 

@@ -13,13 +13,15 @@ si fallara la supervisión del lote, fallaría la del servicio, porque es la mis
 
 DOS COSAS QUE EL LOTE NO NEGOCIA, porque son las invariantes del repo:
 
-* UNA PRUEBA CON COMPUERTA NO CORRE SIN FIRMA HUMANA, y la firma es por prueba,
-  no por plan. La política `auto` aprueba el plan y deja correr las pruebas SIN
-  compuerta; cada prueba con compuerta sigue detrás de su propio signoff, que el
-  lote nunca escribe, así que `runnable_probes` la deja afuera y su criterio
-  vuelve NO_EVALUADO. Esto no es una cortesía del lote: es el mismo gate de
-  `JobRunner.runnable_probes`, intacto. El lote no firma; sólo elige no esperar
-  por lo que no tiene compuerta.
+* UNA CONSECUENCIA EXTERNA REAL NO CORRE SIN FIRMA HUMANA, y la firma es por
+  prueba, no por plan. Desde 2026-11-26 lo que FRENA la corrida es angosto: datos
+  de menores reales o escritura en cuenta real, y sólo contra un entorno real
+  (`real_environment`); las de crisis/seguridad se marcan y se avisan pero
+  CORREN, y un demo o cuentas de prueba no frenan nada (ver `_holds_run`). La
+  política `auto` aprueba el plan y deja correr todo lo que no frena; cada prueba
+  que sí frena sigue detrás de su propio signoff, que el lote nunca escribe, así
+  que `runnable_probes` la deja afuera y su criterio vuelve NO_EVALUADO. El lote
+  no firma; sólo elige no esperar por lo que no frena.
 
 * NO SE AFIRMA UNA APROBACIÓN HUMANA QUE NO PASÓ. La fila de aprobación que el
   lote escribe en el ledger lleva el actor máquina (`APPROVAL_NOTE_AUTO`), y el
@@ -126,6 +128,13 @@ class ManifestEntry:
     #: a su vez el del manifiesto o "human"). `load_manifest` deja "" cuando la
     #: entrada no fija una, para que el default se resuelva en un solo lugar.
     approval_policy: str = ""
+    #: Pasos que se ejecutan antes de CADA prueba, para que no herede el estado
+    #: que dejó la anterior (por ejemplo: cambiar de estudiante y entrar con un
+    #: nombre nuevo). `{n}` se reemplaza por algo distinto en cada prueba. Va
+    #: acá y no en el código porque cada plataforma se deja limpia a su manera;
+    #: en la corrida del 2026-11-25 las 120 pruebas compartieron una cuenta y
+    #: las tardías encontraron un historial que sus pasos no suponían.
+    antes_de_cada_prueba: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -194,6 +203,7 @@ def _entry_from(raw: dict, *, index: int, default_risk: str) -> ManifestEntry:
         credentials_ref=str(raw.get("credentials_ref") or ""),
         risk_policy=risk,
         approval_policy=policy,
+        antes_de_cada_prueba=_as_list(raw.get("antes_de_cada_prueba"), "antes_de_cada_prueba"),
     )
 
 
@@ -356,6 +366,9 @@ class JobOutcome:
     no_evaluado: int
     scored: int
     error: str
+    #: Dónde quedó el documento del plan, cuando el trabajo era "sólo el plan".
+    plan_path: str = ""
+    plan_line: str = ""
 
 
 @dataclass
@@ -386,6 +399,12 @@ def _outcome(store: JobStore, job_id: str) -> JobOutcome:
         no_evaluado=no_evaluado,
         scored=scored,
         error=(record.error or {}).get("message", "") if record.error else "",
+        plan_path=(
+            str(store.dir_of(record.job_id) / record.plan_document["html"])
+            if (record.plan_document or {}).get("html") else ""
+        ),
+        plan_line=(record.progress or {}).get("message", "")
+        if record.stage == Stage.PLAN_READY else "",
     )
 
 
@@ -433,6 +452,10 @@ def job_failed(outcome: JobOutcome) -> bool:
         return False
     if outcome.stage == Stage.AWAITING_APPROVAL and outcome.approval_policy == "human":
         return False
+    # El final PEDIDO de un trabajo "sólo el plan": el documento está listo y
+    # espera a una persona. Sólo cuenta si de verdad hay un documento.
+    if outcome.stage == Stage.PLAN_READY and outcome.plan_path:
+        return False
     return True
 
 
@@ -464,6 +487,8 @@ async def run_batch(
     default_approval_policy: str = "human",
     runner_factory: RunnerFactory | None = None,
     supervisor: Supervisor | None = None,
+    plan_only: bool = False,
+    corrections: list[dict] | None = None,
 ) -> BatchSummary:
     """Recorre el manifiesto y maneja cada trabajo, acotado y supervisado.
 
@@ -522,6 +547,12 @@ async def run_batch(
         job_engine = replace(engine, risk_policy=entry.risk_policy)
         runner = runner_factory(store, job_engine, box, clock)
         try:
+            if plan_only:
+                # SÓLO EL PLAN: recorrido, estrategia, muestreo y el documento
+                # con capturas. No se redacta ni se corre ninguna prueba, con
+                # cualquier política: aprobar ese documento es de una persona.
+                await runner.build_plan_document(record)
+                return store.get(record.job_id) or record
             await runner.build_plan(record)
             fresh = store.get(record.job_id) or record
             # Sólo un plan que llegó a la compuerta de aprobación se aprueba:
@@ -600,6 +631,8 @@ async def run_batch(
                     platform_kind=entry.platform_kind,
                     documents=documents,
                     approval_policy=policy,
+                    plan_corrections=list(corrections or []),
+                    probe_preamble=list(entry.antes_de_cada_prueba),
                 )
                 if blob is not None:
                     store.put_credentials(record.job_id, blob)
@@ -716,6 +749,8 @@ def _print_summary(summary: BatchSummary) -> None:
         )
         if o.stage == Stage.DONE:
             linea += f"  puntuados={o.scored}  NO_EVALUADO={o.no_evaluado}"
+        if o.plan_path:
+            linea += f"\n      {o.plan_line}\n      Documento del plan: {o.plan_path}"
         if o.error:
             linea += f"  error: {o.error}"
         print(linea)
@@ -738,6 +773,68 @@ def _print_summary(summary: BatchSummary) -> None:
         )
     else:
         print(f"RESULTADO: OK. El comando termina con código {code}.")
+
+
+async def run_from_plan(
+    store: JobStore,
+    job_id: str,
+    *,
+    engine: Engine | None = None,
+    box: "SecretBox | None" = None,
+    approved_by: str,
+    only: list[str] | None = None,
+    runner_factory: RunnerFactory | None = None,
+    preamble: list[str] | None = None,
+) -> JobOutcome:
+    """Del plan aprobado al informe: redacta por celda, ejecuta y puntúa.
+
+    `preamble` son los pasos de preparación de cada prueba (ver
+    ManifestEntry.antes_de_cada_prueba); si se pasa, reemplaza a los del
+    trabajo, para poder agregarlos a un plan que se hizo sin ellos.
+
+    Es el paso que le faltaba al camino "sólo el plan". `approved_by` va tal
+    cual al ledger: quién aprobó el documento del plan. Las compuertas no se
+    mueven: lo que requiera firma queda sin correr y el informe dice cuántas.
+    """
+    from .ledger_decisions import approve_from_plan
+
+    record = store.get(job_id)
+    if record is None:
+        return JobOutcome(job_id, "", "missing", "", 0.0, 0, 0, "el trabajo no existe")
+    if preamble is not None:
+        record.probe_preamble = [str(s) for s in preamble if str(s).strip()]
+        store.save(record)
+    runner = (runner_factory or _default_runner_factory)(store, engine or Engine(), box, Clock())
+    await runner.draft_from_plan(record, only=only)
+    fresh = store.get(job_id) or record
+    if fresh.stage == Stage.AWAITING_APPROVAL:
+        approve_from_plan(store, fresh, approved_by=approved_by)
+        await runner.execute(fresh)
+    return _outcome(store, job_id)
+
+
+def _cli_from_plan(args: argparse.Namespace) -> int:
+    store = JobStore(args.root or DEFAULT_ROOT)
+    try:
+        box: SecretBox | None = SecretBox.from_env()
+    except ServiceError:
+        box = None
+    only = [x.strip() for x in (args.solo or "").split(",") if x.strip()] or None
+    preamble = None
+    if getattr(args, "antes_de_cada_prueba", None):
+        try:
+            lines = Path(args.antes_de_cada_prueba).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print(f"no se pudo leer la preparación de cada prueba: {exc}", file=sys.stderr)
+            return EXIT_BAD_MANIFEST
+        preamble = [x.strip() for x in lines if x.strip() and not x.lstrip().startswith("#")]
+    outcome = asyncio.run(run_from_plan(
+        store, args.job_id, box=box, approved_by=args.aprobado_por, only=only,
+        preamble=preamble,
+    ))
+    summary = BatchSummary(jobs=[outcome], total_spend_usd=outcome.spend_usd)
+    _print_summary(summary)
+    return exit_code_for(summary)
 
 
 def _cli_run(args: argparse.Namespace) -> int:
@@ -766,6 +863,17 @@ def _cli_run(args: argparse.Namespace) -> int:
     max_parallel = args.max_parallel if args.max_parallel is not None else manifest.max_parallel
     default_policy = args.approval_policy or manifest.approval_policy or "human"
 
+    corrections = None
+    if getattr(args, "correcciones", None):
+        import yaml
+
+        try:
+            loaded = yaml.safe_load(Path(args.correcciones).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            print(f"no se pudieron leer las correcciones: {exc}", file=sys.stderr)
+            return EXIT_BAD_MANIFEST
+        corrections = [c for c in (loaded or []) if isinstance(c, dict)]
+
     summary = asyncio.run(
         run_batch(
             manifest.entries,
@@ -775,6 +883,8 @@ def _cli_run(args: argparse.Namespace) -> int:
             max_parallel=max_parallel,
             max_spend_usd=max_spend,
             default_approval_policy=default_policy,
+            plan_only=getattr(args, "command", "run") == "plan",
+            corrections=corrections,
         )
     )
     _print_summary(summary)
@@ -815,8 +925,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--approval-policy", choices=list(VALID_APPROVAL_POLICIES), default=None,
         help="política por defecto para entradas que no la fijan (default: human)",
     )
+    planp = sub.add_parser(
+        "plan",
+        help=(
+            "recorrer la plataforma y dejar el documento del plan con capturas, "
+            "sin redactar ni correr ninguna prueba"
+        ),
+    )
+    planp.add_argument("manifest", help="ruta al manifiesto YAML")
+    planp.add_argument("--root", default=None, help="directorio de trabajos")
+    planp.add_argument("--max-parallel", type=int, default=None)
+    planp.add_argument("--max-spend-usd", type=float, default=None)
+    planp.add_argument(
+        "--correcciones", default=None,
+        help=(
+            "YAML con las correcciones de una persona al plan anterior: una lista "
+            "de {tipo: existe|falta, superficie, url, nota}"
+        ),
+    )
+    planp.set_defaults(approval_policy=None)
+    fromp = sub.add_parser(
+        "desde-plan",
+        help=(
+            "redactar las pruebas de un plan ya aprobado por una persona, "
+            "ejecutarlas (una por celda del muestreo) y dejar el informe"
+        ),
+    )
+    fromp.add_argument("job_id", help="el trabajo que está en la etapa plan_ready")
+    fromp.add_argument("--root", default=None, help="directorio de trabajos")
+    fromp.add_argument(
+        "--aprobado-por", required=True,
+        help="quién aprobó el documento del plan; queda escrito en el ledger",
+    )
+    fromp.add_argument(
+        "--solo", default=None,
+        help="ids de criterios separados por coma, para un piloto",
+    )
+    fromp.add_argument(
+        "--antes-de-cada-prueba", default=None,
+        help=(
+            "archivo de texto con un paso por línea, que se ejecuta antes de cada "
+            "prueba (por ejemplo, entrar con un estudiante nuevo); {n} cambia en "
+            "cada prueba"
+        ),
+    )
     args = parser.parse_args(argv)
-    if args.command == "run":
+    if args.command == "desde-plan":
+        return _cli_from_plan(args)
+    if args.command in ("run", "plan"):
         return _cli_run(args)
     parser.print_help(sys.stderr)  # pragma: no cover
     return EXIT_BAD_MANIFEST  # pragma: no cover

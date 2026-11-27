@@ -68,6 +68,37 @@ def _hosts_of(raw: dict) -> set[str]:
     return hosts
 
 
+def allowed_hosts_for(
+    platform_dir: str, platforms_root: Path | str, *, platform_url: str = ""
+) -> set[str]:
+    """Los hosts a los que el navegador puede ir mientras evalúa esta plataforma.
+
+    Salen del config de la plataforma, nunca del código: los de `url:` y
+    `auth.login_url:` (los mismos con los que se la reconoce), los que declare
+    en `allowed_hosts:` -- un proveedor de identidad, el sitio público donde
+    vive la política de privacidad -- y el de la dirección que se pidió evaluar.
+
+    POR QUÉ EXISTE. El 2026-11-25 un paso sin dirección terminó con el agente en
+    un sitio inventado. La lista es lo que le permite al driver negarse (ver
+    `browser_agents/playwright_driver.py`). Un host que falte aquí se nota
+    enseguida y con un mensaje que dice dónde declararlo; uno de más no.
+    """
+    cfg = Path(platforms_root) / platform_dir / "config.yaml"
+    raw = (yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}) if cfg.exists() else {}
+    hosts = set(_hosts_of(raw))
+    extra = raw.get("allowed_hosts") or []
+    if isinstance(extra, str):
+        extra = [extra]
+    for item in list(extra) + [platform_url]:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        host = (urlparse(text if "//" in text else f"//{text}").hostname or "").lower()
+        if host:
+            hosts.add(host[4:] if host.startswith("www.") else host)
+    return hosts
+
+
 def resolve_platform_dir(url: str, platforms_root: Path | str) -> str:
     """The platform DIRECTORY that serves `url`.
 

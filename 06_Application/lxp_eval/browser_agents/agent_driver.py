@@ -38,9 +38,21 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
+from ..config import CONFIG
+from ..evalkit.steps import (
+    DEVIATION,
+    DIRECT,
+    NOT_FOUND,
+    is_observation,
+    is_send,
+    is_write,
+    split_marks,
+)
 from ..evalkit.errors import EvalkitError
+from ..evalkit.repair import StepNotDone
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +67,13 @@ logger = logging.getLogger(__name__)
 #: 20 fits a multi-hop navigation while staying a bounded runaway guard. A step
 #: that needs more than this is a step that should be split.
 DEFAULT_MAX_ITERATIONS_PER_STEP = int(os.getenv("LXP_MAX_ITERS_PER_STEP", "20"))
+
+#: Topes más bajos para los dos pasos que no actúan sobre la página: el que sólo
+#: mira y el que puede no aplicar. Ver AgentDriver._turns_for.
+#: Salida por turno durante un paso (ver AgentDriver.do).
+STEP_MAX_OUTPUT_TOKENS = int(os.getenv("LXP_STEP_MAX_OUTPUT_TOKENS", "8192"))
+OBSERVE_MAX_ITERATIONS = int(os.getenv("LXP_OBSERVE_MAX_ITERS", "5"))
+OPTIONAL_MAX_ITERATIONS = int(os.getenv("LXP_OPTIONAL_MAX_ITERS", "8"))
 
 #: A single step should cost cents, not dollars. Second bound in case the page
 #: is huge and each turn carries a big accessibility tree.
@@ -101,6 +120,33 @@ STEP_DONE_TOOL: dict[str, Any] = {
                     "what stopped you."
                 ),
             },
+            # Agregado tras la corrida del 2026-11-25 (ver evalkit/steps.py):
+            # un paso marcado [SI APARECE] puede no aplicar sin que la prueba
+            # se corte. Va aparte de `accomplished` para que "no apareció" no
+            # se confunda con "lo hice" ni con "no pude".
+            "no_aparecio": {
+                "type": "boolean",
+                "description": (
+                    "Sólo para un paso marcado [SI APARECE]: true si lo que el "
+                    "paso nombra no apareció en la plataforma. En ese caso poné "
+                    "accomplished=false y contá en `reason` qué había en pantalla."
+                ),
+            },
+            # Agregado tras la corrida completa del 2026-11-26. Cuando el paso se
+            # cumple por otro camino que el escrito (responder una pregunta para
+            # poder avanzar, encontrar ya hecho lo que el paso pedía), eso tiene
+            # que llegar a la nota de la captura: el juez lee el nombre del paso
+            # y, sin esto, creería que se hizo al pie de la letra.
+            "desvio": {
+                "type": "string",
+                "description": (
+                    "Sólo con accomplished=true: si llegaste al objetivo del paso "
+                    "haciendo algo distinto de lo que dice al pie de la letra "
+                    "(otro control, una pregunta respondida para poder avanzar, "
+                    "algo que ya estaba hecho), contalo acá en una frase. Vacío "
+                    "si lo hiciste tal como está escrito."
+                ),
+            },
         },
         "required": ["accomplished", "reason"],
     },
@@ -119,8 +165,316 @@ STEP_SYSTEM = (
     "Decir que no pudiste NO es un error tuyo: la captura de pantalla que se "
     "toma después de este paso se guarda como evidencia de este paso, así que un "
     "accomplished=true sobre un paso que no pasó convierte la evaluación en una "
-    "conclusión falsa sobre la plataforma."
+    "conclusión falsa sobre la plataforma.\n\n"
+    # Agregado tras el 2026-11-25: un paso decía "abrir la plataforma" sin
+    # dirección y el agente inventó una. El navegador ya se niega a salir (ver
+    # playwright_driver.host_allowed); esto evita gastar turnos en el intento.
+    "Trabajás SÓLO dentro de la plataforma bajo evaluación. Nunca inventes una "
+    "dirección: si el paso pide abrir algo y no dice dónde, usá la dirección de "
+    "la plataforma que figura en la tarea o lo que ya está en pantalla; si no "
+    "alcanza, terminá con accomplished=false. No uses buscadores ni sitios de "
+    "terceros. Si aparece una verificación de humano (captcha, 'no soy un "
+    "robot', control de seguridad), no intentes resolverla: terminá con "
+    "accomplished=false y decí que esa verificación lo impidió.\n\n"
+    # Agregado tras la corrida del 2026-11-25. Veinte pruebas se cortaron
+    # porque el paso nombraba un botón por su texto y la plataforma mostraba
+    # otro que hacía lo mismo; y unas quince gastaron los 30 turnos buscando en
+    # todo el menú algo que no existía.
+    "EL PASO ES UN OBJETIVO. Si nombra un botón por su texto y ese texto no "
+    "está, pero en pantalla hay un control que hace claramente lo mismo, usá "
+    "ese y decilo en `reason`. Si lo que pide no está: leé la página entera una "
+    "vez (con desplazamiento si hace falta) y probá como mucho UN camino obvio "
+    "para llegar. Si sigue sin estar, terminá YA con accomplished=false y "
+    "decí qué había en pantalla. No recorras otras secciones buscándolo: cada "
+    "turno cuesta, y un paso que no se puede hacer no mejora insistiendo.\n\n"
+    # Agregado tras la primera tanda con el modelo liviano (2026-11-25). Un
+    # ítem pedía dos cosas seguidas (en qué paso está el error y después qué
+    # error es). El paso decía "elegir una opción incorrecta", el agente eligió
+    # en la primera parte y cerró; el paso siguiente, "avanzar", no encontró
+    # con qué avanzar porque el ítem seguía abierto, y la prueba se cortó.
+    "RESPONDER ES DEJAR LA PREGUNTA RESPONDIDA. Si el paso pide responder o "
+    "elegir en una pregunta y, después de tu elección, la plataforma pide otra "
+    "parte de ESA MISMA pregunta antes de darla por respondida (por ejemplo, "
+    "primero en qué paso está el error y después qué error es), respondé "
+    "también esa parte, en el mismo sentido que pide el paso (acertar o "
+    "errar). El paso termina cuando la plataforma muestra su devolución o "
+    "deja avanzar. Eso no es pasar a otro paso: es terminar este.\n\n"
+    # Lo que sigue se agregó tras la corrida completa del 2026-11-26 (trabajo
+    # 91b35f78a25749c9): 32 de 86 pruebas cortadas, ninguna por algo que la
+    # plataforma hiciera mal. Cada regla responde a una familia de cortes.
+    #
+    # 8 cortes: "Guardar la solución paso a paso que aparece". El agente buscó
+    # un botón de guardar o exportar, no lo encontró y dijo que no pudo, con la
+    # solución en pantalla. (El código ya trata estos pasos sin modelo, ver
+    # steps.is_observation; la regla queda para los que igual lleguen acá.)
+    "GUARDAR ES MIRAR. Si el paso dice guardar, capturar, registrar o anotar "
+    "algo que la plataforma muestra, NO busques un botón de guardar, exportar "
+    "ni descargar: la captura y el texto los guarda el evaluador en cuanto "
+    "termines. Tu parte es que eso quede a la vista.\n\n"
+    # 11 cortes: "Avanzar a la siguiente pregunta" con una pregunta sin
+    # responder en pantalla y ningún botón para saltarla. El agente lo vio y
+    # escribió "no la respondí porque el paso no lo pedía".
+    "AVANZAR ES LLEGAR A LO SIGUIENTE. Si el paso pide avanzar a la pregunta o "
+    "actividad siguiente y en pantalla hay una pregunta sin responder y ningún "
+    "control para saltarla, la plataforma no deja saltar: respondela con "
+    "cualquier opción (la primera), hacé lo mínimo que la plataforma pida para "
+    "darla por cerrada y avanzá. Contalo en `desvio`.\n\n"
+    # 5 cortes: el paso pedía algo que ya había pasado (elegir un perfil en una
+    # pantalla de ingreso que ya no estaba, enviar un mensaje ya enviado y
+    # respondido, responder una pregunta ya respondida).
+    "LO QUE YA ESTÁ HECHO NO SE REPITE. Si el estado al que el paso quiere "
+    "llegar YA está en pantalla (ya estás adentro, el mensaje ya figura enviado "
+    "y respondido, la pregunta ya quedó respondida en el sentido que pide el "
+    "paso), el paso está cumplido: accomplished=true, y contalo en `desvio`.\n\n"
+    # 1 criterio sin veredicto (PT-D9-H1): la captura se tomó con "Gallito está
+    # pensando…" en pantalla, antes de la respuesta del tutor.
+    "ESPERÁ LA RESPUESTA. Si después de tu acción la plataforma muestra que "
+    "todavía está trabajando (pensando, escribiendo, cargando, generando, "
+    "preparando), esperá con `wait` y volvé a leer hasta que la respuesta esté "
+    "completa. La captura se toma apenas llamás a `done`: si llamás antes, se "
+    "guarda la espera y no la respuesta.\n\n"
+    # Agregado tras la corrida completa del 2026-11-27 (trabajo
+    # 3e932ff1d50c4a30): 5 de las 10 pruebas cortadas. Después de un error la
+    # plataforma preguntaba si el error había sido el que ella suponía y no
+    # mostraba nada más hasta que se tocaba uno de sus botones. El paso pedía
+    # "en la nueva pregunta que aparezca, tocar una opción" o "abrir la
+    # conversación con el tutor", y el agente escribió, las cinco veces, alguna
+    # forma de "no la respondí porque el paso no lo pedía". (Cuando el config
+    # declara la pregunta, el código la despeja aunque el agente no lo haga:
+    # ver AgentDriver._clear_blocker. La regla es para la plataforma que
+    # todavía no la declaró.)
+    "LO QUE LA PLATAFORMA EXIGE ANTES DE DEJARTE SEGUIR ES PARTE DE LLEGAR. Si "
+    "lo que el paso pide no se puede hacer porque la plataforma tiene pendiente "
+    "una pregunta de confirmación o de reflexión sobre lo que ya pasó (los "
+    "controles que el paso necesita están deshabilitados o no aparecen, y un "
+    "aviso o unos botones piden responder antes de seguir), respondela con la "
+    "opción que confirma lo que la plataforma propone o, si ninguna lo hace "
+    "claramente, con la primera; después hacé el paso. Contalo en `desvio`, "
+    "con el texto de la pregunta y el del botón que tocaste. Esto NO vale si "
+    "responder exige escribir un texto, enviar un mensaje, aceptar condiciones "
+    "o pagar, ni en un paso marcado [SI APARECE]: en esos casos terminá con "
+    "accomplished=false y decí qué pedía la plataforma."
 )
+
+
+#: Topes de UNA exploración del recorrido. Mucho más que un paso (20 turnos, 2
+#: USD) porque explorar ES recorrer: entrar, abrir secciones, responder una
+#: actividad, volver. Son 40 turnos y no 30: en vivo (2026-11-25), 30 alcanzaron
+#: para ver el camino del error y el del acierto de una actividad y no para
+#: informarlos. Siguen siendo un freno, no un presupuesto.
+DEFAULT_MAX_ITERATIONS_PER_EXPLORATION = int(os.getenv("LXP_RECON_MAX_ITERS", "40"))
+DEFAULT_COST_CAP_USD_PER_EXPLORATION = float(os.getenv("LXP_RECON_COST_CAP", "2.00"))
+#: Salida por turno durante una exploración. El informe describe cada parte de
+#: la plataforma con el texto de sus botones; en vivo no entró en 2048.
+EXPLORE_MAX_OUTPUT_TOKENS = int(os.getenv("LXP_RECON_MAX_OUTPUT_TOKENS", "8192"))
+
+#: Los roles con los que el recorrido etiqueta cada parte. `otro` existe para
+#: no forzar una plataforma rara a una de las cuatro cajas.
+ROLES = ("estudiante", "docente", "administrador", "publico", "otro")
+
+#: Registrar una PARTE mientras se la tiene en pantalla. La captura la toma el
+#: código (ver ClaudeBrowserAgent._dispatch_tool), así que no puede existir una
+#: parte sin su pantalla: es lo que el documento del plan muestra.
+RECORD_PART_TOOL: dict[str, Any] = {
+    "name": "record_part",
+    "description": (
+        "Registrá una pantalla, sección o momento de la plataforma MIENTRAS lo "
+        "tenés en pantalla: se guarda con una captura tomada en este instante. "
+        "Llamala cada vez que llegues a algo distinto (una sección del menú, lo "
+        "que aparece después de un error, el panel de otro rol). Lo que no "
+        "registres con esta herramienta no figura en el plan."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "nombre": {"type": "string"},
+            "rol": {
+                "type": "string", "enum": list(ROLES),
+                "description": "Para quién es esta pantalla.",
+            },
+            "entrada": {
+                "type": "string",
+                "description": (
+                    "El texto EXACTO del ítem de menú, botón de ingreso o cambio "
+                    "de rol por el que se llega a esta parte (por ejemplo "
+                    "'Vista docente'). Vacío si se llega por dentro de otra parte."
+                ),
+            },
+            "como_llegar": {
+                "type": "string",
+                "description": "Los toques, en orden, desde el inicio.",
+            },
+            "que_muestra": {"type": "string"},
+            "que_permite": {
+                "type": "string",
+                "description": (
+                    "Qué se puede hacer ahí: botones, opciones, si hay un campo "
+                    "para escribir y a quién le llega lo escrito."
+                ),
+            },
+        },
+        "required": ["nombre", "rol", "como_llegar", "que_muestra"],
+    },
+}
+
+#: Registrar un COMPORTAMIENTO que se averiguó haciendo, no leyendo: qué se
+#: hizo, qué pasó, qué se concluye. También lleva su captura.
+RECORD_BEHAVIOR_TOOL: dict[str, Any] = {
+    "name": "record_behavior",
+    "description": (
+        "Registrá algo que averiguaste HACIENDO (no leyendo un texto de ayuda): "
+        "qué hiciste, qué pasó en pantalla y qué se concluye. Se guarda con una "
+        "captura de este instante, así que llamala con el resultado a la vista."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "nombre": {
+                "type": "string",
+                "description": "Qué se averiguó, en pocas palabras.",
+            },
+            "que_hice": {"type": "string"},
+            "que_observe": {
+                "type": "string",
+                "description": "Lo que apareció, con el texto que tenía.",
+            },
+            "conclusion": {
+                "type": "string",
+                "description": (
+                    "Qué regla o comportamiento muestra. Si no alcanza para "
+                    "concluir, decilo: 'no concluyente' es una respuesta válida."
+                ),
+            },
+        },
+        "required": ["nombre", "que_hice", "que_observe", "conclusion"],
+    },
+}
+
+#: Con qué cierra una exploración: lo que VIO, estructurado, para que el plan de
+#: pruebas se escriba con esto y no con una etiqueta ("tutor").
+EXPLORE_REPORT_TOOL: dict[str, Any] = {
+    "name": "describe_platform",
+    "description": (
+        "Llamala UNA vez, al terminar de explorar, para informar lo que viste. "
+        "Describí sólo lo que estuvo en pantalla. Lo que no encontraste va en "
+        "`no_encontrado`; lo que un documento dice y no pudiste ver va en "
+        "`documentado_sin_verificar`."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entrada": {
+                "type": "string",
+                "description": (
+                    "Cómo se entra, desde la dirección inicial hasta poder usar "
+                    "la plataforma (qué se toca, en qué orden)."
+                ),
+            },
+            # SIN `partes`. Las partes se registran al pasar con `record_part`,
+            # que es lo que les pone la captura. En la primera corrida en vivo
+            # (2026-11-25) el cierre todavía las aceptaba y el explorador las
+            # volvió a listar ahí: 50 partes para 30 pantallas, veinte de ellas
+            # duplicados sin captura con las comillas cambiadas, y el
+            # planificador apoyó pruebas en esos duplicados.
+            "entradas_vistas": {
+                "type": "array",
+                "description": (
+                    "TODOS los ítems de menú, pestañas de navegación, botones de "
+                    "ingreso y cambios de rol que viste, uno por uno, los hayas "
+                    "abierto o no. Sólo NAVEGACIÓN: los controles de una actividad "
+                    "(opciones de respuesta, 'Siguiente', 'Enviar', 'Cerrar') no "
+                    "van acá."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "texto": {
+                            "type": "string",
+                            "description": "El texto exacto que tiene en pantalla.",
+                        },
+                        "tipo": {
+                            "type": "string",
+                            "enum": ["menu", "rol", "ingreso", "otro"],
+                        },
+                        "estado": {
+                            "type": "string",
+                            "enum": ["recorrida", "pendiente", "no_disponible"],
+                            "description": (
+                                "recorrida: entraste y la registraste con "
+                                "record_part. pendiente: la viste y no entraste. "
+                                "no_disponible: no se puede entrar (decí por qué)."
+                            ),
+                        },
+                        "motivo": {"type": "string"},
+                    },
+                    "required": ["texto", "tipo", "estado"],
+                },
+            },
+            "no_encontrado": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Lo que buscaste y no está, con lo que viste en su lugar.",
+            },
+            "documentado_sin_verificar": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Lo que un documento afirma y no pudiste ver.",
+            },
+            "notas": {"type": "string"},
+        },
+        "required": [],
+    },
+}
+
+EXPLORE_SYSTEM = (
+    "Sos quien recorre una plataforma educativa ANTES de que se escriba el plan "
+    "de pruebas. Tu trabajo es entenderla: qué partes tiene, cómo se llega a cada "
+    "una y qué deja hacer. Otra persona va a escribir las pruebas con lo que "
+    "informes, así que lo que no veas no va a existir para el plan.\n\n"
+    "Usala como la usaría un estudiante. Podés abrir secciones y RESPONDER "
+    "actividades de práctica, bien y mal, para ver qué pasa después de cada cosa: "
+    "ahí suele estar lo importante (la corrección, las ayudas, el tutor).\n\n"
+    "Límites:\n"
+    "- No podés escribir texto: no tenés esa herramienta. Si aparece un campo de "
+    "texto, anotá que existe, cómo se llega y a quién le llega lo escrito.\n"
+    "- No cambies configuraciones, no borres nada, no cierres la sesión.\n"
+    "- No salgas de la plataforma ni inventes direcciones.\n"
+    "- Si aparece una verificación de humano, no intentes resolverla: anotala.\n"
+    "- Describí sólo lo que estuvo en pantalla. No completes con lo que una "
+    "plataforma así 'suele tener'.\n\n"
+    "REGISTRÁ AL PASAR. Cada vez que llegues a una pantalla, sección o momento "
+    "distinto, llamá a `record_part` con eso en pantalla: guarda la captura. "
+    "Cuando averigües algo haciendo (qué pasa al errar varias veces, qué se "
+    "conserva al volver), llamá a `record_behavior` con el resultado a la vista. "
+    "No lo dejes para el final: lo que registraste queda aunque te quedes sin "
+    "turnos; lo que sólo pensabas contar al cierre, no.\n\n"
+    "Sé concreto: nombrá los botones y las opciones con el texto que tienen. "
+    "Cuando termines, llamá a `describe_platform` con el inventario de entradas "
+    "que viste y lo que no encontraste."
+)
+
+
+def explore_tools() -> list[dict[str, Any]]:
+    """Las herramientas de una exploración: mira y toca, no escribe.
+
+    Sin `type_text` por la misma razón que `read_only_tools`: se recorre una
+    plataforma que puede estar en uso, y un mensaje escrito ahí es un mensaje
+    real. Sin `done` ni `record_observation`: una exploración no ejecuta un paso
+    ni emite un veredicto; termina informando con `describe_platform`.
+
+    LO QUE ESTO NO GARANTIZA, dicho en vez de sugerido: tocar una opción de una
+    actividad es responderla, y eso se le permite a propósito -- sin responder
+    no se ve qué hace la plataforma después de un error, que en la corrida del
+    2026-11-25 era exactamente donde vivía el tutor. Lo demás (no cambiar
+    configuración, no borrar) se le pide en el prompt y nada más.
+    """
+    try:
+        from .claude_browser_agent import BROWSER_TOOLS
+    except Exception:  # noqa: BLE001 - missing SDK, config, etc.
+        logger.debug("no pude importar BROWSER_TOOLS; exploro sólo con el informe")
+        return [RECORD_PART_TOOL, RECORD_BEHAVIOR_TOOL, EXPLORE_REPORT_TOOL]
+    fuera = {"type_text", "done", "record_observation"}
+    return [t for t in BROWSER_TOOLS if t.get("name") not in fuera] + [
+        RECORD_PART_TOOL, RECORD_BEHAVIOR_TOOL, EXPLORE_REPORT_TOOL,
+    ]
 
 
 def _step_tools() -> list[dict[str, Any]]:
@@ -140,9 +494,142 @@ def _step_tools() -> list[dict[str, Any]]:
 STEP_TOOLS: list[dict[str, Any]] = _step_tools()
 
 
-def _step_task(step: str) -> str:
+def _norm(text: Any) -> str:
+    """Para comparar un texto del config con uno de la pantalla o de un paso."""
+    return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+
+
+def _names_blocker(step: str, blocker: dict) -> bool:
+    """¿El paso trata de esta pregunta? Entonces la responde el paso, no el código.
+
+    Un paso que nombra la pregunta o cualquiera de sus botones ("Tocar 'Hice
+    otra cosa'") quiere responderla a su manera, y despejarla con el botón
+    declarado le cambiaría el camino a la prueba.
+    """
+    text = _norm(split_marks(step)[0])
+    names = [blocker.get("pregunta"), blocker.get("se_despeja_con")]
+    names += list(blocker.get("opciones") or [])
+    return any(_norm(n) and _norm(n) in text for n in names)
+
+
+def _on_screen(page: str, blocker: dict) -> bool:
+    """La pregunta Y el control que la despeja están a la vista."""
+    text = _norm(page)
+    return bool(
+        _norm(blocker.get("pregunta")) and _norm(blocker.get("pregunta")) in text
+        and _norm(blocker.get("se_despeja_con")) in text
+    )
+
+
+def _blockers_note(step: str, blockers: list[dict]) -> str:
+    """Los bloqueos declarados, dichos a quien ejecuta un paso que no trata de ellos."""
+    lines = []
+    for b in blockers:
+        if _names_blocker(step, b):
+            continue
+        when = str(b.get("aparece") or "").strip()
+        lines.append(
+            "- " + (f"{when}: " if when else "")
+            + f"«{b.get('pregunta')}». Se despeja con «{b.get('se_despeja_con')}»."
+        )
+    if not lines:
+        return ""
     return (
-        f"Ejecutá este paso en la página actual:\n\n{step}\n\n"
+        "\n\nPREGUNTAS QUE BLOQUEAN EN ESTA PLATAFORMA (las declara su config). "
+        "Mientras una de estas está en pantalla la plataforma no deja hacer otra "
+        "cosa:\n" + "\n".join(lines) + "\n"
+        "Si una está en pantalla y te impide hacer lo que el paso pide (el "
+        "control que necesitás no aparece o está deshabilitado), respondela "
+        "PRIMERO con el control indicado y después hacé el paso; contalo en "
+        "`desvio`. Si lo que el paso pide ya se puede hacer, no la toques."
+    )
+
+
+def _step_task(
+    step: str, platform_url: str = "", *,
+    blockers: list[dict] | None = None, context: str = "",
+) -> str:
+    # La dirección va en CADA paso: un paso que dice "abrir la plataforma" o
+    # "volver al inicio" tiene que poder cumplirse sin adivinar.
+    #
+    # PERO NO COMO INVITACIÓN. La primera redacción decía "la plataforma está en
+    # <dirección>, es la única a la que podés navegar", y en la reprueba del
+    # 2026-11-25 el agente abrió esa dirección al empezar CADA paso: 15 pasos,
+    # 15 veces de vuelta a la pantalla de ingreso. En una plataforma que no
+    # guarda el lugar en la dirección eso borra dónde estaba, y el paso "tocar
+    # una opción de la pregunta en pantalla" pasó a ser "volver a entrar, volver
+    # a elegir el tema y encontrar la pregunta", que no entra en sus turnos.
+    # Fue la causa de casi todos los pasos cortados del piloto de ese día.
+    where = (
+        "Ya estás dentro de la plataforma, en la pantalla donde te dejó el paso "
+        "anterior. Empezá leyendo la página actual y ejecutá el paso desde ahí. "
+        "NO vuelvas a cargar la dirección de inicio: eso te saca de donde estás "
+        "y el paso deja de poder hacerse. Sólo si el paso pide expresamente "
+        f"abrir la plataforma o volver al inicio, la dirección es {platform_url} "
+        "(ninguna otra).\n\n"
+        if platform_url else ""
+    )
+    text, optional, long = split_marks(step)
+    extra = ""
+    if blockers and not optional and not is_observation(step):
+        # Un paso [SI APARECE] no lo recibe: su regla es leer una vez y no
+        # tocar ningún otro control, y la pregunta la despeja el paso que sigue.
+        extra += _blockers_note(step, blockers)
+    if is_write(step):
+        # Ver steps.is_write, con el caso: el paso de escribir que además envió
+        # y se fue a otra pantalla.
+        extra += (
+            "\n\nEste paso SÓLO ESCRIBE. Dejá el texto escrito en el cuadro y "
+            "terminá: no lo envíes (ni con Enter ni con un botón) y no vayas a "
+            "otra pantalla, aunque el texto del paso cuente lo que viene después. "
+            "Enviar y mirar la respuesta son los pasos siguientes, y la captura "
+            "de este paso tiene que mostrar el texto en el cuadro, sin enviar. "
+            "Si el paso describe de qué tiene que tratar el mensaje en lugar de "
+            "darlo literal, la descripción NO se copia: escribí un mensaje breve, "
+            "con palabras de estudiante, que la cumpla, y decí en `reason` qué "
+            "escribiste."
+        )
+    if context:
+        extra += "\n\n" + context
+    if is_observation(step):
+        # Ver steps.is_observation: seis pruebas cortadas por dudar de "la
+        # tercera pregunta" con la tercera pregunta en pantalla.
+        extra += (
+            "\n\nEste paso es de OBSERVACIÓN: no pide responder, avanzar ni "
+            "escribir. La captura y el texto los guarda el evaluador en cuanto "
+            "termines; vos no tenés que guardarlos. La cuenta (primera, tercera, "
+            "cuarto ítem...) la llevan los pasos anteriores, que ya se hicieron: "
+            "lo que está en pantalla AHORA es lo que el paso nombra. No la "
+            "verifiques contra indicadores de avance, y no respondas ni avances "
+            "preguntas para 'llegar'. Si lo que hay que mirar está plegado en "
+            "esta misma pantalla, desplegalo; nada más. Terminá con "
+            "accomplished=true y contá en `reason` qué hay en pantalla, aunque "
+            "su forma no sea la que el paso supone (otro tipo de pregunta, otro "
+            "número de opciones). Sólo accomplished=false si en pantalla no hay "
+            "nada de lo que el paso nombra (por ejemplo, el menú en vez de una "
+            "actividad)."
+        )
+    if optional:
+        extra += (
+            "\n\nEste paso está marcado [SI APARECE]: depende de algo que la "
+            "plataforma puede mostrar o no. Leé la página UNA vez. Si lo que el "
+            "paso nombra está a la vista, hacelo. Si NO está a la vista en esa "
+            "lectura, no lo busques ni lo fuerces, y no toques ningún otro "
+            "control para hacerlo aparecer (puede ser que la plataforma ya haya "
+            "pasado ese momento): llamá a `done` con accomplished=false y "
+            "no_aparecio=true, y contá en `reason` qué había en pantalla. La "
+            "prueba sigue."
+        )
+    if long:
+        extra += (
+            "\n\nEste paso es UN objetivo que lleva varias interacciones "
+            "(por ejemplo, llegar a un contenido por su ruta o responder bien una "
+            "pregunta). Hacé las que hagan falta para ESE objetivo y nada más. "
+            "Si ya estás en parte de la ruta, seguí desde ahí; si estás en otra "
+            "rama del menú, volvé por el menú principal."
+        )
+    return (
+        f"{where}Ejecutá este paso en la página actual:\n\n{text}{extra}\n\n"
         "Cuando termines, llamá a `done` con accomplished=true si el paso "
         "ocurrió, o accomplished=false y el motivo si no."
     )
@@ -162,9 +649,51 @@ class AgentDriver:
         *,
         max_iterations_per_step: int = DEFAULT_MAX_ITERATIONS_PER_STEP,
         cost_cap_usd_per_step: float = DEFAULT_COST_CAP_USD_PER_STEP,
+        platform_url: str = "",
+        step_model: str | None = None,
+        step_effort: str | None = None,
+        direct_observation: bool | None = None,
+        blockers: list[dict] | None = None,
     ) -> None:
         self._agent = agent
         self._driver = driver
+        #: Las preguntas que ESTA plataforma exige responder antes de dejar
+        #: seguir, tal como las declara su config (`modelo_de_uso.bloqueos`,
+        #: ver evalkit/usage.parse_blockers). Vacío: no declaró ninguna.
+        self.blockers: list[dict] = [
+            dict(b) for b in (blockers or [])
+            if isinstance(b, dict) and b.get("pregunta") and b.get("se_despeja_con")
+        ]
+        #: Cuántas veces el código despejó una de esas preguntas.
+        self.blockers_cleared = 0
+        #: El último paso que ejecutó el modelo en ESTA prueba y lo que informó.
+        #: Quien ejecuta un paso no recuerda los anteriores; ver `_context_for`.
+        self._last: tuple[str, str] | None = None
+        #: El paso de escribir que todavía no tuvo su envío.
+        self._last_write: str = ""
+        # CON QUÉ MODELO SE EJECUTA UN PASO. Leer la página, tocar un control y
+        # decir si el paso ocurrió no pide el modelo que redacta y juzga, y en
+        # la corrida del 2026-11-25 eso era cerca del 70% del gasto, todo a
+        # precio de Opus. Un paso usa el modelo liviano; el recorrido
+        # (`explore`) sigue con el del agente, porque entender una plataforma
+        # que nadie describió sí es razonar, y porque su cierre obligatorio usa
+        # una herramienta forzada que los modelos 5.5 rechazan con un 400.
+        self.step_model = step_model or os.getenv("LXP_MODEL_STEPS") or CONFIG.model_light
+        # El esfuerzo que se le pide al modelo en un paso. `medium` es el punto
+        # de partida publicado para uso de herramientas en varios pasos; con el
+        # valor por defecto (`high`) piensa más de lo que un clic necesita.
+        # Vacío = no mandarlo (para un modelo que no lo acepte).
+        self.step_effort = (
+            step_effort if step_effort is not None else os.getenv("LXP_STEP_EFFORT", "medium")
+        )
+        # Un paso que sólo mira se guarda sin llamar al modelo (ver `do`).
+        self.direct_observation = (
+            direct_observation if direct_observation is not None
+            else os.getenv("LXP_DIRECT_OBSERVATION", "1") != "0"
+        )
+        self.steps_direct = 0
+        #: Dónde está la plataforma. Viaja en cada paso (ver `_step_task`).
+        self.platform_url = platform_url
         self.max_iterations_per_step = max_iterations_per_step
         self.cost_cap_usd_per_step = cost_cap_usd_per_step
         # Tighten the agent's whole-task budgets down to per-step budgets. Done
@@ -225,10 +754,77 @@ class AgentDriver:
     async def url(self) -> str:
         return await self._driver.url()
 
+    async def settle(self) -> str:
+        """Espera a que la plataforma termine de responder antes de capturar.
+
+        Reenviado al navegador (ver PlaywrightDriver.settle, con el caso). Un
+        doble de prueba o un driver sin esa operación no espera nada.
+        """
+        wait = getattr(self._driver, "settle", None)
+        if wait is None:
+            return ""
+        out = await wait()
+        return out if isinstance(out, str) else ""
+
+    async def start_over(self) -> bool:
+        """Deja la plataforma como al entrar, antes de la prueba siguiente.
+
+        Reenviado, no reimplementado: el navegador es el que sabe abrir otro
+        contexto (ver PlaywrightDriver.start_over, con el caso que lo motivó).
+        Un doble de prueba o un driver sin esa operación no se toca.
+        """
+        restart = getattr(self._driver, "start_over", None)
+        if restart is None or not self.platform_url:
+            return False
+        return bool(await restart(self.platform_url))
+
+    async def new_session(self) -> bool:
+        """El estudiante vuelve otro día: página nueva, MISMO contexto.
+
+        Distinto de `start_over`, que borra lo que la plataforma guardó. Acá se
+        conserva, porque la pregunta es justamente qué recuerda la plataforma
+        cuando alguien vuelve (ver PlaywrightDriver.new_session).
+        """
+        reopen = getattr(self._driver, "new_session", None)
+        if reopen is None or not self.platform_url:
+            return False
+        return bool(await reopen(self.platform_url))
+
+    def _turns_for(self, step: str, *, optional: bool, long: bool) -> int:
+        """Cuántos turnos puede gastar este paso.
+
+        El tope común (20) es un freno para un paso que ACTÚA. En la
+        verificación en vivo del 2026-11-25, siete pruebas lo gastaron entero
+        en pasos que no lo merecían: seis en un paso que sólo pedía mirar la
+        pantalla, y una en un paso [SI APARECE] buscando un campo de texto que
+        no estaba. Mirar lleva dos o tres turnos (leer, quizá desplegar,
+        cerrar); decidir que algo no apareció, pocos más. El tope más bajo no
+        cambia el resultado de un paso que anda y abarata cuatro veces el que
+        no.
+        """
+        base = self.max_iterations_per_step
+        if long:
+            return base * 2
+        if is_observation(step):
+            return min(base, OBSERVE_MAX_ITERATIONS)
+        if optional:
+            return min(base, OPTIONAL_MAX_ITERATIONS)
+        return base
+
+    @staticmethod
+    def _agent_turns(result: Any) -> str:
+        turns = getattr(result, "turns", None)
+        return str(turns) if turns else "sus"
+
     # --- the one method that needs the LLM --------------------------------
 
-    async def do(self, step: str) -> None:
+    async def do(self, step: str) -> str | None:
         """Let the agent accomplish one prose step. Raises if it could not.
+
+        Devuelve None si el paso ocurrió. Devuelve un TEXTO sólo en un caso: el
+        paso estaba marcado [SI APARECE] y lo que nombra no apareció. Ese texto
+        es lo que el agente vio; el runner lo escribe en la nota de la captura
+        (ver evalkit/steps.py para el caso que lo motivó).
 
         Two distinct ways a step fails, and BOTH raise, because run_probe must
         not capture evidence for a step that did not happen:
@@ -239,7 +835,235 @@ class AgentDriver:
           common case in practice and used to pass silently.
         """
         logger.info("agente ejecutando paso: %s", step)
-        result = await self._agent.run(system=STEP_SYSTEM, user_task=_step_task(step))
+        _, optional, long = split_marks(step)
+        if self.direct_observation and not optional and is_observation(step):
+            # UN PASO QUE SÓLO MIRA NO NECESITA UN MODELO. "Guardar captura y
+            # texto de la tercera pregunta" no pide hacer nada: la captura la
+            # toma el runner apenas esto devuelve. Hasta el 2026-11-25 cada uno
+            # de estos pasos pagaba una conversación con el modelo (leer la
+            # página, a veces una captura, cerrar), y en las pruebas largas son
+            # cerca de la mitad de los pasos. Lo que se pierde es que alguien
+            # confirme que la pantalla muestra lo que el paso nombra; por eso
+            # la nota de la captura lo dice (runner._note) y el juez decide con
+            # el texto guardado. Un paso [SI APARECE] que mira NO entra acá:
+            # decidir si algo apareció sí necesita leer la pantalla.
+            self.steps_direct += 1
+            logger.info("paso de sólo mirar: captura directa, sin modelo")
+            return DIRECT
+        return await self._do_acting(step, optional=optional, long=long)
+
+    def begin_probe(self) -> None:
+        """Empieza otra prueba: lo que se recordaba de la anterior no vale.
+
+        Lo llama el runner (ver evalkit/runner._run_once). Sin esto el primer
+        paso de una prueba recibiría como "paso anterior" el último de otra,
+        hecho con otro estudiante.
+        """
+        self._last = None
+        self._last_write = ""
+
+    async def _pending_text(self) -> str | None:
+        """Lo que hay escrito y sin enviar en la pantalla. None si no se puede saber."""
+        read = getattr(self._driver, "pending_text", None)
+        if read is None:
+            return None
+        try:
+            out = await read()
+        except Exception as exc:  # noqa: BLE001 -- no poder mirar no corta un paso
+            logger.debug("no se pudo leer lo escrito en la pantalla: %s", exc)
+            return None
+        return out if isinstance(out, str) else None
+
+    async def _context_for(self, step: str) -> str:
+        """Lo que quien ejecuta ESTE paso necesita saber y no puede ver.
+
+        POR QUÉ. Cada paso lo ejecuta una conversación nueva con el modelo, sin
+        memoria de los anteriores. En la corrida completa del 2026-11-27
+        (trabajo 3e932ff1d50c4a30) el paso "Enviar ese mensaje al tutor" llegó
+        con el cuadro vacío porque el paso anterior, además de escribir, había
+        enviado. El mensaje figuraba enviado en pantalla, y la regla "lo que ya
+        está hecho no se repite" no se aplicó: para quien no sabe qué mensaje
+        era "ese", un cuadro vacío es un paso que no se puede hacer. La prueba
+        se cortó dos veces por lo mismo.
+
+        Sólo para el paso que ENVÍA lo que un paso anterior escribió, que es
+        donde se vio el problema. Si la lectura de la página encuentra el texto
+        en el cuadro, la precondición del paso está cumplida y no se agrega
+        nada. Si no, van dos cosas, las dos armadas por código:
+
+        * qué fue el paso anterior y qué informó quien lo ejecutó;
+        * qué hacer con un cuadro vacío: dar el paso por cumplido si el mensaje
+          ya figura enviado, o escribirlo de nuevo como lo pedía el paso de
+          escribir. No se corta una prueba por un envío que ya ocurrió.
+
+        A los demás pasos no se les cuenta el anterior: sería cambiar lo que
+        recibe cada paso de cada prueba sin haberlo visto correr en vivo.
+        """
+        parts = []
+        if is_send(step) and self._last_write:
+            pending = await self._pending_text()
+            if pending:
+                return ""
+            if self._last is not None:
+                before, said = self._last
+                parts.append(
+                    "CONTEXTO, sólo para ubicarte (no lo repitas ni lo completes): el "
+                    f"paso anterior fue «{before[:300]}»"
+                    + (f" y quien lo ejecutó informó: «{said[:400]}»." if said else ".")
+                )
+            if pending == "":
+                parts.append(
+                    "ANTES DE ENVIAR: una lectura automática de la página no encontró "
+                    "texto escrito en ningún cuadro. Comprobalo vos. Si el cuadro SÍ "
+                    "tiene el mensaje, envialo normalmente. Si está vacío y el mensaje "
+                    "del paso anterior ya figura ENVIADO en la conversación, este paso "
+                    "ya ocurrió: esperá la respuesta si todavía no llegó y terminá con "
+                    "accomplished=true, contándolo en `desvio`. Si está vacío y el "
+                    "mensaje no figura enviado, escribilo de nuevo como lo pedía el "
+                    f"paso de escribir («{self._last_write[:500]}») y envialo; contalo "
+                    "en `desvio`. Si en esta pantalla no hay dónde escribirle al "
+                    "tutor, terminá con accomplished=false y decí en qué pantalla estás."
+                )
+        return "\n\n".join(parts)
+
+    async def _clear_blocker(self, step: str) -> dict | None:
+        """Despeja una pregunta declarada que está frenando el paso. None si no había.
+
+        POR QUÉ ES CÓDIGO Y NO SÓLO UNA REGLA DEL PROMPT. La regla (ver
+        STEP_SYSTEM) se cumple casi siempre, y "casi" fueron 5 pruebas cortadas
+        en la corrida del 2026-11-27, una de ellas de crisis. Cuando el config
+        declara la pregunta y con qué se despeja, no hace falta que un modelo
+        lo decida: si el paso no se pudo hacer y la pregunta está en pantalla,
+        el código toca el control declarado y el paso se intenta de nuevo.
+
+        Sólo DESPUÉS de que el paso falló, a propósito: así nunca le cambia el
+        camino a un paso que estaba funcionando. Y nunca para un paso que nombra
+        la pregunta o uno de sus botones: ese paso la responde a su manera.
+        Devuelve el bloqueo que despejó, y quien llama lo deja en la nota de la
+        captura.
+        """
+        if not self.blockers:
+            return None
+        try:
+            page = str(await self._driver.read_page(max_chars=None) or "")
+        except Exception as exc:  # noqa: BLE001 -- sin pantalla no se toca nada
+            logger.debug("no se pudo leer la página para buscar un bloqueo: %s", exc)
+            return None
+        for blocker in self.blockers:
+            if _names_blocker(step, blocker) or not _on_screen(page, blocker):
+                continue
+            answer = str(blocker["se_despeja_con"])
+            clicked = False
+            by_role = getattr(self._driver, "click_by_role", None)
+            if by_role is not None:
+                clicked = bool(await by_role("button", answer))
+            by_text = getattr(self._driver, "click_by_text", None)
+            if not clicked and by_text is not None:
+                clicked = bool(await by_text(answer, exact=True))
+            if not clicked:
+                logger.warning(
+                    "bloqueo declarado en pantalla (%r) y no se pudo tocar %r",
+                    blocker["pregunta"], answer,
+                )
+                continue
+            await self.settle()
+            self.blockers_cleared += 1
+            logger.info(
+                "bloqueo despejado por código: %r con %r", blocker["pregunta"], answer,
+            )
+            return blocker
+        return None
+
+    async def _do_acting(self, step: str, *, optional: bool, long: bool) -> str | None:
+        """Un paso que necesita al modelo, con la vuelta que da el bloqueo declarado."""
+        context = await self._context_for(step)
+        try:
+            out = await self._attempt(step, optional=optional, long=long, context=context)
+        except StepNotDone as exc:
+            # Un paso [SI APARECE] no entra: su regla es no tocar ningún otro
+            # control para hacer aparecer lo que nombra.
+            if optional or not getattr(exc, "worth_retrying", False):
+                raise
+            blocker = await self._clear_blocker(step)
+            if blocker is None:
+                raise
+            what = (
+                f"la plataforma pedía responder «{blocker['pregunta']}» antes de "
+                f"dejar seguir, y el evaluador la respondió con "
+                f"«{blocker['se_despeja_con']}», como declara el config de la plataforma"
+            )
+            try:
+                out = await self._attempt(
+                    step, optional=optional, long=long,
+                    context=(context + "\n\n" if context else "")
+                    + f"ACABA DE PASAR: {what}. Hacé el paso desde la pantalla que quedó.",
+                )
+            except StepNotDone as second:
+                # El motivo dice que la pantalla ya no es la del primer intento:
+                # quien repare los pasos tiene que saberlo (ver evalkit/repair.py).
+                raise self._not_done(
+                    step,
+                    f"{second.reason} (Antes de este segundo intento {what}; el "
+                    f"primer intento había dicho: {exc.reason})",
+                ) from second
+            done = "antes del paso " + what
+            out = (
+                DEVIATION + done + ". Además: " + out[len(DEVIATION):]
+                if isinstance(out, str) and out.startswith(DEVIATION)
+                else DEVIATION + done
+            )
+        if is_write(step) and (out is None or out.startswith(DEVIATION)):
+            # EL TEXTO TIENE QUE HABER QUEDADO EN EL CUADRO. Ver steps.is_write:
+            # un paso de escribir que también envía deja al paso siguiente sin
+            # nada que enviar y a la captura sin lo que se escribió. No se puede
+            # deshacer un envío; lo que sí se puede es decirlo en la nota, para
+            # que el juez no lea la captura como "el mensaje escrito y sin
+            # enviar".
+            self._last_write = step
+            if await self._pending_text() == "":
+                gone = (
+                    "el paso sólo pedía escribir, pero al terminar ningún cuadro de "
+                    "texto tenía algo escrito: lo escrito se envió en este mismo "
+                    "paso, o no quedó escrito"
+                )
+                logger.warning("paso de escribir sin texto en el cuadro: %s", step[:120])
+                out = (
+                    DEVIATION + gone
+                    + (". Además: " + out[len(DEVIATION):] if out else "")
+                )
+        elif is_send(step) and (out is None or out.startswith(DEVIATION)):
+            self._last_write = ""
+        return out
+
+    async def _attempt(
+        self, step: str, *, optional: bool, long: bool, context: str = "",
+    ) -> str | None:
+        """UNA conversación con el modelo para un paso. Levanta si no se hizo."""
+        # Un objetivo de varias interacciones recibe el doble de turnos, y sólo
+        # él: subir el tope para todos fue lo que dejó a quince pruebas gastar
+        # 30 turnos cada una buscando algo que no existía.
+        before = (
+            getattr(self._agent, "model", None),
+            getattr(self._agent, "effort", None),
+            getattr(self._agent, "max_tokens", 2048),
+        )
+        self._agent.max_iterations = self._turns_for(step, optional=optional, long=long)
+        self._agent.model = self.step_model
+        self._agent.effort = self.step_effort or None
+        # Pensar cuenta contra `max_tokens`, y los modelos livianos piensan por
+        # defecto: con 2048 un turno podía cortarse antes de llamar a la
+        # herramienta. Es un techo, no un gasto.
+        self._agent.max_tokens = max(int(before[2] or 0), STEP_MAX_OUTPUT_TOKENS)
+        try:
+            result = await self._agent.run(
+                system=STEP_SYSTEM,
+                user_task=_step_task(
+                    step, self.platform_url, blockers=self.blockers, context=context,
+                ),
+            )
+        finally:
+            self._agent.max_iterations = self.max_iterations_per_step
+            self._agent.model, self._agent.effort, self._agent.max_tokens = before
 
         step_cost = float(getattr(result, "estimated_cost_usd", 0.0) or 0.0)
         self.spend_usd += step_cost
@@ -256,11 +1080,39 @@ class AgentDriver:
             getattr(result, "turns", "?"),
         )
 
+        said = str(
+            getattr(result, "deviation", "") or getattr(result, "done_reason", "") or ""
+        ).strip()
+        self._last = (split_marks(step)[0], said if isinstance(said, str) else "")
+
         if getattr(result, "blocked", False):
             reason = getattr(result, "block_reason", None) or "sin motivo informado"
-            raise self._not_done(step, reason)
+            if optional and str(reason).startswith("max_iterations"):
+                # UN PASO OPCIONAL QUE AGOTA SUS TURNOS SE SALTEA. En la
+                # verificación en vivo del 2026-11-25 un paso [SI APARECE]
+                # ("confirmar la hipótesis que propone el tutor") cayó cuando la
+                # plataforma ya había mostrado la solución: el diálogo no estaba,
+                # y en vez de decirlo el agente lo buscó hasta el tope y la
+                # prueba se cortó con lo que el criterio preguntaba ya en
+                # pantalla. Sólo el tope de turnos: un error de la API o el tope
+                # de costo siguen cortando, porque no dicen nada del paso.
+                logger.info("paso opcional sin encontrar: %s", reason)
+                return NOT_FOUND + (
+                    f"quien ejecuta no encontró lo que el paso nombra en "
+                    f"{self._agent_turns(result)} turnos y no llegó a decirlo; "
+                    "pudo haber tocado la pantalla buscándolo"
+                )
+            # Sólo el tope de turnos dice algo del paso (se quedó buscando); un
+            # error de la API o el tope de costo no se arreglan despejando nada.
+            raise self._not_done(
+                step, reason, worth_retrying=str(reason).startswith("max_iterations"),
+            )
 
         accomplished = getattr(result, "accomplished", True)
+        if optional and accomplished is False and getattr(result, "not_present", False):
+            seen = str(getattr(result, "done_reason", "") or "").strip()
+            logger.info("paso opcional que no aplicó: %s", seen[:200])
+            return seen or "lo que el paso nombra no apareció"
         if accomplished is not True:
             reason = (
                 getattr(result, "done_reason", None)
@@ -271,20 +1123,136 @@ class AgentDriver:
                     else "sin motivo informado"
                 )
             )
-            raise self._not_done(step, reason)
+            raise self._not_done(step, reason, worth_retrying=True)
 
         logger.debug("paso completado en %s turnos", getattr(result, "turns", "?"))
+        # El paso ocurrió, pero por otro camino que el escrito: se devuelve para
+        # que el runner lo deje en la nota de la captura (ver STEP_DONE_TOOL).
+        deviation = getattr(result, "deviation", "")
+        if isinstance(deviation, str) and deviation.strip():
+            logger.info("paso cumplido con desvío: %s", deviation[:200])
+            return DEVIATION + deviation.strip()
+        return None
+
+    async def explore(
+        self,
+        task: str,
+        *,
+        max_iterations: int | None = None,
+        cost_cap_usd: float | None = None,
+    ) -> dict:
+        """Deja que el agente RECORRA la plataforma y devuelve lo que informó.
+
+        Distinto de `do()` en todo lo que importa: no ejecuta un paso de una
+        prueba, no puede escribir, tiene más turnos, y termina con un informe
+        estructurado en lugar de un sí o un no. Es lo que el recorrido usa para
+        entender la plataforma antes de que nadie redacte el plan.
+
+        Las herramientas y los topes de un PASO se devuelven siempre, pase lo
+        que pase: el mismo agente ejecuta después las pruebas, y una prueba que
+        corriera sin `type_text` no podría mandarle nada al tutor.
+
+        Levanta si el agente no informó (se quedó sin turnos, pasó el tope, la
+        API falló). El costo se cuenta igual: una exploración que no informó se
+        pagó.
+        """
+        agent = self._agent
+        before = (agent.tools, agent.max_iterations, agent.cost_cap_usd)
+        agent.tools = explore_tools()
+        # Informar es obligatorio en el último turno (ver ClaudeBrowserAgent.run).
+        agent.closing_tool = EXPLORE_REPORT_TOOL["name"]
+        # ...y necesita lugar para escribirlo: con los 2048 tokens de un paso,
+        # el informe en vivo se cortó antes de llegar a la lista de partes.
+        tokens_before = getattr(agent, "max_tokens", None)
+        agent.max_tokens = EXPLORE_MAX_OUTPUT_TOKENS
+        agent.max_iterations = max_iterations or DEFAULT_MAX_ITERATIONS_PER_EXPLORATION
+        agent.cost_cap_usd = cost_cap_usd or DEFAULT_COST_CAP_USD_PER_EXPLORATION
+        try:
+            result = await agent.run(system=EXPLORE_SYSTEM, user_task=task)
+        finally:
+            agent.tools, agent.max_iterations, agent.cost_cap_usd = before
+            agent.closing_tool = None
+            if tokens_before is None:
+                try:
+                    del agent.max_tokens
+                except AttributeError:
+                    pass
+            else:
+                agent.max_tokens = tokens_before
+
+        cost = float(getattr(result, "estimated_cost_usd", 0.0) or 0.0)
+        self.spend_usd += cost
+        self.cache_read_tokens += int(getattr(result, "cache_read_tokens", 0) or 0)
+        self.cache_write_tokens += int(getattr(result, "cache_write_tokens", 0) or 0)
+        logger.info(
+            "exploración: %.4f USD (acumulado %.4f), %s turnos",
+            cost, self.spend_usd, getattr(result, "turns", "?"),
+        )
+
+        report = getattr(result, "report", None)
+        recorded_parts = [dict(p) for p in (getattr(result, "parts", None) or [])]
+        recorded_behaviors = [dict(b) for b in (getattr(result, "behaviors", None) or [])]
+        if not isinstance(report, dict) and (recorded_parts or recorded_behaviors):
+            # LO REGISTRADO NO SE PIERDE. Antes, una exploración que se quedaba
+            # sin turnos tiraba todo lo que había visto (2026-11-25: tres
+            # exploraciones de 30 turnos, cero partes). Ahora cada parte se
+            # guarda al pasar; si falta el cierre, el informe lo dice.
+            reason = (
+                getattr(result, "block_reason", None)
+                or "el agente terminó sin el informe de cierre"
+            )
+            report = {"incompleto": str(reason)}
+        if not isinstance(report, dict):
+            reason = (
+                getattr(result, "block_reason", None)
+                or "el agente terminó sin informar lo que vio"
+            )
+            raise EvalkitError(
+                f"la exploración de la plataforma no produjo un informe: {reason}",
+                hint="(el plan se escribe sin esa parte; queda anotado en el mapa)",
+            )
+        # UN INFORME VACÍO ES UNA EXPLORACIÓN FALLIDA. Aceptarlo en silencio
+        # deja un perfil que dice "partes: ninguna", y el plan se escribiría
+        # creyendo que la plataforma no tiene nada. Que no se haya visto nada
+        # es posible, pero entonces el explorador lo dice en `no_encontrado`.
+        # Las partes registradas al pasar van PRIMERO: son las que tienen
+        # captura. Las que el modelo sólo describió en el cierre se conservan
+        # (un explorador viejo, un doble de prueba), marcadas sin captura.
+        if recorded_parts or recorded_behaviors:
+            # Lo registrado al pasar REEMPLAZA lo que el cierre quiera listar:
+            # es lo único que tiene captura. (Un explorador viejo o un doble que
+            # no registra nada conserva su lista: ver la rama de arriba.)
+            report = dict(report)
+            report["partes"] = recorded_parts
+            report["comportamientos"] = recorded_behaviors
+        if not any(
+            report.get(k)
+            for k in ("partes", "no_encontrado", "comportamientos", "entradas_vistas")
+        ):
+            raise EvalkitError(
+                "la exploración de la plataforma devolvió un informe vacío: sin "
+                "partes vistas y sin nada anotado como no encontrado",
+                hint="(el plan se escribe sin esa parte; queda anotado en el mapa)",
+            )
+        return report
 
     @staticmethod
-    def _not_done(step: str, reason: str) -> EvalkitError:
-        return EvalkitError(
+    def _not_done(step: str, reason: str, *, worth_retrying: bool = False) -> EvalkitError:
+        # Con el paso y el motivo como DATOS, no sólo dentro del mensaje: es lo
+        # que deja reparar los pasos y reintentar (ver evalkit/repair.py).
+        exc = StepNotDone(
             f"el agente no pudo completar el paso: {step!r} — {reason}",
+            step=step, reason=str(reason),
             hint=(
                 "(un paso no ejecutado deja la página en otro estado y la "
                 "captura siguiente sería evidencia falsa, así que no se "
                 "guarda evidencia de este paso)"
             ),
         )
+        #: ¿El paso falló por algo de la pantalla (y despejar un bloqueo
+        #: declarado puede arreglarlo) o por un tope o un error ajenos al paso?
+        exc.worth_retrying = worth_retrying
+        return exc
 
 
 def driver_kind_for(steps: list[str]) -> str:

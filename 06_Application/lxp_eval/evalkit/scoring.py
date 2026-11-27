@@ -30,6 +30,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -107,8 +108,389 @@ JUDGE_SYSTEM = (
     "- NO_EVALUADO: la evidencia no alcanza para decidir.\n"
     "Regla estricta: NO emitas CUMPLE, PARCIAL ni NO_CUMPLE sin citar en "
     "cited_artifacts al menos un artefacto que respalde el veredicto. Si no podés "
-    "citar evidencia, el veredicto es NO_EVALUADO."
+    "citar evidencia, el veredicto es NO_EVALUADO.\n"
+    # Agregado tras la corrida del 2026-11-25. En PT-D1-06 ("explica antes de
+    # preguntar, o espera que el estudiante descubra") el juez leyó
+    # "descubrimiento" como navegación automática y puso CUMPLE sobre capturas
+    # que mostraban lo contrario. En PT-D4-03 dio CUMPLE "porque no hay
+    # temporizador" a una regla que pedía avance por dominio.
+    "LEÉ LA REGLA LITERALMENTE. Tu justificación empieza con dos frases: qué "
+    "PREGUNTA la regla (con sus palabras) y qué HECHO observado en la evidencia "
+    "la responde. Si la evidencia muestra otra cosa que lo que la regla "
+    "pregunta, el veredicto es NO_EVALUADO, no CUMPLE. Que algo no aparezca no "
+    "prueba lo contrario de otra cosa: que no haya un temporizador no muestra "
+    "que el avance dependa del dominio.\n"
+    "Una nota que dice [NO APARECIÓ, EL PASO NO SE HIZO] avisa que la captura "
+    "muestra la pantalla SIN ese paso: no la leas como evidencia de que el paso "
+    "ocurrió. Una nota que dice [NO SE ENCONTRÓ, EL PASO NO SE HIZO] avisa "
+    "además que quien ejecuta lo buscó sin encontrarlo y pudo haber tocado la "
+    "pantalla: si la captura no muestra lo que el paso siguiente supone, esa "
+    "prueba no sirve para la regla y el veredicto es NO_EVALUADO. Una nota que "
+    "dice [CAPTURA DIRECTA] avisa que la pantalla se guardó tal como estaba, "
+    "sin que nadie comprobara que muestra lo que el paso nombra: lo que vale "
+    "es el texto y la imagen guardados, no el nombre del paso. Una nota que "
+    "dice [SE HIZO DISTINTO DE LO ESCRITO] cuenta qué hizo de verdad quien "
+    "ejecuta: juzgá con eso y no con el nombre del paso. Una nota que dice [LA "
+    "PLATAFORMA SEGUÍA RESPONDIENDO AL CAPTURAR] avisa que esa captura puede "
+    "no mostrar la respuesta: no deduzcas de ella que la plataforma no "
+    "respondió.\n"
+    # Agregado tras la corrida completa del 2026-11-26: cinco criterios quedaron
+    # sin veredicto porque cada prueba se juzgó con una lectura propia de la
+    # regla (ver `read_rule`).
+    "Si el mensaje trae una LECTURA DE LA REGLA, es la misma para todas las "
+    "pruebas de este criterio y se fijó antes de mirar la evidencia: aplicala "
+    "tal cual, con sus definiciones. No la reinterpretes ni le agregues "
+    "excepciones tuyas. Describí el HECHO observado antes de decidir: dos "
+    "pruebas que observan el mismo hecho reciben el mismo veredicto."
 )
+
+_READING_TOOL_NAME = "emitir_lectura"
+
+READING_TOOL: dict[str, Any] = {
+    "name": _READING_TOOL_NAME,
+    "description": "Fijá cómo se lee la regla de este criterio, para todas sus pruebas.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pregunta": {
+                "type": "string",
+                "description": "Qué pregunta la regla, en una frase, con sus palabras.",
+            },
+            "definiciones": {
+                "type": "string",
+                "description": (
+                    "Los términos de la regla que admiten más de una lectura, "
+                    "cada uno fijado: qué incluye y qué no."
+                ),
+            },
+            "cumple": {
+                "type": "string",
+                "description": "Qué HECHO observable en la plataforma cuenta como CUMPLE.",
+            },
+            "parcial": {
+                "type": "string",
+                "description": "Qué hecho observable cuenta como PARCIAL.",
+            },
+            "no_cumple": {
+                "type": "string",
+                "description": "Qué HECHO observable cuenta como NO_CUMPLE.",
+            },
+            "no_alcanza": {
+                "type": "string",
+                "description": (
+                    "Qué evidencia NO responde a la regla aunque se le parezca "
+                    "(un hecho vecino, una ausencia): con eso es NO_EVALUADO."
+                ),
+            },
+        },
+        "required": ["pregunta", "cumple", "no_cumple", "no_alcanza"],
+    },
+}
+
+READING_SYSTEM = (
+    "Fijás, UNA vez por criterio, cómo se lee su regla en una evaluación de "
+    "plataformas educativas. Después, varias pruebas de ese criterio se juzgan "
+    "por separado, cada una con su evidencia y todas con tu lectura: tu trabajo "
+    "es que todas midan lo mismo. Todavía nadie miró la evidencia y vos no "
+    "conocés la plataforma: no supongas qué se va a encontrar ni a favor ni en "
+    "contra.\n"
+    "Leé la regla LITERALMENTE. Decí qué pregunta, con sus palabras. Fijá los "
+    "términos que admiten más de una lectura (qué cuenta como 'elemento nuevo', "
+    "qué cuenta como 'explicar antes'): elegí la lectura más apegada al texto y "
+    "decí qué incluye y qué no. Decí qué HECHO observable en pantalla cuenta "
+    "como CUMPLE, cuál como PARCIAL y cuál como NO_CUMPLE. Y decí qué NO "
+    "alcanza: los hechos vecinos que se confunden con la regla (que una "
+    "actividad empiece con una pregunta no dice si hubo una explicación antes) "
+    "y las ausencias (que no haya un temporizador no muestra que el avance sea "
+    "por dominio). Sé breve y concreto. Respondés con la herramienta."
+)
+
+
+#: Cuántas veces se pide la lectura de una regla antes de darla por perdida.
+READING_ATTEMPTS = 2
+
+#: Las claves sin las cuales una lectura no sirve: la pregunta y los dos extremos.
+_READING_NEEDS = ("pregunta", "cumple", "no_cumple")
+
+#: Un campo de la herramienta pegado DENTRO del texto de otro: el cierre de un
+#: parámetro y la apertura del siguiente, escritos como texto (ver
+#: `_recover_glued_fields`, con el caso).
+_GLUED_FIELD = re.compile(r'</parameter>\s*<parameter name="([A-Za-z_][A-Za-z0-9_]*)">')
+_GLUED_TAIL = re.compile(r"\s*</parameter>(?:\s*</invoke>)?\s*$")
+
+
+class ReadingUnavailable(EvalkitError):
+    """No se pudo fijar la lectura de la regla de un criterio (ver `read_rule`)."""
+
+
+#: Los campos de una lectura, en el orden en que el juez los lee, con su rótulo.
+READING_FIELDS = (
+    ("pregunta", "Qué pregunta la regla"),
+    ("definiciones", "Definiciones"),
+    ("cumple", "CUMPLE si se observa"),
+    ("parcial", "PARCIAL si se observa"),
+    ("no_cumple", "NO_CUMPLE si se observa"),
+    ("no_alcanza", "NO alcanza para decidir (es NO_EVALUADO)"),
+)
+
+
+@dataclass(frozen=True)
+class RuleReading:
+    """La lectura de la regla de un criterio, CAMPO POR CAMPO.
+
+    Hasta el 2026-11-27 `read_rule` devolvía el texto ya armado. Alcanzaba
+    mientras la lectura sólo viajaba al juez. Dejó de alcanzar cuando hubo que
+    mostrársela a una persona antes de gastar, dejarla corregir un campo,
+    revisar si el PARCIAL quedó definido y guardar una huella que cambie si
+    cambia un campo: nada de eso se hace sobre un texto pegado.
+
+    `str(lectura)` da EXACTAMENTE el texto de antes, que es lo que recibe el
+    juez (`score_test(reading=...)`): el instrumento no cambia. `parcial`,
+    `definiciones` y `no_alcanza` pueden faltar (hay reglas sin estado
+    intermedio); la pregunta y los dos extremos, nunca.
+    """
+
+    pregunta: str
+    cumple: str
+    no_cumple: str
+    definiciones: str = ""
+    parcial: str = ""
+    no_alcanza: str = ""
+
+    def as_dict(self) -> dict:
+        return {k: getattr(self, k) for k, _ in READING_FIELDS}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "RuleReading":
+        """Arma la lectura desde sus campos; sin la pregunta o un extremo, no hay lectura."""
+        data = data if isinstance(data, dict) else {}
+        clean = {k: str(data.get(k) or "").strip() for k, _ in READING_FIELDS}
+        missing = [k for k in _READING_NEEDS if not clean[k]]
+        if missing:
+            raise ReadingUnavailable("a la lectura le falta: " + ", ".join(missing))
+        return cls(**clean)
+
+    def as_text(self) -> str:
+        return "\n".join(
+            f"- {human}: {getattr(self, key)}" for key, human in READING_FIELDS if getattr(self, key)
+        )
+
+    __str__ = as_text
+
+
+def _recover_glued_fields(data: dict, known: tuple[str, ...]) -> dict:
+    """Devuelve a su clave cada campo que el modelo dejó pegado dentro de otro.
+
+    EL CASO. Al volver a juzgar cuatro veces la evidencia congelada de una
+    corrida (2026-11-27) la lectura de la regla llegó vacía en 48 de 172
+    juicios de criterio. El modelo la había escrito entera. La respuesta cruda
+    de siete llamadas mostró siempre lo mismo: el valor de un campo traía, como
+    texto, el cierre de ese campo y la apertura del siguiente,
+
+        "definiciones": "...no inferido de documentación.</parameter>\n<parameter name=\"cumple\">En 3 o más pares...",
+
+    y a veces el cierre de la llamada al final (`</parameter>\n</invoke>`). La
+    clave `cumple` no llegaba como clave, `read_rule` veía que faltaba un
+    extremo y descartaba todo. En una de las siete sólo llegaron dos claves y
+    las otras cuatro venían adentro de `definiciones`.
+
+    Lo pegado vuelve a su clave sólo si esa clave es del esquema y NO llegó por
+    su cuenta: una clave que sí llegó manda, y lo pegado que la repite se
+    descarta. Lo pegado con un nombre que el esquema no conoce se descarta
+    también: no hay dónde ponerlo y no es parte del campo donde apareció.
+    """
+    out = dict(data)
+    for key, value in data.items():
+        if not isinstance(value, str) or "</parameter>" not in value:
+            continue
+        parts = _GLUED_FIELD.split(value)
+        out[key] = _GLUED_TAIL.sub("", parts[0]).strip()
+        for name, text in zip(parts[1::2], parts[2::2]):
+            if name not in known:
+                continue
+            if str(data.get(name) or "").strip() or str(out.get(name) or "").strip():
+                continue  # la clave llegó por su cuenta, o ya se recuperó: la primera manda
+            out[name] = _GLUED_TAIL.sub("", text).strip()
+    return out
+
+
+def _reading_of(response: Any) -> "tuple[RuleReading | None, str]":
+    """(la lectura, "") o (None, por qué esta respuesta no es una lectura)."""
+    try:
+        data = _extract_tool_input(response, _READING_TOOL_NAME)
+    except (ValueError, TypeError, AttributeError):
+        return None, "la respuesta no trae la herramienta de lectura"
+    if not isinstance(data, dict):
+        return None, "la respuesta no trae la herramienta de lectura"
+    data = _recover_glued_fields(data, tuple(k for k, _ in READING_FIELDS))
+    # Sin la pregunta y los dos extremos no hay lectura que valga la pena mandar.
+    missing = [k for k in _READING_NEEDS if not str(data.get(k) or "").strip()]
+    if missing:
+        return None, (
+            "llegó sin: " + ", ".join(missing)
+            + " (llegaron: " + (", ".join(sorted(str(k) for k in data)) or "ninguna clave") + ")"
+        )
+    return RuleReading.from_dict(data), ""
+
+
+def read_rule(
+    test: CriterionTest, client: Any, *, model: str | None = None, context: str = "",
+) -> RuleReading:
+    """Cómo se lee la regla de UN criterio, fijado antes de juzgar. Una llamada.
+
+    Devuelve la lectura con sus campos (`RuleReading`); `str()` de eso es el
+    texto que recibe el juez.
+
+    POR QUÉ. En la corrida completa del 2026-11-26 cinco criterios (16 pruebas
+    que habían llegado al final) quedaron sin veredicto por "juicio en duda".
+    El chequeo de coherencia los frenó con razón, y en los cinco la causa era la
+    misma: cada prueba se juzga sola, y cada juicio leía la regla por su cuenta.
+    En PT-D2-01 dos pruebas decidieron que los botones de ayuda no contaban como
+    "elemento nuevo" y la tercera los contó. En PT-D6-03 el mismo hecho recibió
+    NO_CUMPLE en dos pruebas y CUMPLE en otra. En PT-D5-05 se juzgó la pregunta
+    de reflexión que viene después, no si el ítem exige el principio.
+
+    Degradar el veredicto evita publicar algo que no se sostiene, pero deja al
+    criterio sin respuesta por una falla del evaluador. Esto ataca la causa: la
+    lectura de la regla se fija UNA vez, antes de ver la evidencia, y viaja
+    igual a todas las pruebas del criterio (`score_test(..., reading=...)`).
+
+    `context` es lo que el plan dijo que se iba a hacer y mirar; ayuda a fijar
+    las definiciones sobre lo que de verdad se va a observar.
+
+    NUNCA devuelve una lectura vacía. Hasta el 2026-11-27 devolvía "" cuando a
+    la respuesta le faltaba la pregunta o un extremo, y quien llamaba juzgaba
+    "como antes", sin lectura y sin decirlo. Eso pasó en 48 de 172 juicios de
+    criterio de una medición sobre evidencia congelada, y no era inocuo: dos
+    pasadas del mismo criterio diferían en 21 % de los pares cuando las dos
+    tenían (o no tenían) lectura y en 58 % cuando una la tenía y la otra no, y
+    sin lectura el juez daba CUMPLE más seguido (56 % contra 44 %). Una
+    instrucción que aparece y desaparece al azar es ruido que pone el evaluador.
+
+    Ahora: lo que el modelo dejó pegado dentro de otro campo se recupera (ver
+    `_recover_glued_fields`: era la causa de las 48); si igual queda
+    incompleta se pide de nuevo, `READING_ATTEMPTS` veces en total; y si tampoco
+    sale levanta `ReadingUnavailable` con lo que faltó, para que quien llama
+    decida a la vista (el servicio deja el criterio NO_EVALUADO con esa causa,
+    ver `JobRunner._score_cells`).
+
+    El pedido repetido es por una RESPUESTA incompleta, no por un error: un
+    error de la API (un 400, un 401) sube en el primer intento, sin reintento
+    acá. Los transitorios ya los reintenta service/retry.py por debajo.
+    """
+    if model is None:
+        from ..config import CONFIG
+
+        model = CONFIG.model_heavy
+    request = dict(
+        model=model,
+        max_tokens=2500,
+        system=[{"type": "text", "text": READING_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": (
+            f"CRITERIO {test.id}: {test.name}\n"
+            f"Aprueba si: {test.pass_criteria}\n"
+            f"Falla si: {test.fail_criteria}\n"
+            f"Cómo se verifica: {test.verification}"
+            + (f"\n\nLO QUE EL PLAN DICE QUE SE VA A HACER Y MIRAR: {context}" if context else "")
+        )}]}],
+        tools=[READING_TOOL],
+        tool_choice={"type": "tool", "name": _READING_TOOL_NAME},
+    )
+    why = ""
+    for _ in range(READING_ATTEMPTS):
+        reading, why = _reading_of(client.messages.create(**request))
+        if reading:
+            return reading
+    raise ReadingUnavailable(
+        f"la lectura de la regla de {test.id} no se pudo fijar en "
+        f"{READING_ATTEMPTS} intentos: {why}"
+    )
+
+_CHECK_TOOL_NAME = "emitir_chequeo"
+
+CHECK_TOOL: dict[str, Any] = {
+    "name": _CHECK_TOOL_NAME,
+    "description": "Emití el chequeo de los veredictos de un criterio.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "responden_a_la_regla": {
+                "type": "boolean",
+                "description": (
+                    "True si TODAS las justificaciones juzgan lo que la regla "
+                    "pregunta, leída literalmente. False si alguna juzga otra cosa."
+                ),
+            },
+            "mismo_hecho_distinto_veredicto": {
+                "type": "boolean",
+                "description": (
+                    "True si dos pruebas describen el MISMO hecho observado y le "
+                    "ponen veredictos distintos."
+                ),
+            },
+            "motivo": {"type": "string", "description": "Una o dos frases. Citá la prueba."},
+        },
+        "required": ["responden_a_la_regla", "mismo_hecho_distinto_veredicto", "motivo"],
+    },
+}
+
+CHECK_SYSTEM = (
+    "Revisás los veredictos que un juez dio a las pruebas de UN criterio de una "
+    "evaluación de plataformas educativas. No volvés a juzgar la plataforma: "
+    "mirás si el juez hizo bien su trabajo. Dos preguntas:\n"
+    "1. ¿Cada justificación responde a lo que la regla PREGUNTA, leída "
+    "literalmente? Un veredicto que habla de otra cosa (la regla pregunta si se "
+    "explica un concepto antes de preguntar y la justificación habla de cómo se "
+    "navega el menú), o que deduce un sí de una ausencia (no hay temporizador, "
+    "entonces el avance es por dominio), NO responde a la regla.\n"
+    "2. ¿Hay dos pruebas que describen el MISMO hecho observado con veredictos "
+    "distintos? Veredictos distintos sobre hechos distintos están bien: eso es "
+    "lo que el muestreo busca.\n"
+    "Sé estricto con la primera y prudente con la segunda. Respondés con la "
+    "herramienta."
+)
+
+
+def check_consistency(
+    test: CriterionTest, cells: list[tuple[str, str, str]], client: Any,
+    *, model: str | None = None,
+) -> dict:
+    """Un segundo par de ojos sobre los veredictos de un criterio. Una llamada.
+
+    `cells` son (rótulo de la prueba, veredicto, justificación completa).
+    Devuelve {"ok": bool, "motivo": str}. En la corrida del 2026-11-25, 2 de 22
+    criterios salieron con un veredicto que no se sostenía y el consejo completo
+    que había revisado las pruebas no tenía cómo verlo: el error fue del juez,
+    después. Esto no vuelve a juzgar; dice si lo juzgado se puede citar.
+    """
+    if not cells:
+        return {"ok": True, "motivo": ""}
+    if model is None:
+        from ..config import CONFIG
+
+        model = CONFIG.model_heavy
+    listing = "\n\n".join(
+        f"PRUEBA {i} ({label}) — veredicto: {status}\n{rationale}"
+        for i, (label, status, rationale) in enumerate(cells, start=1)
+    )
+    response = client.messages.create(
+        model=model,
+        max_tokens=1500,
+        system=[{"type": "text", "text": CHECK_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": (
+            f"CRITERIO {test.id}: {test.name}\n"
+            f"Aprueba si: {test.pass_criteria}\n"
+            f"Falla si: {test.fail_criteria}\n"
+            f"Cómo se verifica: {test.verification}\n\n"
+            f"VEREDICTOS DEL JUEZ\n{listing}"
+        )}]}],
+        tools=[CHECK_TOOL],
+        tool_choice={"type": "tool", "name": _CHECK_TOOL_NAME},
+    )
+    data = _extract_tool_input(response, _CHECK_TOOL_NAME)
+    answers = data.get("responden_a_la_regla", True) is not False
+    clash = data.get("mismo_hecho_distinto_veredicto", False) is True
+    return {"ok": answers and not clash, "motivo": str(data.get("motivo") or "").strip()}
 
 _IMAGE_MEDIA = {
     ".png": "image/png",
@@ -246,7 +628,9 @@ def _read_text_artifact(path: Path) -> str | None:
     return raw
 
 
-def _build_content(test: CriterionTest, evidence_rows: list[dict]) -> tuple[list[dict], set[str]]:
+def _build_content(
+    test: CriterionTest, evidence_rows: list[dict], reading: str = "",
+) -> tuple[list[dict], set[str]]:
     """Build the user content and the set of artifacts we did NOT actually send.
 
     Screenshots go in as base64 images. EVERY OTHER KIND HAS ITS CONTENTS
@@ -264,6 +648,15 @@ def _build_content(test: CriterionTest, evidence_rows: list[dict]) -> tuple[list
         f"TEST {test.id}: {test.name}",
         f"Criterio CUMPLE: {test.pass_criteria}",
         f"Criterio NO_CUMPLE: {test.fail_criteria}",
+    ]
+    if reading:
+        # La misma para todas las pruebas del criterio (ver `read_rule`).
+        lines += [
+            "",
+            "LECTURA DE LA REGLA (la misma para todas las pruebas de este criterio):",
+            reading,
+        ]
+    lines += [
         "",
         "EVIDENCIA OBSERVADA:",
     ]
@@ -304,9 +697,10 @@ def _build_content(test: CriterionTest, evidence_rows: list[dict]) -> tuple[list
 
 
 def _ask_once(
-    test: CriterionTest, evidence_rows: list[dict], client: Any, model: str
+    test: CriterionTest, evidence_rows: list[dict], client: Any, model: str,
+    reading: str = "",
 ) -> tuple[dict, set[str]]:
-    content, missing = _build_content(test, evidence_rows)
+    content, missing = _build_content(test, evidence_rows, reading)
     # NO `temperature` PARAMETER. This is not an oversight -- it is a property
     # of the model. `temperature`, `top_p` and `top_k` were REMOVED on Opus 4.8
     # and 4.7; sending any of them returns:
@@ -341,9 +735,12 @@ def _ask_once(
     )
 
 
-def _one_run(test: CriterionTest, evidence_rows: list[dict], client: Any, model: str) -> tuple[str, str, list[str]]:
+def _one_run(
+    test: CriterionTest, evidence_rows: list[dict], client: Any, model: str,
+    reading: str = "",
+) -> tuple[str, str, list[str]]:
     """One judged run -> (status, rationale, cited). Coerces uncited positives."""
-    data, missing, stop_reason = _ask_once(test, evidence_rows, client, model)
+    data, missing, stop_reason = _ask_once(test, evidence_rows, client, model, reading)
     status = data.get("verdict")
     # ALLOWLIST, not blocklist. Keep only citations of artifacts that were
     # actually supplied AND actually sent. The previous rule filtered just the
@@ -380,8 +777,12 @@ def score_test(
     platform: str | None = None,
     repeats: int = 1,
     model: str | None = None,
+    reading: str = "",
 ) -> TestVerdict:
     """Judge one test on one platform against its evidence rows.
+
+    `reading` es la lectura de la regla fijada para el criterio (ver
+    `read_rule`): viaja igual a todas sus pruebas. Vacía = se juzga como antes.
 
     `evidence_rows` are ledger dicts already filtered to this test AND platform
     (see EvidenceLedger.for_platform_test). Empty evidence returns NO_EVALUADO
@@ -409,7 +810,7 @@ def score_test(
         model = CONFIG.model_heavy
 
     runs: list[tuple[str, str, list[str]]] = [
-        _one_run(test, evidence_rows, client, model) for _ in range(max(1, repeats))
+        _one_run(test, evidence_rows, client, model, reading) for _ in range(max(1, repeats))
     ]
     statuses = [r[0] for r in runs]
     modal = _modal(statuses)
@@ -436,7 +837,8 @@ def judge_fingerprint() -> str:
     globals at call time so a monkeypatched prompt changes the hash.
     """
     payload = json.dumps(
-        {"system": JUDGE_SYSTEM, "tool": VERDICT_TOOL}, sort_keys=True, ensure_ascii=False
+        {"system": JUDGE_SYSTEM, "tool": VERDICT_TOOL, "reading": READING_SYSTEM},
+        sort_keys=True, ensure_ascii=False
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

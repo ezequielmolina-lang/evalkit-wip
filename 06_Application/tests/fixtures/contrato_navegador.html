@@ -15,7 +15,13 @@
   * contenido al FINAL de una página larga, porque truncar por el principio se
     lleva justo lo que el criterio evalúa;
   * un selector de proveedor sin <form> ni input[type=password], que es como se
-    ve un muro de login moderno.
+    ve un muro de login moderno;
+  * una pregunta de práctica que, después de un error, pide confirmar qué se
+    hizo y no muestra NADA MÁS hasta que se toca uno de sus botones. Cinco
+    pruebas de una corrida completa se cortaron frente a una pregunta así;
+  * un chat cuyo botón Enviar está deshabilitado mientras el cuadro está vacío
+    y que vacía el cuadro al enviar: es lo que encontró el paso "Enviar ese
+    mensaje" cuando el paso anterior ya había enviado.
 -->
 <html lang="es">
 <head><meta charset="utf-8"><title>Plataforma de prueba</title></head>
@@ -30,6 +36,28 @@
     <h1>Leccion de prueba</h1>
     <label for="respuesta">Tu respuesta</label>
     <input id="respuesta" type="text">
+
+    <section id="practica">
+      <p>¿Cuánto es 2 + 2?</p>
+      <button class="opcion">A 3</button>
+      <button class="opcion">B 4</button>
+      <div id="bloqueo" hidden>
+        <p>Creo que sumaste mal. ¿Lo hiciste así?</p>
+        <button>Sí, así fue</button>
+        <button>No, hice otra cosa</button>
+      </div>
+      <div id="correccion" hidden>
+        <p>La respuesta era 4.</p>
+        <button>Otra pregunta</button>
+      </div>
+    </section>
+
+    <section id="chat">
+      <div id="mensajes"></div>
+      <label for="mensaje">Escribe tu mensaje al tutor</label>
+      <textarea id="mensaje"></textarea>
+      <button id="enviar" disabled>Enviar</button>
+    </section>
 
     <section id="relleno"></section>
 
@@ -49,6 +77,31 @@
       p.textContent = "Dia " + i + " OVA 1 Contenido de navegacion del curso";
       relleno.appendChild(p);
     }
+    // La pregunta que bloquea: tras el error, sólo quedan sus dos botones.
+    const bloqueo = document.getElementById("bloqueo");
+    document.querySelectorAll("#practica .opcion").forEach((b) => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll("#practica .opcion").forEach((o) => { o.disabled = true; });
+        bloqueo.hidden = false;
+      });
+    });
+    bloqueo.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => {
+        bloqueo.hidden = true;
+        document.getElementById("correccion").hidden = false;
+      });
+    });
+    // El chat: no se puede enviar un cuadro vacío, y enviar lo vacía.
+    const mensaje = document.getElementById("mensaje");
+    const enviar = document.getElementById("enviar");
+    mensaje.addEventListener("input", () => { enviar.disabled = !mensaje.value.trim(); });
+    enviar.addEventListener("click", () => {
+      const p = document.createElement("p");
+      p.textContent = "Estudiante: " + mensaje.value;
+      document.getElementById("mensajes").appendChild(p);
+      mensaje.value = "";
+      enviar.disabled = true;
+    });
     document.querySelectorAll("nav button").forEach((b) => {
       b.addEventListener("click", () => {
         document.title = "clic: " + (b.getAttribute("aria-label") || b.textContent);

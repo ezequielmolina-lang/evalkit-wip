@@ -43,7 +43,7 @@ from lxp_eval.service.batch import (
 from lxp_eval.service.jobs import Stage
 from lxp_eval.service.store import JobStore
 
-from tests.test_service import FakeAnthropic, make_engine
+from tests.test_service import FakeAnthropic, make_engine, real_consequence_framework
 
 
 # --- a fake runner: the two engine seams, no engine --------------------------
@@ -620,12 +620,16 @@ def test_auto_scores_ungated_probes_and_records_the_policy(tmp_path):
 
 
 def test_auto_leaves_gated_probes_unevaluated(tmp_path):
-    """Con compuerta: sin firma humana no corren, y el criterio vuelve NO_EVALUADO.
+    """Consecuencia externa real contra un entorno real: sin firma no corre, y el
+    criterio vuelve NO_EVALUADO.
 
     Es la invariante dura del repo bajo política `auto`: el lote no firma nada,
-    así que el gate de `runnable_probes` deja afuera toda prueba con compuerta.
+    así que el gate de `runnable_probes` deja afuera toda prueba que frena la
+    corrida. Desde 2026-11-26 lo que frena es una consecuencia externa real (acá,
+    exportar datos de alumnos) contra un entorno real, no la duda del clasificador.
     """
-    engine = make_engine(tmp_path, client=FakeAnthropic(safety_verdict=REVISE))
+    engine = make_engine(tmp_path, build=real_consequence_framework,
+                         real_environment=True)
     store, record = _auto_run(tmp_path, engine)
     assert record.stage == Stage.DONE
     assert record.report["meta"]["autoApproved"] is True
@@ -699,18 +703,20 @@ def test_the_snapshot_is_what_was_approved_not_what_job_json_says_later(tmp_path
 def test_a_gated_probe_in_the_snapshot_is_recorded_unsigned_and_does_not_run(tmp_path):
     """Las pruebas con compuerta VAN en la instantánea, y aun así no corren.
 
-    Llevarlas en el plan aprobado no las autoriza: el gate lee `requiresSignoff`
-    de la copia del servidor y la firma de `record.signoffs`. La instantánea deja
-    constancia de lo contrario -- con compuerta, sin firma -- que es la razón por
-    la que el criterio volvió NO_EVALUADO.
+    Llevarlas en el plan aprobado no las autoriza: el gate lee `holdsRun` de la
+    copia del servidor y la firma de `record.signoffs`. La instantánea deja
+    constancia de lo contrario -- frena la corrida, sin firma -- que es la razón
+    por la que el criterio volvió NO_EVALUADO.
     """
-    engine = make_engine(tmp_path, client=FakeAnthropic(safety_verdict=REVISE))
+    engine = make_engine(tmp_path, build=real_consequence_framework,
+                         real_environment=True)
     store, record = _auto_run(tmp_path, engine)
     _, snapshot = _approval_snapshot(store, record.job_id)
 
     assert snapshot["probes"]
     for p in snapshot["probes"]:
         assert p["requiresSignoff"] is True
+        assert p["holdsRun"] is True
         assert p["signoffReason"]
         assert p["signedOff"] is False
     assert record.signoffs == {}

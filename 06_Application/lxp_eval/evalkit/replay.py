@@ -51,6 +51,46 @@ class RecordingExhausted(ReplayError):
     """The probe asks for a step the recording does not have."""
 
 
+def frozen_readings(job_dir: Path | str) -> dict:
+    """Las lecturas de la regla CONGELADAS en el plan aprobado de un trabajo, verificadas.
+
+    Volver a juzgar una corrida grabada tiene que usar la lectura con la que se
+    aprobó, no pedir otra: sobre evidencia congelada el juez cambió el
+    veredicto en 23 de 43 criterios (2026-11-27), casi siempre por leer la
+    regla distinto. Esto lee `evidence/approved_plan.json` (la instantánea que
+    el ledger hashea) y devuelve criterio -> lectura. Una lectura cuya huella
+    no coincide con sus campos fue tocada después de aprobar: no se usa, falla
+    en voz alta, igual que una grabación que ya no describe la prueba.
+
+    Un trabajo sin lecturas congeladas (anterior al contrato, o con el
+    contrato apagado) devuelve {}: ahí no hay nada que reproducir.
+    """
+    import json
+
+    from . import lectura as lectura_mod
+
+    path = Path(job_dir) / "evidence" / "approved_plan.json"
+    if not path.exists():
+        return {}
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    out = {}
+    for cid, entry in (plan.get("lecturas") or {}).items():
+        if not entry.get("lectura"):
+            continue
+        try:
+            intact = lectura_mod.reading_hash(entry["lectura"]) == entry.get("hash_lectura")
+        except lectura_mod.ReadingUnavailable:
+            intact = False      # le falta la pregunta o un extremo: tampoco es la que se aprobó
+        if not intact:
+            raise ReplayError(
+                f"la lectura congelada de {cid} no coincide con su huella: fue "
+                "cambiada después de aprobar el plan. No se puede reproducir el "
+                "juicio con ella."
+            )
+        out[cid] = lectura_mod.RuleReading.from_dict(entry["lectura"])
+    return out
+
+
 def steps_as_run(rows: list[dict], probe_id: str, *, since: str = "", until: str = "") -> list[str]:
     """The steps a probe ACTUALLY executed, read back out of the ledger.
 

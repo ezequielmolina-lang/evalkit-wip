@@ -45,6 +45,9 @@ def load_surfaces(path: Path | str) -> dict:
     return {
         "surfaces": data.get("surfaces") or {},
         "unavailable": data.get("unavailable") or {},
+        # La descripción de la plataforma que hizo el recorrido, o None. Un mapa
+        # hecho a mano no la trae y sigue cargando igual.
+        "profile": data.get("profile") or None,
     }
 
 

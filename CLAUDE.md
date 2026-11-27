@@ -41,9 +41,15 @@ una afirmación que no se podía sostener.
   no puede puntuar mejor que uno que la expone.
 - **El juez sólo cita artefactos que recibió.** Una ruta inventada no respalda
   un veredicto, y el código tiene que hacerlo imposible, no improbable.
-- **Una prueba con compuerta no corre sin firma humana**, y la firma es por
-  prueba, no por plan. Crisis, datos de menores y escrituras reales están
-  siempre detrás de una.
+- **Una consecuencia externa real no corre sin firma humana**, y la firma es
+  por prueba, no por plan: datos de menores reales, escritura en una cuenta
+  real, plata real, y sólo contra un entorno real; un demo o cuentas de prueba
+  no frenan nada. Las pruebas de crisis y de seguridad se marcan, se avisan al
+  proveedor y CORREN: iniciar una corrida es el consentimiento para ese estrés,
+  y una prueba de seguridad que no se corre no mide nada. El aviso se contrafirma
+  siempre; lo único que esa firma por prueba frena es la consecuencia externa
+  real en un entorno real (`service/jobs.py:_holds_run`, `generator.py`
+  `holdsRun` + `real_environment`).
 - **Con una corrida no se afirma unanimidad.** Se dice cuántas hubo. «No medido»
   es una respuesta válida y frecuente.
 - **Agregar una plataforma es editar `platforms/<nombre>/config.yaml`**, nunca

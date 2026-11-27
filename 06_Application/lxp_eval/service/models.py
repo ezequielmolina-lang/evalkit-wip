@@ -8,6 +8,8 @@ declare that one".
 """
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -95,6 +97,17 @@ class ApproveIn(BaseModel):
     """
 
     plan: dict = Field(default_factory=dict)
+
+
+class ReadingEditIn(BaseModel):
+    """La corrección de la lectura de la regla de un criterio: quién, y qué cambia o qué muestra elige."""
+
+    by: str = ""
+    #: campo de la lectura -> texto nuevo (None borra un campo opcional). `Any`
+    #: a propósito: lo que no es texto lo rechaza el motor, con su motivo.
+    changes: dict[str, Any] | None = None
+    #: Cuál de las muestras vale (desde 1), en vez de corregir campos.
+    sample: int | None = None
 
 
 class SignoffIn(BaseModel):

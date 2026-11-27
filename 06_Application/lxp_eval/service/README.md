@@ -257,14 +257,21 @@ restart mid-run loses the in-flight probe, not the job.
 
 ## The gate
 
-`generator.py` marks probes that need human signoff: crisis / self-harm content,
-minors' data, live writes to a real account. **Approving the plan does not
-approve those.** Each needs its own `POST /jobs/{id}/signoff`.
+`generator.py` marks probes that touch a sensitive class — crisis / self-harm
+content, minors' data, live writes to a real account — and emits a vendor notice
+for each. Since 2026-11-26 two flags carry two different things. `requiresSignoff`
+means the vendor notice wants a countersignature (every flagged probe).
+`holdsRun` means the probe also **does not run** until a person signs it — and
+that is kept to a real external consequence (minors' data or a live write,
+directly or inherited) **against a real environment** (`real_environment` on the
+job). Crisis / self-harm probes are `requiresSignoff: true, holdsRun: false`:
+announced and run, because initiating the run is the consent for that stress
+test. On a demo or with vendor test accounts nothing holds. **Approving the plan
+grants no signoff**; a `holdsRun` probe needs its own `POST /jobs/{id}/signoff`.
 
-The flag is read from the server's stored probe, never from the approval
-payload — the plan comes back from a browser, and a browser does not get to
-declare a crisis probe safe. A client that sets `requiresSignoff: false` and
-`signedOff: true` on every probe and approves gets a run with zero probes in it.
+Both flags are read from the server's stored probe, never from the approval
+payload — a browser does not get to declare a live-write probe safe. The run
+gate (`JobRunner.runnable_probes` via `_holds_run`) keys on `holdsRun`.
 
 ## Credentials
 
@@ -301,13 +308,14 @@ Scheduler). There is deliberately no internal scheduler: the OS already is one.
 **Two things the batch does not negotiate**, because they are the repo's
 invariants:
 
-* **A gated probe never runs without a human signature, and the signature is
-  per probe, not per plan.** Under `approval_policy: auto` the batch approves the
-  plan and lets the **ungated** probes run; each gated probe (crisis, minors'
-  data, real writes) stays behind its own signoff, which the batch never writes,
-  so `JobRunner.runnable_probes` drops it and its criterion scores `NO_EVALUADO`.
-  This is the existing gate, untouched — the batch only chooses not to wait for
-  what has no gate. Default `approval_policy` is `human`: today's behaviour, the
+* **A real-consequence probe never runs without a human signature, and the
+  signature is per probe, not per plan.** Under `approval_policy: auto` the batch
+  approves the plan and lets every probe that does not hold the run proceed —
+  crisis / self-harm included; each `holdsRun` probe (minors' data or a real
+  write, against a real environment) stays behind its own signoff, which the
+  batch never writes, so `JobRunner.runnable_probes` drops it and its criterion
+  scores `NO_EVALUADO`. The batch only chooses not to wait for what does not hold
+  the run. Default `approval_policy` is `human`: today's behaviour, the
   job parks at `awaiting_approval`. The same `approval_policy: "human" | "auto"`
   is accepted on `POST /jobs`, so a single request can also run unattended —
   build, approve and run as one supervised chain — with the identical gate rule.

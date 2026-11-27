@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .steps import DEVIATION, DIRECT, NOT_FOUND, split_marks
+from .errors import EvalkitError
 from .ledger import EvidenceLedger
 from .probes import Probe
 from .session import SessionExpired
@@ -86,9 +88,45 @@ async def _refuse_if_logged_out(driver: Any, probe: Probe, index: int, step: str
         )
 
 
-def _note(index: int, step: str, driver: Any = None, *, kind: str = "") -> str:
-    """The ledger note for one capture, including any truncation admission."""
-    note = f"paso {index}: {step}"
+def _note(
+    index: int, step: str, driver: Any = None, *, kind: str = "", skipped: str = "",
+    busy: str = "",
+) -> str:
+    """The ledger note for one capture, including any truncation admission.
+
+    `skipped` es lo que el agente vio cuando un paso [SI APARECE] no aplicó. Va
+    en la nota porque la captura que sigue NO muestra el paso hecho: muestra la
+    pantalla tal como estaba, y el juez tiene que saberlo para no leerla como
+    evidencia de algo que no pasó.
+    """
+    note = f"paso {index}: {split_marks(step)[0]}"
+    if skipped == DIRECT:
+        # El paso sólo pedía mirar y se guardó la pantalla sin que un modelo la
+        # leyera antes. La nota lo dice porque nadie confirmó que la pantalla
+        # muestre lo que el paso nombra: eso lo ve el juez en el texto guardado.
+        note += (
+            " [CAPTURA DIRECTA: se guardó la pantalla tal como estaba, sin "
+            "comprobar que muestre lo que el paso nombra]"
+        )
+    elif skipped.startswith(DEVIATION):
+        # El paso se cumplió, pero no como está escrito (ver steps.DEVIATION).
+        # Sin esto el juez leería el nombre del paso como lo que pasó.
+        note += f" [SE HIZO DISTINTO DE LO ESCRITO: {skipped[len(DEVIATION):][:400]}]"
+    elif skipped.startswith(NOT_FOUND):
+        # No es lo mismo "no apareció" (lo dijo quien ejecuta, mirando la
+        # pantalla) que "se quedó sin turnos buscándolo": la nota no afirma lo
+        # que nadie comprobó.
+        note += f" [NO SE ENCONTRÓ, EL PASO NO SE HIZO: {skipped[len(NOT_FOUND):][:400]}]"
+    elif skipped:
+        note += f" [NO APARECIÓ, EL PASO NO SE HIZO: {skipped[:400]}]"
+    if busy:
+        # La plataforma seguía respondiendo cuando se cumplió el plazo de espera
+        # (ver PlaywrightDriver.settle): la captura muestra la espera, no la
+        # respuesta, y la nota no deja que se lea como lo segundo.
+        note += (
+            " [LA PLATAFORMA SEGUÍA RESPONDIENDO AL CAPTURAR: en pantalla decía "
+            f"«{busy[:80]}»; la respuesta puede no figurar]"
+        )
     if kind == PAGE_TEXT and getattr(driver, "last_read_truncated", False):
         full = getattr(driver, "last_read_full_chars", 0)
         note += f" [TEXTO TRUNCADO: se guardaron los primeros caracteres de {full} en total]"
@@ -114,6 +152,13 @@ async def _run_once(
         await driver.assert_session_alive()
         await _refuse_if_logged_out(driver, probe, 0, "(antes del primer paso)")
 
+    # Quien ejecuta guarda memoria de UN paso al siguiente (qué se escribió, qué
+    # informó el paso anterior); esa memoria es de una prueba y no pasa a la
+    # otra (ver AgentDriver.begin_probe). Un driver sin esa operación no se toca.
+    begin = getattr(driver, "begin_probe", None)
+    if callable(begin):
+        begin()
+
     capture = set(probe.capture)
     artifacts: list[Path] = []
     # Criteria that share this exact capture. Their steps are identical, so the
@@ -131,12 +176,36 @@ async def _run_once(
                 url=url,
                 artifact=artifact,
                 kind=kind,
-                note=_note(index, step, kind=kind) if kind == PAGE_TEXT else _note(index, step),
+                note=_note(
+                    index, step, kind=kind, skipped=skipped.get(index, ""),
+                    busy=busy.get(index, ""),
+                ),
                 timestamp=_now(),
             )
 
+    #: Lo que quien ejecuta devolvió sobre un paso: índice -> texto. Un paso
+    #: [SI APARECE] que no aplicó, una captura directa o un desvío (ver `_note`).
+    skipped: dict[int, str] = {}
+    #: Pasos capturados con la plataforma todavía respondiendo: índice -> aviso.
+    busy: dict[int, str] = {}
+    settle = getattr(driver, "settle", None)
+
     for index, step in enumerate(probe.steps, start=1):
-        await driver.do(step)
+        try:
+            outcome = await driver.do(step)
+        except SessionExpired:
+            raise
+        except EvalkitError as exc:
+            # EN QUÉ PASO se cortó, como dato: quien repara los pasos lo
+            # necesita (ver evalkit/repair.py) y sólo el runner lleva la cuenta.
+            if getattr(exc, "step_index", None) is None:
+                try:
+                    exc.step_index = index
+                except Exception:  # noqa: BLE001 -- anotarlo nunca tapa el error
+                    pass
+            raise
+        if isinstance(outcome, str) and outcome:
+            skipped[index] = outcome
 
         # AFTER the step and BEFORE the capture. A step can be what kills the
         # session (a timeout, an idle logout, a role-gated page bouncing us),
@@ -145,6 +214,18 @@ async def _run_once(
         if gated:
             await driver.assert_session_alive()
             await _refuse_if_logged_out(driver, probe, index, step)
+
+        # ANTES de capturar: que la plataforma haya terminado de responder. Una
+        # captura tomada con el tutor "pensando…" no es evidencia de lo que el
+        # tutor contestó (ver PlaywrightDriver.settle, con el caso).
+        if settle is not None:
+            try:
+                still = await settle()
+            except Exception as exc:  # noqa: BLE001 -- esperar nunca corta una prueba
+                logger.debug("no se pudo esperar a la plataforma: %s", exc)
+                still = ""
+            if isinstance(still, str) and still:
+                busy[index] = still
 
         url = await driver.url()
         stem = f"{_slug(probe.probe_id)}_r{run_index}_s{index}"
@@ -159,7 +240,7 @@ async def _run_once(
                 url=url,
                 artifact=shot,
                 kind=SCREENSHOT,
-                note=_note(index, step),
+                note=_note(index, step, skipped=skipped.get(index, ""), busy=busy.get(index, "")),
                 timestamp=_now(),
             )
             _credit_shared(shot, url, SCREENSHOT, index, step)
@@ -184,7 +265,10 @@ async def _run_once(
                 url=url,
                 artifact=txt,
                 kind=PAGE_TEXT,
-                note=_note(index, step, driver, kind=PAGE_TEXT),
+                note=_note(
+                    index, step, driver, kind=PAGE_TEXT,
+                    skipped=skipped.get(index, ""), busy=busy.get(index, ""),
+                ),
                 timestamp=_now(),
             )
             _credit_shared(txt, url, PAGE_TEXT, index, step)

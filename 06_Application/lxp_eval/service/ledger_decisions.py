@@ -175,19 +175,48 @@ def auto_approve(store: JobStore, record: JobRecord) -> None:
     registrar no surte efecto.
     """
     record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
-    record.approved_plan = {
+    record.approved_plan = serialize.with_frozen_readings({
         "criteria": serialize.criteria_out(record.criteria),
         # Copia profunda: la instantánea es lo que había AL APROBAR, y no debe
         # cambiar si después alguien toca `record.probes` en memoria.
         "probes": copy.deepcopy(record.probes),
         "sampling": record.sampling,
-    }
+    }, record)
     record.approved_at = now()
     store.save(record)
     _ledger_the_approval(store, record, note=serialize.APPROVAL_NOTE_AUTO)
 
 
+def approve_from_plan(store: JobStore, record: JobRecord, *, approved_by: str) -> None:
+    """Aprobar las pruebas redactadas DESDE un plan que una persona ya aprobó.
+
+    Es `auto_approve` con otra nota en el ledger: la decisión humana fue sobre
+    el documento del plan (qué se prueba, cuántas veces, sobre qué), y esta fila
+    dice quién la tomó y sobre qué versión. El gate queda exactamente donde
+    estaba: no se escribe ninguna firma, así que una prueba con compuerta sigue
+    sin correr hasta que alguien la firme, una por una.
+    """
+    record.sampling = record.sampling or dict(serialize.DEFAULT_SAMPLING)
+    record.approved_plan = serialize.with_frozen_readings({
+        "criteria": serialize.criteria_out(record.criteria),
+        "probes": copy.deepcopy(record.probes),
+        "sampling": record.sampling,
+    }, record)
+    record.approved_at = now()
+    store.save(record)
+    version = (record.plan_document or {}).get("version", "?")
+    _ledger_the_approval(
+        store, record,
+        note=(
+            f"pruebas redactadas desde el plan versión {version}, aprobado por: "
+            f"{approved_by}. Las pruebas con compuerta quedan sin firmar y no se "
+            "ejecutan (NO_EVALUADO)"
+        ),
+    )
+
+
 __all__ = [
+    "approve_from_plan",
     "_ledger_decision",
     "_ledger_the_approval",
     "_ledger_the_signoff",
