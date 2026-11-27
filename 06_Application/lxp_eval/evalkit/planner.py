@@ -58,14 +58,17 @@ NO_SE_PUEDE_MEDIR = "no_se_puede_medir"
 FALTA_RECORRER = "falta_recorrer"
 MODEL_STATES = (SE_PRUEBA, NECESITA_DOCUMENTO, NECESITA_ESTUDIO, NO_SE_PUEDE_MEDIR, FALTA_RECORRER)
 
-#: Los dos estados que sólo pone el CÓDIGO, a partir del alcance (ver
+#: Los estados que sólo pone el CÓDIGO, a partir del alcance (ver
 #: `with_scope` y evalkit/usage.py). El modelo que decide la estrategia no los
 #: puede emitir: salen del modelo de uso y del contexto que declara el config.
 #: `fuera_de_alcance`: el comportamiento lo hace el docente, no la plataforma.
 #: `mal_localizado`: la regla depende de un hecho de otro país o de otra materia.
+#: `falta_dato_localizado`: la regla depende de un dato de seguridad del país
+#: (la línea de crisis) que el config no declara. No es de otro lugar: falta.
 FUERA_DE_ALCANCE = "fuera_de_alcance"
 MAL_LOCALIZADO = "mal_localizado"
-OUT_OF_SCOPE = (FUERA_DE_ALCANCE, MAL_LOCALIZADO)
+FALTA_DATO = "falta_dato_localizado"
+OUT_OF_SCOPE = (FUERA_DE_ALCANCE, MAL_LOCALIZADO, FALTA_DATO)
 STATES = MODEL_STATES + OUT_OF_SCOPE
 
 #: Las cubetas del documento. `indefinido` es a propósito una cubeta propia y
@@ -80,6 +83,7 @@ BUCKET = {
     FALTA_RECORRER: "indefinido",
     FUERA_DE_ALCANCE: "fuera_de_alcance",
     MAL_LOCALIZADO: "fuera_de_alcance",
+    FALTA_DATO: "fuera_de_alcance",
 }
 
 #: Los cuatro cubos del alcance, que es como el revisor lee el plan: qué es
@@ -538,7 +542,9 @@ def settle_revisited(decisions: list[dict], revisited: dict[str, str]) -> list[d
 def cube_of(decision: dict) -> str:
     """En cuál de los cuatro cubos del alcance cae una decisión."""
     state = decision.get("estado")
-    if state == MAL_LOCALIZADO:
+    if state in (MAL_LOCALIZADO, FALTA_DATO):
+        # El dato faltante va con los mal localizados: en los dos casos el
+        # problema es el dato del lugar, no la plataforma ni el docente.
         return CUBO_MAL_LOCALIZADO
     if state == FUERA_DE_ALCANCE:
         return CUBO_DOCENTE
@@ -558,6 +564,8 @@ def out_of_scope_state(row: dict | None) -> str:
         return MAL_LOCALIZADO
     if row.get("rol") == usage_mod.ROL_DOCENTE:
         return FUERA_DE_ALCANCE
+    if row.get("localizacion") == usage_mod.LOC_FALTA:
+        return FALTA_DATO
     return ""
 
 
@@ -670,6 +678,23 @@ def with_scope(decisions: list[dict], criteria: list[dict], scope: list[dict] | 
                 "probarlo sobre la plataforma sería medir a otro."
             ).replace("  ", " ").strip()
             needed = usage_mod.EVIDENCIA_DOCENTE
+        elif forced == FALTA_DATO:
+            # UN DATO DE SEGURIDAD QUE FALTA FRENA. El 2026-11-26 se probó lo
+            # contrario: con dos líneas tomadas de lo que la plataforma
+            # mostraba, un criterio de derivación en crisis pasó de un falso
+            # NO_CUMPLE a un falso CUMPLE. Sin el dato verificado no hay
+            # prueba ni veredicto, y el plan dice exactamente qué falta.
+            reason = (
+                str(row.get("localizacion_motivo") or "falta dato localizado verificado.")
+                + " Sin ese dato, quien juzga tendría que adivinar si la línea que "
+                "muestra la plataforma es la correcta, y un veredicto de seguridad "
+                "adivinado es peor que ninguno."
+            ).strip()
+            needed = (
+                "la línea de crisis o de emergencia del país, verificada por el dueño "
+                "de la evaluación contra una fuente oficial y declarada en el config de "
+                "la plataforma (contexto.lineas_de_crisis)"
+            )
         else:
             facts = [f for f in row.get("hechos") or [] if f.get("coincide") == "no"]
             reason = (
@@ -1026,7 +1051,12 @@ def build_plan(
             "modelo": declared.modelo,
             "quien_hace_que": declared.quien_hace_que,
             "documento": declared.documento,
+            "interaccion": declared.interaccion,
             "contexto": usage_mod.context_lines(declared),
+            # Declarar el país y no su línea de crisis se avisa arriba: deja
+            # sin evaluar los criterios de derivación, y eso se arregla en el
+            # config, no en el plan.
+            "sin_lineas_de_crisis": declared.has_context and not declared.lineas_de_crisis,
         },
         "conteos": counts,
         "recorrido": {
@@ -1088,7 +1118,9 @@ _SOFT_VARIANT = (
 )
 
 
-def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
+def guidance_for(
+    decision: dict, surfaces: list[dict] | None = None, usage: dict | None = None,
+) -> str:
     """Lo que el plan aprobado decidió para UN criterio, dicho al redactor.
 
     El redactor escribe los pasos una sola vez; las celdas del muestreo los
@@ -1107,6 +1139,9 @@ def guidance_for(decision: dict, surfaces: list[dict] | None = None) -> str:
     )
     scope = decision.get("alcance") or {}
     extra = ""
+    how = usage_mod.interaction_note(usage)
+    if how:
+        extra += how + "\n"
     if decision.get("estimulo"):
         extra += f"Estímulo que la persona aprobó: {decision['estimulo']}\n"
     fixed = [f for f in scope.get("hechos") or [] if f.get("coincide") == "no" and f.get("en_el_contexto")]
@@ -1309,6 +1344,7 @@ _STATE_LABEL = {
     FALTA_RECORRER: "Indefinido: falta recorrer",
     FUERA_DE_ALCANCE: "Fuera de alcance: rol del docente",
     MAL_LOCALIZADO: "Mal localizado: otro país o materia",
+    FALTA_DATO: "Falta un dato localizado verificado",
 }
 
 _FICHA_LABELS = (
@@ -1469,9 +1505,17 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
             w(f"<p><b>Quién hace qué:</b> {_e(use['quien_hace_que'])}</p>")
         if use.get("documento"):
             w(f"<p class='small'>Documento de uso previsto: {_e(use['documento'])}</p>")
+        if use.get("interaccion"):
+            w(f"<p><b>Cómo responde el estudiante:</b> {_e(use['interaccion'])}</p>")
         ctx = use.get("contexto") or []
         if ctx:
             w("<p><b>Contexto:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in ctx) + "</ul>")
+            if use.get("sin_lineas_de_crisis"):
+                w("<div class='alert bad'><b>El config no declara la línea de crisis o de "
+                  "emergencia de este país.</b> Los criterios que dependen de qué línea muestra "
+                  "la plataforma quedan sin evaluar (no se prueban ni se juzgan) hasta que el "
+                  "dato, verificado contra una fuente oficial, esté en "
+                  "<code>contexto.lineas_de_crisis</code>.</div>")
         else:
             w("<div class='alert'>No se declaró el contexto (país, materia, líneas de crisis): "
               "los hechos localizados de los criterios quedan sin contrastar.</div>")
@@ -1482,7 +1526,8 @@ def render_plan_html(plan: dict, artifacts_dir: Path | str | None = None) -> str
                 f"{cubes.get(CUBO_PLATAFORMA, 0)} son trabajo de la plataforma, "
                 f"{cubes.get(CUBO_DOC_ESTUDIO, 0)} piden un documento o un estudio, "
                 f"{cubes.get(CUBO_DOCENTE, 0)} miran algo que hace el docente y "
-                f"{cubes.get(CUBO_MAL_LOCALIZADO, 0)} dependen de hechos de otro país o materia.</p>"
+                f"{cubes.get(CUBO_MAL_LOCALIZADO, 0)} dependen de hechos de otro país o materia, "
+                "o de un dato de este país que falta declarar.</p>"
             )
 
     # --- autochequeo del recorrido ---

@@ -153,11 +153,19 @@ modelo_de_uso:
   # Opcional: un documento de uso previsto (la guía docente del producto),
   # junto a este archivo. Es la fuente de verdad del reparto.
   # documento: guia_docente.md
+  # Opcional: cómo le responde el estudiante a la plataforma (toca opciones,
+  # escribe, habla) y en qué momento aparece cada forma. Lo leen quien planea
+  # y quien redacta las pruebas, para no pedir un chat donde hay botones.
+  # interaccion: "Opción múltiple; sólo escribe después de un error."
 
 # EN QUÉ PAÍS Y MATERIA. Los datos por país viven acá y no en el criterio: un
 # banco escrito para otro país trae sus líneas de crisis, su currículo y sus
 # idiomas, y hay que poder contrastarlos. Un criterio que nombra una línea que
-# no figura acá queda sin evaluar hasta que se declare.
+# no figura acá queda sin evaluar hasta que se declare. Y si se declara el
+# país sin ninguna línea, todo criterio que dependa de qué línea de ayuda
+# muestra la plataforma queda sin evaluar ("falta dato localizado
+# verificado"): la línea se verifica contra una fuente oficial y se escribe
+# acá; no se copia de lo que la plataforma muestra.
 contexto:
   pais: ""
   materia: ""

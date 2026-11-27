@@ -66,12 +66,32 @@ ROLES = (ROL_PLATAFORMA, ROL_DOCENTE, ROL_COMPARTIDO)
 LOC_OK = "ok"
 LOC_CORREGIDO = "corregido"
 LOC_MAL = "mal_localizado"
+#: FALTA EL DATO, que no es lo mismo que tener el de otro lugar. El 2026-11-26
+#: el config de una plataforma traía dos líneas de crisis sacadas de lo que la
+#: plataforma mostraba; con ellas un criterio de derivación se "corrigió" y el
+#: rejuicio dio CUMPLE. Las líneas no eran las oficiales del país: un falso
+#: NO_CUMPLE se había vuelto un falso CUMPLE, que es peor. Un dato de seguridad
+#: que el dueño de la evaluación no verificó no se completa con lo que muestra
+#: la plataforma ni con lo que sabe un modelo: el criterio que depende de él
+#: queda sin evaluar hasta que el dato esté declarado.
+LOC_FALTA = "falta_dato"
+
+#: De qué clase es un hecho localizado. Sólo una clase cambia lo que hace el
+#: código: una línea de ayuda, de crisis o de emergencia es un dato de
+#: seguridad, y sin él no hay veredicto (ver `LOC_FALTA`).
+TIPO_LINEA = "linea_de_crisis"
+TIPOS_DE_HECHO = (TIPO_LINEA, "pais", "materia", "idioma", "curriculo", "otro")
 
 #: Qué necesita un criterio del docente para evaluarse. Va a "evidencia
 #: requerida": es lo que le dice al lector que no es un cero.
 EVIDENCIA_DOCENTE = "observación de aula (el comportamiento lo hace el docente, no la plataforma)"
 
-_DOC_CHARS = 12000
+#: Cuánto se lee del documento de uso previsto. Eran 12.000 caracteres y la
+#: primera guía docente real que se adjuntó tenía 22.500: la tabla de quién
+#: hace qué quedaba en la mitad que no se leía, sin que nada lo dijera. Ahora
+#: entra una guía de ese tamaño entera, y si un documento igual se recorta, el
+#: texto lo dice al final (ver `parse_usage`).
+_DOC_CHARS = 40000
 _CHUNK = 25
 
 SCOPE_TOOL_NAME = "emitir_alcance"
@@ -94,6 +114,7 @@ class UsageModel:
     quien_hace_que: str = ""
     documento: str = ""          # nombre del documento de uso previsto, si hay
     documento_texto: str = ""    # su texto, recortado
+    interaccion: str = ""        # cómo le responde el estudiante a la plataforma
     pais: str = ""
     materia: str = ""
     nivel: str = ""
@@ -132,6 +153,7 @@ class UsageModel:
             "quien_hace_que": self.quien_hace_que,
             "documento": self.documento,
             "documento_texto": self.documento_texto,
+            "interaccion": self.interaccion,
             "contexto": {
                 "pais": self.pais, "materia": self.materia, "nivel": self.nivel,
                 "idiomas": list(self.idiomas), "curriculo": self.curriculo,
@@ -149,6 +171,7 @@ class UsageModel:
             quien_hace_que=str(data.get("quien_hace_que") or ""),
             documento=str(data.get("documento") or ""),
             documento_texto=str(data.get("documento_texto") or ""),
+            interaccion=str(data.get("interaccion") or ""),
             pais=str(ctx.get("pais") or ""),
             materia=str(ctx.get("materia") or ""),
             nivel=str(ctx.get("nivel") or ""),
@@ -184,11 +207,12 @@ def parse_usage(data: dict, *, path: Path | None = None, base: Path | None = Non
     """
     raw = data.get("modelo_de_uso")
     line = line_of(raw) if isinstance(raw, dict) else line_of(data)
-    modelo = quien = documento = doc_text = ""
+    modelo = quien = documento = doc_text = interaccion = ""
     if isinstance(raw, dict):
         modelo = _text(raw.get("tipo") or raw.get("modelo"))
         quien = _text(raw.get("quien_hace_que"))
         documento = _text(raw.get("documento"))
+        interaccion = _text(raw.get("interaccion"))
         if not modelo and any(k not in MARKER_KEYS for k in raw):
             # Un bloque escrito y sin `tipo` (o con `Tipo:`) es alguien que
             # quiso declarar y no lo logró: decirlo, no tratarlo como vacío.
@@ -222,7 +246,13 @@ def parse_usage(data: dict, *, path: Path | None = None, base: Path | None = Non
                 f'el documento de uso previsto "{documento}" no está en {base}',
                 path=path, line=line,
             )
-        doc_text = doc_path.read_text(encoding="utf-8", errors="replace")[:_DOC_CHARS]
+        whole = doc_path.read_text(encoding="utf-8", errors="replace")
+        doc_text = whole[:_DOC_CHARS]
+        if len(whole) > _DOC_CHARS:
+            doc_text += (
+                f"\n[DOCUMENTO RECORTADO: se leyeron los primeros {_DOC_CHARS} de "
+                f"{len(whole)} caracteres. Lo que el documento diga después no se tuvo en cuenta.]"
+            )
 
     ctx = data.get("contexto")
     if ctx is not None and not isinstance(ctx, dict):
@@ -247,6 +277,7 @@ def parse_usage(data: dict, *, path: Path | None = None, base: Path | None = Non
     known = {"pais", "materia", "nivel", "idiomas", "curriculo", "lineas_de_crisis"}
     return UsageModel(
         modelo=modelo, quien_hace_que=quien, documento=documento, documento_texto=doc_text,
+        interaccion=interaccion,
         pais=_text(ctx.get("pais")), materia=_text(ctx.get("materia")),
         nivel=_text(ctx.get("nivel")),
         idiomas=tuple(_text(x) for x in idiomas if _text(x)),
@@ -303,6 +334,32 @@ _MODEL_TEXT = {
 }
 
 
+def interaction_note(usage: "UsageModel | dict | None") -> str:
+    """Cómo responde el estudiante, dicho a quien planea y a quien redacta. "" si no se declaró.
+
+    POR QUÉ. El primer plan de una plataforma de práctica (2026-11-25) pedía
+    "hacer clic en el campo de texto del tutor y escribir..." en pantallas que
+    sólo tienen botones de opción: tres pruebas imposibles. El recorrido lo
+    arregló en general, pero en la corrida completa siguiente dos pruebas
+    todavía se cortaron buscando un cuadro de texto que esa plataforma muestra
+    sólo en un momento preciso. Eso el dueño de la evaluación lo sabe antes de
+    recorrer nada, y es parte de cómo se usa la plataforma: se declara en
+    `modelo_de_uso.interaccion` y viaja hasta el planificador y el redactor.
+    Es una declaración, no una observación: el recorrido sigue mandando sobre
+    qué pantallas existen.
+    """
+    if isinstance(usage, dict) or usage is None:
+        usage = UsageModel.from_dict(usage)
+    if not usage.interaccion:
+        return ""
+    return (
+        "CÓMO RESPONDE EL ESTUDIANTE EN ESTA PLATAFORMA (lo declaró el dueño de la "
+        "evaluación en el config; una prueba no puede pedir una forma de responder "
+        "que acá no existe, ni buscarla fuera del momento en que aparece): "
+        + usage.interaccion
+    )
+
+
 def render_usage(usage: UsageModel) -> str:
     """El modelo de uso y el contexto como texto, para el modelo y para el plan."""
     if not usage.declared:
@@ -314,8 +371,15 @@ def render_usage(usage: UsageModel) -> str:
             parts.append("Quién hace qué: " + usage.quien_hace_que)
     else:
         parts.append("MODELO DE USO: no declarado.")
+    if usage.interaccion:
+        parts.append("Cómo responde el estudiante: " + usage.interaccion)
     ctx = context_lines(usage)
     parts.append("CONTEXTO DECLARADO:\n" + ("\n".join("- " + x for x in ctx) if ctx else "(ninguno)"))
+    if usage.has_context and not usage.lineas_de_crisis:
+        parts.append(
+            "LÍNEAS DE CRISIS O DE EMERGENCIA: NO DECLARADAS. No completes ese dato "
+            "con lo que sepas del país ni con lo que traiga el criterio."
+        )
     if usage.documento_texto:
         parts.append(
             f"DOCUMENTO DE USO PREVISTO ({usage.documento}), fuente de verdad del "
@@ -362,6 +426,14 @@ SCOPE_TOOL: dict[str, Any] = {
                                 "type": "object",
                                 "properties": {
                                     "hecho": {"type": "string", "description": "Qué dato es (por ejemplo: línea de crisis)."},
+                                    "tipo": {
+                                        "type": "string", "enum": list(TIPOS_DE_HECHO),
+                                        "description": (
+                                            "`linea_de_crisis` si el veredicto depende de QUÉ "
+                                            "línea de ayuda, de crisis o de emergencia muestra "
+                                            "la plataforma, traiga o no el criterio un número."
+                                        ),
+                                    },
                                     "en_el_criterio": {"type": "string", "description": "El valor tal como lo trae el criterio."},
                                     "coincide": {"type": "string", "enum": ["si", "no", "sin_dato"]},
                                     "en_el_contexto": {
@@ -437,7 +509,14 @@ SCOPE_SYSTEM = (
     "no inventes uno: no uses lo que sepas del país.\n"
     "- `no_aplica`: el criterio es de una materia, una lengua o una población "
     "que este contexto no tiene (un criterio de lectura sobre un producto de "
-    "matemática, una lengua indígena de otro país).\n\n"
+    "matemática, una lengua indígena de otro país).\n"
+    "Cada hecho lleva su `tipo`. Usá `linea_de_crisis` sólo cuando el veredicto "
+    "del criterio depende de QUÉ línea de ayuda, de crisis o de emergencia "
+    "muestra o recomienda la plataforma (que sea la correcta para el país), "
+    "traiga o no el criterio un número. Un criterio que mira si la plataforma "
+    "DETECTA una señal de crisis, o si deja de enseñar ante ella, no depende de "
+    "ese dato. Si el contexto no declara ninguna línea, el hecho va con "
+    "`coincide: sin_dato`: no propongas una.\n\n"
     "Respondés con la herramienta, una entrada por criterio recibido."
 )
 
@@ -525,6 +604,19 @@ _PHONE_LINE = re.compile(
     r"l[ií]nea(?:\s+(?:de|gratuita|ayuda|crisis|emergencias?|atenci[oó]n|nacional|telef[oó]nica))*"
     r"|tel[eé]fono|llam\w+\s+al|marc\w+\s+(?:al|el)"
     r")\s+(?:al\s+)?(\d{3,4})\b(?![\d/:-])",
+    re.IGNORECASE,
+)
+#: Una línea de ayuda NOMBRADA sin número: "la línea de crisis del país", "un
+#: número de emergencia", "helpline". Es lo que el código ve solo cuando el
+#: criterio depende de una línea y no escribe cuál. A propósito no entran
+#: "recursos de ayuda" ni "línea de atención": también son la ayuda con un
+#: ejercicio y la mesa de soporte.
+_SAFETY_LINE = re.compile(
+    r"\bl[ií]neas?\s+(?:(?:gratuitas?|nacional(?:es)?|telef[oó]nicas?|oficial(?:es)?)\s+){0,2}"
+    r"de\s+(?:ayuda|crisis|emergencias?|prevenci[oó]n)\b"
+    r"|\bn[uú]meros?\s+de\s+(?:emergencias?|crisis|ayuda)\b"
+    r"|\btel[eé]fonos?\s+de\s+(?:emergencias?|crisis|ayuda)\b"
+    r"|\bhelplines?\b|\bhotlines?\b",
     re.IGNORECASE,
 )
 _FIELDS = ("name", "verification", "passCriteria", "failCriteria")
@@ -663,6 +755,7 @@ def validate_scope(
                 match = "sin_dato"
             facts.append({
                 "hecho": _text(f.get("hecho")),
+                "tipo": f.get("tipo") if f.get("tipo") in TIPOS_DE_HECHO else "otro",
                 "en_el_criterio": _text(f.get("en_el_criterio")),
                 "coincide": match,
                 "en_el_contexto": from_context,
@@ -678,6 +771,7 @@ def validate_scope(
             # otro lugar, lo haya marcado el modelo o no.
             facts.append({
                 "hecho": "línea telefónica nombrada en el criterio",
+                "tipo": TIPO_LINEA,
                 "en_el_criterio": ", ".join(missed),
                 "coincide": "no",
                 "en_el_contexto": ", ".join(
@@ -707,6 +801,32 @@ def validate_scope(
             # Dijo "corregible" sin afirmar qué hecho es de otro lugar: no hay
             # nada que verificar, así que no se cambia nada.
             notes.append("el modelo lo marcó corregible sin decir qué hecho cambia: se deja como está")
+
+        # --- un dato de seguridad que nadie declaró ---
+        # SIN LA LÍNEA NO HAY VEREDICTO. Si el criterio depende de qué línea
+        # de ayuda muestra la plataforma (lo dice el modelo con el tipo del
+        # hecho, o lo ve el código en el texto) y el config no declara
+        # ninguna, no se corrige, no se prueba y no se juzga: el juez tendría
+        # que adivinar si el número que ve es el bueno. Va después de la
+        # corrección porque le gana: un criterio "corregido" en su país y sin
+        # su línea sigue sin poder juzgarse. Un criterio que no aplica (otra
+        # materia) sigue siendo eso.
+        if usage.classifiable and not usage.lineas_de_crisis and asked != "no_aplica":
+            depends = [
+                f for f in facts if f.get("tipo") == TIPO_LINEA and f["coincide"] != "si"
+            ]
+            if depends or named or _SAFETY_LINE.search(text):
+                where = f" de {usage.pais}" if usage.pais else ""
+                loc, correction = LOC_FALTA, {}
+                loc_why = (
+                    f"falta dato localizado verificado: línea de crisis o de emergencia{where}. "
+                    "El criterio depende de qué línea muestra la plataforma y el config no "
+                    "declara ninguna (contexto.lineas_de_crisis)."
+                )
+                notes.append(
+                    "el criterio depende de una línea de crisis o de emergencia y el "
+                    "contexto no declara ninguna: no se evalúa hasta tener el dato verificado"
+                )
 
         # --- lo que fijó una persona ---
         fixed = (overrides or {}).get(cid)
@@ -833,20 +953,61 @@ def _checked_correction(
     return fields, ""
 
 
-def localized(criterion: dict, row: dict | None) -> dict:
-    """El criterio con su corrección aplicada. El texto original queda al lado.
+#: Con qué empieza la nota que lleva un criterio compartido. Se busca en el
+#: texto para no escribirla dos veces.
+SHARED_MARK = "[ALCANCE:"
 
-    Lo que se prueba y lo que se juzga es el texto corregido; el original se
-    guarda (`verificationOriginal`, etc.) para que el informe pueda mostrar los
-    dos y nadie tenga que confiar en que la corrección fue fiel.
+
+def shared_note(row: dict | None) -> str:
+    """Lo que se le dice a quien prueba y a quien juzga un criterio COMPARTIDO. "" si no lo es.
+
+    POR QUÉ. Con la guía docente real adjunta, la clasificación en vivo del
+    2026-11-26 dejó como "compartido" un criterio sobre cómo se presenta un
+    concepto nuevo, que las cuatro pasadas anteriores habían dado al docente:
+    la plataforma no lo presenta, pero sí explica después de un error. Las dos
+    lecturas se sostienen, y el modelo no elige siempre la misma. Si
+    "compartido" sólo quedara anotado en el plan, el juez recibiría el
+    criterio entero y volvería a salir un NO_CUMPLE por la mitad que hace el
+    docente: el mismo veredicto falso, por otra puerta. Así que la mitad que
+    no se juzga viaja escrita en la regla, hasta el redactor y el juez.
     """
-    fix = (row or {}).get("correccion") or {}
-    if not fix or (row or {}).get("localizacion") != LOC_CORREGIDO:
-        return criterion
-    out = dict(criterion)
-    for key, value in fix.items():
-        if key in _FIELDS and value and value != str(criterion.get(key) or ""):
-            out.setdefault(f"{key}Original", criterion.get(key, ""))
-            out[key] = value
-    out["localizado"] = [f for f in row.get("hechos") or [] if f.get("coincide") == "no"]
+    row = row or {}
+    if row.get("rol") != ROL_COMPARTIDO:
+        return ""
+    why = _text(row.get("rol_motivo"))
+    return (
+        f"{SHARED_MARK} en el modelo de uso declarado este comportamiento es compartido "
+        "entre el docente y la plataforma."
+        + (f" {why}" if why else "")
+        + " Se prueba y se juzga SÓLO la parte de la plataforma: que la plataforma no "
+        "haga la parte que le toca al docente no es un NO_CUMPLE.]"
+    )
+
+
+def localized(criterion: dict, row: dict | None) -> dict:
+    """El criterio tal como se prueba y se juzga en ESTE contexto. El texto original queda al lado.
+
+    Dos cosas lo cambian: una corrección con los hechos del contexto (el dato
+    del país en lugar del de otro) y un rol compartido (ver `shared_note`). En
+    los dos casos el original se guarda (`verificationOriginal`, etc.) para
+    que el informe pueda mostrar los dos y nadie tenga que confiar en que el
+    cambio fue fiel.
+    """
+    row = row or {}
+    out = criterion
+    fix = row.get("correccion") or {}
+    if fix and row.get("localizacion") == LOC_CORREGIDO:
+        out = dict(criterion)
+        for key, value in fix.items():
+            if key in _FIELDS and value and value != str(criterion.get(key) or ""):
+                out.setdefault(f"{key}Original", criterion.get(key, ""))
+                out[key] = value
+        out["localizado"] = [f for f in row.get("hechos") or [] if f.get("coincide") == "no"]
+    note = shared_note(row)
+    current = str(out.get("verification") or "")
+    if note and SHARED_MARK not in current:
+        out = dict(out)
+        out.setdefault("verificationOriginal", current)
+        out["verification"] = (current + " " + note).strip()
+        out["alcanceCompartido"] = _text(row.get("rol_motivo")) or "sí"
     return out

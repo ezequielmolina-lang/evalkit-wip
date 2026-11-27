@@ -762,6 +762,7 @@ class JobRunner:
             # docente o de otro país no llega al planificador, así que no
             # puede salir de él como "se prueba".
             in_scope = await self.scope_criteria(record, client)
+            profile_text = _with_declared_interaction(record, profile_text)
             decisions = await asyncio.to_thread(
                 self.engine.plan_strategy,
                 in_scope,
@@ -777,7 +778,8 @@ class JobRunner:
                 decisions = record.strategy
                 _, surfaces = self._probe_bank_for(record)
                 profile = (surfaces or {}).get("profile") or profile
-                profile_text = render_profile(profile) if profile else profile_text
+                if profile:
+                    profile_text = _with_declared_interaction(record, render_profile(profile))
             self._progress(
                 record, Stage.FRAMEWORK, done=1, total=3,
                 message="El muestreo propone cuántas pruebas y sobre qué temas",
@@ -1111,7 +1113,8 @@ class JobRunner:
         again = await asyncio.to_thread(
             self.engine.plan_strategy,
             subset,
-            profile=profile, profile_text=recon_mod.render_profile(profile),
+            profile=profile,
+            profile_text=_with_declared_interaction(record, recon_mod.render_profile(profile)),
             client=client, model=self.engine.model or _configured_model(),
             documents=doc_names, revisited=outcome,
         )
@@ -1247,7 +1250,9 @@ class JobRunner:
         )
         _, surfaces = self._probe_bank_for(record)
         parts = ((surfaces or {}).get("profile") or {}).get("partes") or []
-        guidance = {d["id"]: planner_mod.guidance_for(d, parts) for d in chosen}
+        guidance = {
+            d["id"]: planner_mod.guidance_for(d, parts, record.usage) for d in chosen
+        }
         cells = {d["id"]: d.get("celdas") or [] for d in chosen}
         return await self._probes(
             record, self._client(), criteria, guidance=guidance, cells=cells
@@ -1903,7 +1908,10 @@ class JobRunner:
         # UN CRITERIO CORREGIDO LO DICE EN SU VEREDICTO. El juez recibió el
         # texto con los hechos del contexto de esta plataforma, no el del
         # banco: quien lee el informe tiene que ver los dos sin ir a buscarlos.
-        fixed_by_id = {str(c.get("id")): c for c in record.criteria if c.get("localizado")}
+        fixed_by_id = {
+            str(c.get("id")): c for c in record.criteria
+            if c.get("localizado") or c.get("alcanceCompartido")
+        }
         verdicts = [_with_localization_note(v, fixed_by_id.get(v.test_id)) for v in verdicts]
 
         # The last uncounted leg: the scorer's own API spend. Framework + probes
@@ -2269,6 +2277,17 @@ class JobRunner:
         )
 
 
+def _with_declared_interaction(record: JobRecord, profile_text: str) -> str:
+    """La descripción del recorrido, con lo que el config declara sobre cómo responde el estudiante.
+
+    Va pegado a la descripción de la plataforma porque es de la misma clase
+    (qué se puede hacer ahí) y la leen los mismos: quien decide la estrategia
+    y quien propone el muestreo. Ver usage.interaction_note, con el caso.
+    """
+    how = usage_mod.interaction_note(record.usage)
+    return f"{profile_text}\n\n{how}" if how else profile_text
+
+
 #: Cómo se escribe en el criterio lo que decidió el plan (ver
 #: `JobRunner.draft_from_plan`).
 _OBSERVABILITY_OF = {
@@ -2282,6 +2301,7 @@ _OBSERVABILITY_OF = {
     # eso; la causa, que es lo que el informe muestra, sí (ver `_CAUSE_OF`).
     planner_mod.FUERA_DE_ALCANCE: "NO_DECIDIBLE_EN_EVALUACION",
     planner_mod.MAL_LOCALIZADO: "NO_DECIDIBLE_EN_EVALUACION",
+    planner_mod.FALTA_DATO: "NO_DECIDIBLE_EN_EVALUACION",
 }
 
 #: La causa de un NO_EVALUADO, en palabras. Las tres primeras son resultados
@@ -2293,6 +2313,9 @@ _CAUSE_OF = {
     planner_mod.FALTA_RECORRER: "falta recorrer",
     planner_mod.FUERA_DE_ALCANCE: "fuera de alcance: rol del docente",
     planner_mod.MAL_LOCALIZADO: "mal localizado",
+    # No es una falla del evaluador ni de la plataforma: es un dato que el
+    # dueño de la evaluación todavía no declaró. Se arregla en el config.
+    planner_mod.FALTA_DATO: "falta dato localizado verificado",
 }
 _BUG_CAUSES = frozenset({
     "falta recorrer", "ejecución fallida", "sin redactar", "sin ejecutar",
@@ -2310,6 +2333,16 @@ def _with_localization_note(verdict: Any, criterion: dict | None) -> Any:
     de la justificación (ver `_causes_of`).
     """
     if not criterion:
+        return verdict
+    if criterion.get("alcanceCompartido"):
+        # Un criterio compartido con el docente se juzgó por la mitad de la
+        # plataforma (ver usage.shared_note): el informe lo dice al lado del
+        # veredicto, para que un CUMPLE no se lea como "hace todo".
+        verdict = replace(verdict, rationale=str(verdict.rationale) + (
+            " [Rol compartido con el docente según el modelo de uso declarado: se "
+            "juzgó sólo la parte de la plataforma.]"
+        ))
+    if not criterion.get("localizado"):
         return verdict
     facts = planner_mod._facts_text(criterion.get("localizado") or [])
     original = "; ".join(
