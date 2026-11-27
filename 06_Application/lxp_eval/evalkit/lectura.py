@@ -588,7 +588,10 @@ def set_hash(hashes: Iterable[str]) -> str:
     return _sha(sorted(str(h) for h in hashes))
 
 
-def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[str, dict]:
+def freeze(
+    readings: dict[str, dict], tests: Iterable[CriterionTest],
+    *, artifacts: dict[str, list[str]] | None = None,
+) -> dict[str, dict]:
     """Lo que queda en el plan aprobado: por criterio, la lectura congelada con sus huellas.
 
     Sólo se congela una lectura que se puede congelar (ver `freezable`): dos
@@ -596,17 +599,22 @@ def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[st
     igual, con `lectura: None` y el motivo: así quien puntúa sabe que el
     contrato estaba encendido y que ese criterio quedó sin lectura decidida, y
     no la reemplaza por una generada en el momento.
+
+    `artifacts` es criterio -> tipos de evidencia que piden sus pruebas TAL
+    COMO SE APROBARON. Manda sobre lo que la lectura traía de la redacción:
+    una persona puede cambiar qué guarda una prueba al aprobar, y la compuerta
+    tiene que pedir lo aprobado.
     """
     by_id = {t.id: t for t in tests}
     out: dict[str, dict] = {}
     for cid, entry in (readings or {}).items():
-        artifacts = [str(a) for a in (entry.get("artefactos_requeridos") or DEFAULT_ARTIFACTS)]
+        needs = (artifacts or {}).get(cid) or entry.get("artefactos_requeridos") or DEFAULT_ARTIFACTS
         frozen = {
             "version": SCHEMA_VERSION,
             "estado": entry.get("estado"),
             "lectura": None,
             "motivo": review_note(entry) or str(entry.get("motivo") or ""),
-            "artefactos_requeridos": artifacts,
+            "artefactos_requeridos": [str(a) for a in needs],
             "superficies": copy.deepcopy(entry.get("superficies") or []),
             "hash_recon": str(entry.get("hash_recon") or recon_hash(entry.get("superficies") or [])),
         }
@@ -625,7 +633,7 @@ def freeze(readings: dict[str, dict], tests: Iterable[CriterionTest]) -> dict[st
             frozen.update({
                 "lectura": reading,
                 "hash_lectura": reading_hash(reading),
-                "hash_observable": observable_hash(test, reading, artifacts),
+                "hash_observable": observable_hash(test, reading, frozen["artefactos_requeridos"]),
                 "vaguedad": copy.deepcopy(entry.get("vaguedad")),
                 "editada_por": str(entry.get("editada_por") or ""),
                 "editada_en": str(entry.get("editada_en") or ""),

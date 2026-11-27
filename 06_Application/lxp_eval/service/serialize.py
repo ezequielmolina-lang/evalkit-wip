@@ -129,7 +129,25 @@ def with_frozen_readings(plan: dict, record: Any) -> dict:
     criteria = criteria_from_plan(
         plan.get("criteria") or criteria_out(record.criteria), record.objective
     )
-    plan["lecturas"] = lectura_mod.freeze(readings, criteria.all_tests())
+    # QUÉ EVIDENCIA PIDE CADA CRITERIO, según las pruebas TAL COMO SE APRUEBAN.
+    # Quien aprueba puede cambiar qué guarda una prueba (`capture`); lo que
+    # corre es lo editado, o lo guardado si no se tocó (igual que
+    # `probe_from_plan`). Si la compuerta pidiera lo que se había redactado,
+    # una prueba que guardó justo lo aprobado quedaría sin juzgar.
+    edited = {
+        e.get("probeId"): e for e in (plan.get("probes") or [])
+        if isinstance(e, dict) and e.get("probeId")
+    }
+    approved: dict[str, list] = {}
+    for stored in getattr(record, "probes", None) or []:
+        change = edited.get(stored.get("probeId")) or {}
+        approved.setdefault(stored.get("criterionId"), []).append(
+            {"capture": change.get("capture") or stored.get("capture")}
+        )
+    plan["lecturas"] = lectura_mod.freeze(
+        readings, criteria.all_tests(),
+        artifacts={cid: lectura_mod.required_artifacts(own) for cid, own in approved.items()},
+    )
     plan["esquema"] = PLAN_SCHEMA
     return plan
 

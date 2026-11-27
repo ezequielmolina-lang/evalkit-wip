@@ -54,7 +54,7 @@ from ..evalkit import runner as runner_mod
 from ..evalkit import scoring as scoring_mod
 from ..evalkit import usage as usage_mod
 from ..evalkit.framework import Document
-from ..evalkit.ledger import EvidenceLedger, rows_since
+from ..evalkit.ledger import EVIDENCE_KINDS, EvidenceLedger, rows_since
 from ..evalkit.errors import EvalkitError
 from ..evalkit.pricing import MeteredClient
 from ..evalkit.session import Credentials, SessionExpired
@@ -2142,6 +2142,22 @@ class JobRunner:
                         ), record.retried),
                         client,
                         sources=reading_sources,
+                        # SIN DEDUPLICAR, sólo para la compuerta por tipo. El
+                        # acceso del juez (`for_platform_test`) saca las filas
+                        # cuyo contenido es byte a byte igual al de otra fila
+                        # del mismo criterio, sin mirar de qué prueba son: a
+                        # una celda que guardó la misma pantalla que otra le
+                        # desaparecen. La compuerta pregunta si la prueba
+                        # GUARDÓ el tipo, y eso se contesta con lo que guardó.
+                        saved=_attempt_rows(rows_since(
+                            [
+                                r for r in ledger.read_all()
+                                if r.get("test_id") == test.id
+                                and r.get("platform") == record.platform
+                                and r.get("kind") in EVIDENCE_KINDS
+                            ],
+                            record.approved_at,
+                        ), record.retried),
                     ))
                     continue
                 if test.id in cut_short:
@@ -2305,7 +2321,7 @@ class JobRunner:
 
     async def _score_cells(
         self, record: JobRecord, test: Any, cells: list, rows: list[dict], client: Any,
-        *, sources: dict | None = None,
+        *, sources: dict | None = None, saved: list[dict] | None = None,
     ) -> Any:
         """El veredicto de UN criterio a partir de sus celdas: "en x de n".
 
@@ -2409,9 +2425,10 @@ class JobRunner:
             # sin su tipo no se le manda al juez para que adivine; si no lo
             # guardó ninguna, el criterio no se juzga.
             needs = (frozen.get(test.id) or {}).get("artefactos_requeridos") or []
+            kept = saved if saved is not None else rows
             for p in to_judge:
                 gone = lectura_mod.missing_artifacts(
-                    needs, [r for r in rows if r.get("probe_id") == p.probe_id]
+                    needs, [r for r in kept if r.get("probe_id") == p.probe_id]
                 )
                 if gone:
                     lacking[p.probe_id] = gone
@@ -2531,8 +2548,11 @@ class JobRunner:
             # se contesta por celda y las demás quedan como "sin evidencia
             # suficiente", que es lo que son. Y el veredicto conjunto dice que
             # lo es, porque no es "en x de n".
+            # Sin las pruebas que la compuerta por tipo dejó afuera: lo que no
+            # se le mandó al juez prueba por prueba tampoco entra por acá.
+            sent = [p for p in to_judge if p.probe_id not in lacking]
             together = [
-                r for p in to_judge for r in rows if r.get("probe_id") == p.probe_id
+                r for p in sent for r in rows if r.get("probe_id") == p.probe_id
             ]
             # El texto de las páginas, no las capturas: seis pruebas son decenas
             # de imágenes, y lo que se compara entre contenidos está en el texto.
@@ -2540,10 +2560,10 @@ class JobRunner:
             # que sólo tiene capturas sería juzgar "el conjunto" sin ella.
             text_only = [r for r in together if r.get("kind") == runner_mod.PAGE_TEXT]
             with_text = {r.get("probe_id") for r in text_only}
-            on_text = bool(text_only) and all(p.probe_id in with_text for p in to_judge)
+            on_text = bool(text_only) and all(p.probe_id in with_text for p in sent)
             pooled_rows = text_only if on_text else together
             said = "\n".join(x for x in (reading, (
-                f"JUICIO CONJUNTO. Ninguna de las {len(to_judge)} pruebas de este "
+                f"JUICIO CONJUNTO. Ninguna de las {len(sent)} pruebas de este "
                 "criterio alcanzó sola para decidir. Abajo está la evidencia de "
                 "TODAS juntas (cada artefacto dice de qué prueba es en su ruta). "
                 "Si la regla habla de una muestra, de un conjunto o de comparar "
@@ -2556,7 +2576,7 @@ class JobRunner:
                 platform=record.platform, repeats=1, model=self.engine.model,
                 reading=said,
             )
-            gap = absent(pooled.status, len(to_judge)) if pooled.status in scoring_mod.SCORED else None
+            gap = absent(pooled.status, len(sent)) if pooled.status in scoring_mod.SCORED else None
             if gap:
                 return unscored(
                     "ausencia sin cobertura",
@@ -2569,7 +2589,7 @@ class JobRunner:
                     points_earned=pooled.points_earned,
                     points_possible=pooled.points_possible,
                     rationale=(
-                        f"JUICIO CONJUNTO de {len(to_judge)} prueba(s): ninguna "
+                        f"JUICIO CONJUNTO de {len(sent)} prueba(s): ninguna "
                         "alcanzaba sola para decidir y se juzgaron juntas, una "
                         "vez"
                         + (", sobre el texto guardado de sus páginas" if on_text else "")

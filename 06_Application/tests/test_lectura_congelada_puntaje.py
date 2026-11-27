@@ -557,3 +557,101 @@ def test_the_coverage_is_reported_with_the_contract_off_too(tmp_path, env):  # n
     assert cobertura["con_prueba"] == len(_probados(record)) == cobertura["con_veredicto"]
     assert cobertura["sin_puntuar"] == 0 and cobertura["por_la_lectura"] == 0
     assert cobertura["sin_puntuar_por_causa"] == {}
+
+
+# --- lo que encontró la revisión de la tarea 6 --------------------------------
+
+
+def test_the_required_evidence_follows_what_was_approved_not_what_was_drafted(tmp_path, env):  # noqa: F811
+    """Si al aprobar una prueba pasa a guardar sólo capturas, la compuerta pide sólo capturas.
+
+    El campo se calculaba al redactar. Una persona que cambia `capture` al
+    aprobar hacía que cada prueba guardara justo lo aprobado y aun así el
+    criterio saliera "falta el tipo de evidencia", contado como falla nuestra.
+    """
+    from lxp_eval.service import serialize
+
+    store, engine, job_id, _, _ = _armar(tmp_path)
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    editadas = [
+        {**p, "capture": ["screenshot"]} if p["criterionId"] == cid else dict(p)
+        for p in record.probes
+    ]
+    plan = serialize.with_frozen_readings(
+        {"criteria": serialize.criteria_out(record.criteria), "probes": editadas, "sampling": {}}, record,
+    )
+
+    assert plan["lecturas"][cid]["artefactos_requeridos"] == ["screenshot"]
+    otro = next((c for c in _probados(record) if c != cid), None)
+    if otro:
+        assert plan["lecturas"][otro]["artefactos_requeridos"] == ["page_text", "screenshot"]
+    criterios = serialize.criteria_from_plan(plan["criteria"], record.objective)
+    test = next(t for t in criterios.all_tests() if t.id == cid)
+    assert plan["lecturas"][cid]["hash_observable"] == lec.observable_hash(
+        test, plan["lecturas"][cid]["lectura"], ["screenshot"]
+    ), "y la huella se calcula con lo aprobado"
+
+
+def test_a_probe_the_gate_left_out_does_not_reach_the_judge_through_the_joint_judgment(tmp_path, env, monkeypatch):  # noqa: F811
+    """Lo que la compuerta no mandó prueba por prueba tampoco entra cuando se juzgan todas juntas."""
+    vistos: list[set] = []
+    conjuntos: list[str] = []
+
+    def score(test, rows, client, *, platform=None, reading="", **kw):
+        vistos.append({r.get("probe_id") for r in rows})
+        if "JUICIO CONJUNTO" in reading:
+            conjuntos.append(test.id)
+        return scoring.TestVerdict(
+            test_id=test.id, platform=platform or "", status=scoring.NO_EVALUADO,
+            points_earned=0.0, points_possible=0.0, rationale="no alcanza",
+            evidence=[], runs=[scoring.NO_EVALUADO],
+        )
+
+    lector = _Lector()
+    store, engine, job_id = _plan(
+        tmp_path, frozen_readings=True, read_rule=lector, score_test=score,
+        compare_readings=lambda *a, **k: {"equivalentes": True, "diferencias": ""},
+        check_verdicts=lambda *a, **k: {"ok": True, "motivo": ""},
+    )
+    record = _generar(store, engine, job_id)
+    cid = _probados(record)[0]
+    del_criterio = [p["probeId"] for p in record.probes if p["criterionId"] == cid]
+    if len(del_criterio) < 3:
+        pytest.skip("este plan de prueba no tiene tres pruebas por criterio")
+    afuera = del_criterio[0]
+
+    real = lec.missing_artifacts
+
+    def falta(required, rows):
+        rows = list(rows)
+        if rows and all(r.get("probe_id") == afuera for r in rows):
+            return ["page_text"]
+        return real(required, rows)
+
+    monkeypatch.setattr(lec, "missing_artifacts", falta)
+    _aprobar(store, job_id)
+    record = _puntuar(store, engine, job_id)
+
+    assert cid in conjuntos, "hubo un juicio conjunto de este criterio"
+    assert not any(afuera in pruebas for pruebas in vistos), \
+        "la evidencia de la prueba sin su tipo no llegó al juez, ni sola ni en el conjunto"
+    fila = _fila(store, job_id, cid)
+    assert "no se le mandó al juez" in fila["rationale"], "y el informe dice cuál quedó afuera y por qué"
+
+
+def test_the_gate_asks_what_the_probe_saved_not_what_survived_deduplication(tmp_path, env):  # noqa: F811
+    """Dos celdas que guardaron la misma pantalla: a la segunda no se le dice "no guardó".
+
+    El acceso del juez saca del ledger las filas cuyo contenido es idéntico al
+    de otra fila del mismo criterio. La compuerta por tipo no puede mirar eso:
+    diría que una prueba no guardó la evidencia que sí guardó.
+    """
+    store, engine, job_id, lector, _ = _armar(tmp_path)
+    _generar(store, engine, job_id)
+    _aprobar(store, job_id)
+    lector.permitido = False
+    record = _puntuar(store, engine, job_id)
+
+    for cid in _probados(record):
+        assert "no guardó la evidencia de tipo" not in _fila(store, job_id, cid)["rationale"]
